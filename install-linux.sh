@@ -8,7 +8,7 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 case "$(uname -m)" in
     x86_64|amd64) ;;
-    *) echo 'desk-agent Linux packages currently support x86_64 only.' >&2; exit 1 ;;
+    *) echo 'DeskCode Linux packages currently support x86_64 only.' >&2; exit 1 ;;
 esac
 
 download() {
@@ -23,5 +23,5 @@ download() {
 command -v tar >/dev/null 2>&1 || { echo 'Install tar first.' >&2; exit 1; }
 download "$asset" "$tmp/desk-agent.tar.gz"
 tar -xzf "$tmp/desk-agent.tar.gz" -C "$tmp"
-[ -f "$tmp/desk-agent-linux-x64/install.sh" ] || { echo 'Invalid desk-agent package.' >&2; exit 1; }
+[ -f "$tmp/desk-agent-linux-x64/install.sh" ] || { echo 'Invalid DeskCode package.' >&2; exit 1; }
 sh "$tmp/desk-agent-linux-x64/install.sh" --setup-path

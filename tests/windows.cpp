@@ -99,7 +99,7 @@ static void test_commands(){
     Fixture fixture;App &app=fixture.app;
     JsonPtr result(run_command(&app,"Write-Output '你好'; [Console]::Error.WriteLine('stderr'); exit 7",10000));CHECK(iget(result.get(),"exit_code",0)==7);CHECK(strstr(sget(result.get(),"output"),"你好"));CHECK(strstr(sget(result.get(),"output"),"stderr"));
     environment(L"DESK_LEAK_KEY","secret-never-in-child");result.reset(run_command(&app,"if(Test-Path Env:DESK_LEAK_KEY){exit 9}; Write-Output 'filtered'",10000));CHECK(iget(result.get(),"exit_code",-1)==0);CHECK(strstr(sget(result.get(),"output"),"filtered"));environment(L"DESK_LEAK_KEY","");
-    result.reset(run_command(&app,"Write-Output ('x' * 20000)",10000));CHECK(bget(result.get(),"truncated"));CHECK(json_object_get_string_len(get(result.get(),"output"))==16000);
+    result.reset(run_command(&app,"Write-Output ('x' * 20000)",10000));CHECK(!bget(result.get(),"truncated"));CHECK(json_object_get_string_len(get(result.get(),"output"))>=20000);
     result.reset(run_command(&app,"Start-Sleep -Seconds 10",200));CHECK(bget(result.get(),"timed_out"));
     std::jthread stop([]{Sleep(200);interrupted=SIGINT;});result.reset(run_command(&app,"Start-Sleep -Seconds 30",10000));stop.join();CHECK(get(result.get(),"error"));CHECK(interrupted==SIGINT);interrupted=0;
     result.reset(run_command(&app,"$p=Start-Process -FilePath ($PSHOME+'\\powershell.exe') -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru; Set-Content -Path child.pid -Value $p.Id; exit 0",10000));CHECK(iget(result.get(),"exit_code",-1)==0);

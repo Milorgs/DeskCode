@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#include <algorithm>
 #include <readline/readline.h>
 char *read_bytes(const char *path,size_t limit,size_t *length){
     int fd=open(path,O_RDONLY|O_NOFOLLOW);
@@ -111,16 +112,52 @@ struct TranscriptViewport {
     std::vector<std::string> lines;
     size_t top=0;
     bool following=true;
+    bool dragging=false;
+    int drag_offset=0;
+    size_t drag_start_top=0;
+    int drag_start_row=0;
+
+    int text_columns() const {
+        return columns>=24?columns-3:std::max(1,columns);
+    }
+
+    size_t height() const {
+        return last>=first?static_cast<size_t>(last-first+1):0;
+    }
+
+    size_t total() const {
+        return lines.size()+!activity.empty();
+    }
 
     size_t tail() const {
-        const auto height=static_cast<size_t>(last-first+1);
-        const size_t count=lines.size()+!activity.empty();
-        return count>height?count-height:0;
+        const size_t h=height(),count=total();
+        return count>h?count-h:0;
+    }
+
+    bool has_scrollbar() const {
+        return last>=first&&columns>=24&&tail()>0;
+    }
+
+    // Proportional thumb {offset, length} within 0..height()-1. When scrolled
+    // strictly between top and bottom on a tall enough track, keep a one-cell
+    // gap at each end so the user can always tell they are not at an extreme.
+    std::pair<size_t,size_t> scrollbar_thumb() const {
+        const size_t h=height(),count=total(),max_top=tail();
+        if(!h||!max_top)return {0,h};
+        const size_t len=std::clamp((h*h+count/2)/count,size_t{1},h>1?h-1:size_t{1});
+        const size_t travel=h-len;
+        if(!travel||!top)return {0,len};
+        if(top>=max_top)return {travel,len};
+        size_t pos=(top*travel+max_top/2)/max_top;
+        if(travel>=3)pos=std::clamp(pos,size_t{1},travel-1);
+        return {pos,len};
     }
 
     void append_rows(std::string_view text){
+        const int limit=text_columns();
         std::string row,style;
-        int cells=0;
+        int cells=0,indent=0;
+        bool leading=true;
         for(size_t i=0;i<text.size();){
             auto c=static_cast<unsigned char>(text[i]);
             if(c==0x1b&&i+1<text.size()&&text[i+1]=='['){
@@ -130,7 +167,7 @@ struct TranscriptViewport {
                 if(i<text.size()&&text[i++]=='m'){
                     auto sgr=text.substr(start,i-start);
                     row+=sgr;
-                    if(sgr=="\033[0m")style.clear();
+                    if(sgr=="\033[0m"||sgr=="\033[m")style.clear();
                     else style+=sgr;
                 }
                 continue;
@@ -139,24 +176,34 @@ struct TranscriptViewport {
                 lines.push_back(std::move(row));
                 row=style;
                 cells=0;
+                indent=0;
+                leading=true;
                 i++;
                 continue;
             }
             if(c=='\t'){
-                int count=std::min(8-cells%8,columns-cells);
+                leading=false;
+                int count=std::min(8-cells%8,limit-cells);
                 row.append(count,' ');
                 cells+=count;
                 i++;
                 continue;
             }
             if(c<32||c==127){i++;continue;}
-            size_t size=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+            if(leading&&c==' '&&indent<4&&indent+8<limit)indent++;
+            else leading=false;
+            size_t size=c<0x80?1:c<0xe0?2:c<0xf0?3:c<0xf8?4:1;
+            size=std::min(size,text.size()-i);
             auto glyph=text.substr(i,size);
             int width=ui_width(glyph);
-            if(cells+width>columns){
+            if(cells+width>limit){
                 lines.push_back(std::move(row));
                 row=style;
                 cells=0;
+                if(indent>0&&indent+width<limit){
+                    row.append(static_cast<size_t>(indent),' ');
+                    cells=indent;
+                }
             }
             row+=glyph;
             cells+=width;
@@ -164,19 +211,39 @@ struct TranscriptViewport {
         }
     }
 
-    void draw_row(int row) const {
+    void draw_scrollbar_cell(int row,std::pair<size_t,size_t> thumb) const {
+        const size_t slot=static_cast<size_t>(row-first);
+        const bool in_thumb=slot>=thumb.first&&slot<thumb.first+thumb.second;
+        printf("\033[%d;%dH",row,columns-1);
+        if(in_thumb)fputs(ui_paint(following?Tone::Dim:Tone::Accent,"┃").c_str(),stdout);
+        else fputs(ui_paint(Tone::Rule,"│").c_str(),stdout);
+    }
+
+    void draw_scrollbar() const {
+        if(!has_scrollbar())return;
+        const auto thumb=scrollbar_thumb();
+        fputs("\0337",stdout);
+        for(int row=first;row<=last;row++)draw_scrollbar_cell(row,thumb);
+        fputs("\0338",stdout);
+        fflush(stdout);
+    }
+
+    void draw_row(int row,bool bar,std::pair<size_t,size_t> thumb) const {
         printf("\033[%d;1H\033[2K",row);
         size_t i=top+static_cast<size_t>(row-first);
         if(i<lines.size())fputs(lines[i].c_str(),stdout);
         else if(i==lines.size()&&!activity.empty())
-            fputs(ui_paint(Tone::Accent,ui_clip("  "+activity,columns)).c_str(),stdout);
+            fputs(ui_paint(Tone::Accent,ui_clip("  "+activity,text_columns())).c_str(),stdout);
         fputs("\033[0m",stdout);
+        if(bar)draw_scrollbar_cell(row,thumb);
     }
 
     void draw() const {
         if(last==0)return;
+        const bool bar=has_scrollbar();
+        const auto thumb=bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0};
         fputs("\0337",stdout);
-        for(int row=first;row<=last;row++)draw_row(row);
+        for(int row=first;row<=last;row++)draw_row(row,bar,thumb);
         fputs("\0338",stdout);
         fflush(stdout);
     }
@@ -192,8 +259,9 @@ struct TranscriptViewport {
         }
         const size_t offset=lines.size()-top;
         if(offset>static_cast<size_t>(last-first))return;
+        const bool bar=has_scrollbar();
         fputs("\0337",stdout);
-        draw_row(first+static_cast<int>(offset));
+        draw_row(first+static_cast<int>(offset),bar,bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0});
         fputs("\0338",stdout);
         fflush(stdout);
     }
@@ -204,6 +272,33 @@ struct TranscriptViewport {
                           :std::min(tail(),top+static_cast<size_t>(rows));
         following=next==tail();
         if(next!=top){top=next;draw();}
+    }
+
+    bool scroll_mouse_at(int row,int col,int button,bool release){
+        if(release){bool handled=dragging;dragging=false;return handled;}
+        if(!has_scrollbar()){dragging=false;return false;}
+        const auto [position,length]=scrollbar_thumb();
+        if(button==0){
+            if(col<columns-2||col>columns||row<first||row>last)return false;
+            dragging=true;
+            const int slot=row-first;
+            if(slot>=static_cast<int>(position)&&slot<static_cast<int>(position+length)){
+                drag_offset=slot-static_cast<int>(position);
+                drag_start_top=top;
+                drag_start_row=row;
+                return true;
+            }
+            drag_offset=static_cast<int>(length/2);
+        }else if(button!=32||!dragging)return false;
+        const size_t travel=height()-length;
+        if(!travel)return true;
+        const int slot=std::clamp(row-first-drag_offset,0,static_cast<int>(travel));
+        size_t next=static_cast<size_t>(slot)*tail()/travel;
+        if(button==32&&row==drag_start_row)next=std::min(drag_start_top,tail());
+        following=next==tail();
+        if(next!=top){top=next;draw();}
+        if(button==0){drag_start_top=top;drag_start_row=row;}
+        return true;
     }
 };
 static TranscriptViewport transcript_view;
@@ -226,15 +321,25 @@ int choose_chat_reasoning(int,int){
 int unbound_scroll_key(int,int){return rl_ding();}
 int scroll_up(int,int){transcript_view.scroll(-std::max(1,transcript_view.last-transcript_view.first));return 0;}
 int scroll_down(int,int){transcript_view.scroll(std::max(1,transcript_view.last-transcript_view.first));return 0;}
+int scroll_line_up(int,int){transcript_view.scroll(-1);return 0;}
+int scroll_line_down(int,int){transcript_view.scroll(1);return 0;}
+// In alternate-scroll mode the terminal turns each wheel step into one Up or
+// Down key, so a single line per key matches the wheel's own step size.
+int scroll_wheel_up(int,int){transcript_view.scroll(-1);return 0;}
+int scroll_wheel_down(int,int){transcript_view.scroll(1);return 0;}
+int scroll_top(int,int){transcript_view.scroll(-1000000);return 0;}
+int scroll_bottom(int,int){transcript_view.scroll(1000000);return 0;}
 int scroll_mouse(int,int){
     char report[32]{};
     for(size_t i=0;i<sizeof(report)-1;i++){
         int key=rl_read_key();
         if(key=='m'||key=='M'){
             int button=0,column=0,row=0;
-            if(key=='M'&&sscanf(report,"%d;%d;%d",&button,&column,&row)==3){
-                if((button&~28)==64)transcript_view.scroll(-3);
-                if((button&~28)==65)transcript_view.scroll(3);
+            if(sscanf(report,"%d;%d;%d",&button,&column,&row)==3){
+                const int code=button&~28;
+                if(key=='M'&&code==64)transcript_view.scroll(-1);
+                else if(key=='M'&&code==65)transcript_view.scroll(1);
+                else transcript_view.scroll_mouse_at(row,column,code,key=='m');
             }
             break;
         }
@@ -269,16 +374,37 @@ struct EditorSession {
             return true;
         };
         bind("\033[5~",scroll_up);
+        bind("\033[5;2~",scroll_up);
         bind("\033[6~",scroll_down);
+        bind("\033[6;2~",scroll_down);
+        bind("\033[1;5A",scroll_line_up);
+        bind("\033[1;5B",scroll_line_down);
+        bind("\033[1;5H",scroll_top);
+        bind("\033[1;5F",scroll_bottom);
+        // The chat input is one line without history, so Up/Down are free to
+        // scroll the transcript, including terminals that translate wheel events
+        // into arrow keys through alternate-scroll mode.
+        bind("\033[A",scroll_wheel_up);
+        bind("\033[B",scroll_wheel_down);
+        bind("\033OA",scroll_wheel_up);
+        bind("\033OB",scroll_wheel_down);
+        // Ensure alternate-scroll mode is active on the alternate screen; do not
+        // use XTSAVE/XTRESTORE (?1007s/?1007r) because Konsole saves the unset VT
+        // bit even when profile AlternateScrolling is enabled, turning it off on
+        // restore. Mode 1007 only affects the alternate screen anyway.
+        fputs("\033[?1007h",stdout);
+        fflush(stdout);
+
         mouse_reporting=bind("\033[<",scroll_mouse);
         if(mouse_reporting){
-            fputs("\033[?1000h\033[?1006h",stdout);
+            fputs("\033[?1000h\033[?1002h\033[?1006h",stdout);
             fflush(stdout);
         }
     }
     ~EditorSession(){
+        transcript_view.dragging=false;
         if(mouse_reporting){
-            fputs("\033[?1006l\033[?1000l",stdout);
+            fputs("\033[?1006l\033[?1002l\033[?1000l",stdout);
             fflush(stdout);
         }
         // Keep Readline's existing bindings. Use its usual bell for formerly
@@ -293,6 +419,18 @@ struct EditorSession {
 };
 }
 void reset_transcript(){transcript_view={};}
+void scroll_transcript(int rows){transcript_view.scroll(rows);}
+void scroll_transcript_page(int direction){
+    transcript_view.scroll(direction*std::max(1,transcript_view.last-transcript_view.first));
+}
+bool scroll_transcript_mouse(int row,int col,int button,bool release){return transcript_view.scroll_mouse_at(row,col,button,release);}
+void scroll_transcript_bottom(){transcript_view.scroll(INT_MAX);}
+bool transcript_scrollable(){return transcript_view.last!=0;}
+size_t transcript_hidden_lines(){
+    if(!transcript_view.last||transcript_view.following)return 0;
+    const size_t bottom=transcript_view.tail();
+    return bottom>transcript_view.top?bottom-transcript_view.top:0;
+}
 void set_composer_layout(int input_row,int transcript_row,int first_row){
     auto &view=transcript_view;
     view.first=first_row;
@@ -318,6 +456,7 @@ void terminal_message(const std::string &text){
         view.transcript+=body;
         view.append_rows(body);
         if(view.following){view.top=view.tail();view.draw();}
+        else view.draw_scrollbar();
         return;
     }
     if(!editor||!editor->installed){fwrite(text.data(),1,text.size(),stdout);fflush(stdout);return;}
@@ -387,6 +526,8 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
             if(!ioctl(STDOUT_FILENO,TIOCGWINSZ,&current)&&(current.ws_col!=previous.ws_col||current.ws_row!=previous.ws_row)){
                 previous=current;
                 fputs("\r\033[2K",stdout);
+                if(idle)idle();
+                if(transcript_view.last&&current.ws_row>=8)printf("\033[%d;1H\033[2K",current.ws_row-2);
                 rl_on_new_line();
                 rl_set_screen_size(current.ws_row,current.ws_col);
                 rl_forced_update_display();

@@ -1,12 +1,14 @@
 #include "desk.hpp"
 #include "mcp.hpp"
 #include "tasks.hpp"
+#include "ui.hpp"
 #include <openssl/evp.h>
 #include <sys/stat.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 #include <cctype>
 #include <errno.h>
 char *sha256(const void *data,size_t len){
@@ -59,45 +61,166 @@ int resolve_file(App *a,const char *path,char out[PATH_MAX]){
 static bool utf8_text(const char *bytes,size_t n){
     return !memchr(bytes,0,n)&&valid_utf8(std::string_view(bytes,n));
 }
-static J *file_read(App *a,const char *path){
+static bool search_skip(const char *name);
+static J *file_read(App *a,const char *path,J *args=nullptr){
     char full[PATH_MAX];
     if(resolve_file(a,path,full))return err(a->error);
+    J *start_obj=args?get(args,"start_line"):nullptr;
+    J *end_obj=args?get(args,"end_line"):nullptr;
+    std::error_code status_ec;
+    auto st=fs::symlink_status(fs_path(full),status_ec);
+    if(!status_ec){
+        if(!fs::exists(st))return err(tr("文件不存在，请先用 list_files 或 search_text 确认路径。"));
+        if(fs::is_directory(st))return err(tr("目标是文件夹，请改用 list_files 查看目录内容。"));
+        if(!start_obj&&!end_obj&&fs::is_regular_file(st)){
+            auto fsize=fs::file_size(fs_path(full),status_ec);
+            if(!status_ec&&fsize>FILE_LIMIT){
+                char msg[256];
+                snprintf(msg,sizeof msg,tr("文件大小为 %llu 字节，超过 256 KB 限制；请传入 start_line 和 end_line 分段读取（最大 16 MB）。"),static_cast<unsigned long long>(fsize));
+                J *oversized=err(msg);
+                put(oversized,"size",json_object_new_int64(static_cast<int64_t>(fsize)));
+                return oversized;
+            }
+        }
+    }
+    if(!start_obj&&!end_obj){
+        size_t n=0;
+        char *bytes=read_bytes(full,FILE_LIMIT,&n);
+        if(!bytes)return err(tr("无法读取文件，文件可能不是普通文件或超过 256 KB。"));
+        if(!utf8_text(bytes,n)){
+            free(bytes);
+            return err(tr("只支持 UTF-8 文本文件。"));
+        }
+        char *hash=sha256(bytes,n);
+        J *result=obj();
+        put(result,"content",json_object_new_string_len(bytes,(int)n));
+        put(result,"sha256",str(hash));
+        free(hash);
+        free(bytes);
+        return result;
+    }
+    int64_t start_line=start_obj?json_object_get_int64(start_obj):1;
+    int64_t end_line=end_obj?json_object_get_int64(end_obj):INT64_MAX;
+    if(start_line<1||end_line<start_line){
+        return err(tr("行号范围无效：start_line 和 end_line 须为正整数，且 start_line 不大于 end_line。"));
+    }
     size_t n=0;
-    char *bytes=read_bytes(full,FILE_LIMIT,&n);
-    if(!bytes)return err(tr("无法读取文件，文件可能不是普通文件或超过 256 KB。"));
+    char *bytes=read_bytes(full,SLICED_FILE_LIMIT,&n);
+    if(!bytes)return err(tr("无法读取文件，文件可能不是普通文件或超过 16 MB。"));
     if(!utf8_text(bytes,n)){
         free(bytes);
         return err(tr("只支持 UTF-8 文本文件。"));
     }
-    char *hash=sha256(bytes,n);
+    size_t total_lines=0,slice_begin=n,slice_end=n;
+    int64_t actual_end=0;
+    for(size_t pos=0;pos<n;){
+        total_lines++;
+        const int64_t current=static_cast<int64_t>(total_lines);
+        const char *nl=static_cast<const char *>(memchr(bytes+pos,'\n',n-pos));
+        const size_t next=nl?static_cast<size_t>(nl-bytes)+1:n;
+        if(current>=start_line&&current<=end_line){
+            if(slice_begin==n)slice_begin=pos;
+            slice_end=next;
+            actual_end=current;
+        }
+        pos=next;
+    }
+    const size_t slice_len=slice_begin<n?slice_end-slice_begin:0;
+    if(slice_len>FILE_LIMIT){
+        free(bytes);
+        return err(tr("所选行范围的内容超过 256 KB，请缩小 start_line..end_line 范围。"));
+    }
     J *result=obj();
-    put(result,"content",json_object_new_string_len(bytes,(int)n));
-    put(result,"sha256",str(hash));
-    free(hash);
+    put(result,"content",json_object_new_string_len(slice_len?bytes+slice_begin:"",static_cast<int>(slice_len)));
+    put(result,"sliced",json_object_new_boolean(1));
+    put(result,"start_line",json_object_new_int64(start_line));
+    put(result,"end_line",json_object_new_int64(actual_end));
+    put(result,"total_lines",json_object_new_int64(static_cast<int64_t>(total_lines)));
+    if(n<=FILE_LIMIT){
+        char *hash=sha256(bytes,n);
+        put(result,"sha256",str(hash));
+        free(hash);
+    }
     free(bytes);
     return result;
 }
-static J *file_list(App *a,const char *path){
+static J *file_list(App *a,const char *path,J *args=nullptr){
     char full[PATH_MAX];
     if(resolve_file(a,path,full))return err(a->error);
-    std::error_code ec;fs::directory_iterator directory(fs_path(full),ec);
-    if(ec)return err(tr("无法读取文件夹。"));
-    J *result=obj(),*entries=arr();
-    for(auto it=directory;it!=fs::directory_iterator{}&&alen(entries)<200;it.increment(ec)){
-        if(ec)break;
-        std::string child=path_text(it->path());char resolved[PATH_MAX];
-        if(resolve_file(a,child.c_str(),resolved))continue;
-        J *e=obj();put(e,"name",str(path_text(it->path().filename()).c_str()));
-        put(e,"directory",json_object_new_boolean(it->is_directory(ec)));
-        put(e,"symlink",json_object_new_boolean(path_link(it->path())));add(entries,e);
+    int max_depth=1;
+    if(args&&get(args,"max_depth")){
+        int64_t d=json_object_get_int64(get(args,"max_depth"));
+        if(d<1||d>4)return err(tr("max_depth 须为 1..4 的整数。"));
+        max_depth=static_cast<int>(d);
     }
-    put(result,"possibly_truncated",json_object_new_boolean(alen(entries)==200));
+    std::error_code ec;
+    fs::path base=fs_path(full);
+    if(!fs::is_directory(base,ec)||ec)return err(tr("无法读取文件夹。"));
+    struct ListedEntry {
+        std::string name;
+        bool directory=false,symlink=false;
+        bool has_size=false;
+        std::uint64_t size=0;
+    };
+    std::vector<ListedEntry> collected;
+    bool truncated=false;
+    auto walk=[&](auto &self,const fs::path &dir,int depth)->void{
+        std::error_code iter_ec;
+        fs::directory_iterator directory(dir,iter_ec);
+        if(iter_ec)return;
+        std::vector<fs::directory_entry> items;
+        for(auto it=directory;it!=fs::directory_iterator{};it.increment(iter_ec)){
+            if(iter_ec)break;
+            items.push_back(*it);
+        }
+        std::sort(items.begin(),items.end(),[](const fs::directory_entry &lhs,const fs::directory_entry &rhs){
+            std::error_code lec,rec;
+            const bool ldir=lhs.is_directory(lec)&&!path_link(lhs.path());
+            const bool rdir=rhs.is_directory(rec)&&!path_link(rhs.path());
+            if(ldir!=rdir)return ldir>rdir;
+            return path_text(lhs.path().filename())<path_text(rhs.path().filename());
+        });
+        for(const auto &item:items){
+            if(collected.size()>=200){truncated=true;return;}
+            std::string leaf=path_text(item.path().filename());
+            if(depth>1&&search_skip(leaf.c_str()))continue;
+            std::string child=path_text(item.path());
+            char resolved[PATH_MAX];
+            if(resolve_file(a,child.c_str(),resolved))continue;
+            std::error_code item_ec;
+            const bool link=path_link(item.path());
+            const bool is_dir=!link&&item.is_directory(item_ec);
+            std::string rel=max_depth==1?leaf:path_text(item.path().lexically_relative(base));
+            ListedEntry entry{std::move(rel),is_dir,link,false,0};
+            if(!link&&!is_dir&&item.is_regular_file(item_ec)){
+                auto bytes=item.file_size(item_ec);
+                if(!item_ec){entry.has_size=true;entry.size=bytes;}
+            }
+            collected.push_back(std::move(entry));
+            if(is_dir&&depth<max_depth){
+                self(self,item.path(),depth+1);
+                if(truncated)return;
+            }
+        }
+    };
+    walk(walk,base,1);
+    J *result=obj(),*entries=arr();
+    for(const auto &item:collected){
+        J *e=obj();
+        put(e,"name",str(item.name.c_str()));
+        put(e,"directory",json_object_new_boolean(item.directory));
+        put(e,"symlink",json_object_new_boolean(item.symlink));
+        if(item.has_size)put(e,"size",json_object_new_int64(static_cast<int64_t>(std::min<std::uint64_t>(item.size,INT64_MAX))));
+        add(entries,e);
+    }
+    put(result,"possibly_truncated",json_object_new_boolean(truncated));
     put(result,"entries",entries);
     return result;
 }
 struct Search {
     App *app;
     const char *query;
+    bool case_insensitive=false;
     J *matches;
     size_t entries=0,files=0,bytes=0,skipped=0;
     double until;
@@ -108,7 +231,7 @@ static bool search_limit(Search *s){
     return s->truncated;
 }
 static bool search_skip(const char *name){
-    return !strcmp(name,"node_modules")||!strcmp(name,"build")||!strcmp(name,"dist")||!strcmp(name,"target")||!strcmp(name,".venv")||!strcmp(name,"venv")||!strcmp(name,"__pycache__")||!strcmp(name,".cache");
+    return !strcmp(name,"node_modules")||!strcmp(name,"build")||!strcmp(name,"dist")||!strcmp(name,"target")||!strcmp(name,".venv")||!strcmp(name,"venv")||!strcmp(name,"__pycache__")||!strcmp(name,".cache")||!strcmp(name,"CMakeFiles")||!strcmp(name,".next")||!strcmp(name,"coverage");
 }
 static void search_walk(Search *s,const char *path,int depth){
     if(search_limit(s))return;
@@ -134,14 +257,20 @@ static void search_walk(Search *s,const char *path,int depth){
     if(!data){s->skipped++;return;}
     s->bytes+=n;
     if(!utf8_text(data,n)){s->skipped++;free(data);return;}
-    // Find each match in the whole buffer, then count the newlines skipped to
-    // reach it. Scanning per line with strstr re-read the rest of the file for
-    // every line, which made files without a match quadratic.
     const std::string_view query(s->query);
     char *const limit=data+n;
     size_t line=1;
     for(char *p=data;p<limit&&!search_limit(s);line++){
-        const size_t at=std::string_view(p,(size_t)(limit-p)).find(query);
+        size_t at=std::string_view::npos;
+        const std::string_view window(p,(size_t)(limit-p));
+        if(!s->case_insensitive){
+            at=window.find(query);
+        }else{
+            auto it=std::search(window.begin(),window.end(),query.begin(),query.end(),[](unsigned char lhs,unsigned char rhs){
+                return std::tolower(lhs)==std::tolower(rhs);
+            });
+            if(it!=window.end())at=static_cast<size_t>(it-window.begin());
+        }
         if(at==std::string_view::npos)break;
         char *found=p+at;
         for(char *nl;(nl=static_cast<char *>(memchr(p,'\n',(size_t)(found-p))));p=nl+1)line++;
@@ -179,7 +308,7 @@ static J *file_search(App *a,J *args){
     if(resolve_file(a,sget(args,"path"),full))return err(a->error);
     std::error_code ec;auto status=fs::status(fs_path(full),ec);
     if(ec||(!fs::is_directory(status)&&!fs::is_regular_file(status)))return err(tr("搜索路径须为存在的文件或目录。"));
-    Search s={.app=a,.query=query,.matches=arr(),.until=monotime()+5};
+    Search s={.app=a,.query=query,.case_insensitive=bget(args,"case_insensitive"),.matches=arr(),.until=monotime()+5};
     search_walk(&s,full,0);
     if(interrupted){json_object_put(s.matches);return err(tr("搜索已取消。"));}
     J *r=obj();
@@ -190,7 +319,62 @@ static J *file_search(App *a,J *args){
     if(s.truncated)put(r,"hint",str(tr("达到搜索预算；缩小 path 后继续，结果并非完整列表。")));
     return r;
 }
-static J *file_write(App *a,J *args,const char *preview){
+// A compact line diff for approval panels: common leading and trailing lines
+// are trimmed to two lines of context, the changed middle is shown as -/+.
+// Good enough to review an edit at a glance without a full LCS diff.
+namespace {
+std::vector<std::string_view> split_lines(std::string_view text){
+    std::vector<std::string_view> lines;
+    if(text.empty())return lines;
+    size_t start=0;
+    while(start<=text.size()){
+        auto end=text.find('\n',start);
+        auto line=text.substr(start,end==std::string_view::npos?std::string_view::npos:end-start);
+        if(!line.empty()&&line.back()=='\r')line.remove_suffix(1);
+        if(end==std::string_view::npos){if(!line.empty())lines.push_back(line);break;}
+        lines.push_back(line);
+        start=end+1;
+        if(start==text.size())break;
+    }
+    return lines;
+}
+std::string diff_preview(std::string_view before,std::string_view after,size_t first_line,size_t &added,size_t &removed){
+    const auto old_lines=split_lines(before),new_lines=split_lines(after);
+    size_t prefix=0;
+    while(prefix<old_lines.size()&&prefix<new_lines.size()&&old_lines[prefix]==new_lines[prefix])prefix++;
+    size_t suffix=0;
+    while(suffix<old_lines.size()-prefix&&suffix<new_lines.size()-prefix&&
+          old_lines[old_lines.size()-1-suffix]==new_lines[new_lines.size()-1-suffix])suffix++;
+    removed=old_lines.size()-prefix-suffix;
+    added=new_lines.size()-prefix-suffix;
+    constexpr size_t context=2,shown_limit=400;
+    const size_t context_start=prefix>context?prefix-context:0;
+    std::string out;
+    char header[96];
+    snprintf(header,sizeof header,tr("@@ 第 %zu 行 @@"),first_line+context_start);
+    out+=ui_paint(Tone::Accent,header);
+    size_t shown=0,hidden=0;
+    auto emit=[&](Tone tone,const char *mark,std::string_view text){
+        if(shown>=shown_limit){hidden++;return;}
+        out+='\n';
+        out+=ui_paint(tone,std::string(mark)+std::string(text));
+        shown++;
+    };
+    for(size_t i=context_start;i<prefix;i++)emit(Tone::Dim,"  ",old_lines[i]);
+    for(size_t i=prefix;i<old_lines.size()-suffix;i++)emit(Tone::Error,"- ",old_lines[i]);
+    for(size_t i=prefix;i<new_lines.size()-suffix;i++)emit(Tone::Success,"+ ",new_lines[i]);
+    const size_t tail_start=new_lines.size()-suffix;
+    for(size_t i=tail_start;i<std::min(new_lines.size(),tail_start+context);i++)emit(Tone::Dim,"  ",new_lines[i]);
+    if(hidden){
+        char note[96];
+        snprintf(note,sizeof note,tr("… 其余 %zu 行未显示"),hidden);
+        out+='\n';
+        out+=ui_paint(Tone::Dim,note);
+    }
+    return out;
+}
+}
+static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t edit_added=0,size_t edit_removed=0){
     const char *path=sget(args,"path"),*content=sget(args,"content");
     size_t n=strlen(content);
     if(n>FILE_LIMIT)return err(tr("文件超过 256 KB 限制。"));
@@ -212,12 +396,16 @@ static J *file_write(App *a,J *args,const char *preview){
         free(old);
         return err(tr("文件已变化，或覆盖前未读取，请重新读取文件。"));
     }
+    size_t added=edit_added,removed=edit_removed;
+    std::string diff;
+    if(edit_diff)diff=*edit_diff;
+    else diff=diff_preview(exists?std::string_view(old,old_len):std::string_view(),std::string_view(content,n),1,added,removed);
     char *description=NULL;
-    if(asprintf(&description,tr("%s %s（%zu 字节）\n%s"),preview?tr("修改"):tr("写入"),path,n,preview?preview:content)<0){
+    if(asprintf(&description,tr("%s %s（+%zu −%zu 行）\n%s"),edit_diff?tr("修改"):exists?tr("覆盖"):tr("新建"),path,added,removed,diff.c_str())<0){
         free(old);
         return err(tr("无法分配写入预览内存，原文件未修改。"));
     }
-    int allowed=approve(a,description,Operation::FileEdit,preview?tr("编辑文件"):tr("写入文件"));
+    int allowed=approve(a,description,Operation::FileEdit,edit_diff?tr("编辑文件"):tr("写入文件"));
     free(description);
     if(!allowed){
         free(old);
@@ -261,29 +449,80 @@ static J *file_write(App *a,J *args,const char *preview){
     put(result,"verified",json_object_new_boolean(1));
     return result;
 }
+static std::string to_crlf(std::string_view input){
+    std::string out;
+    out.reserve(input.size()+16);
+    for(size_t i=0;i<input.size();++i){
+        if(input[i]=='\n'&&(i==0||input[i-1]!='\r'))out+="\r\n";
+        else out+=input[i];
+    }
+    return out;
+}
+static std::vector<size_t> find_occurrences(std::string_view text,std::string_view needle){
+    std::vector<size_t> offsets;
+    if(needle.empty()||needle.size()>text.size())return offsets;
+    for(size_t pos=0;(pos=text.find(needle,pos))!=std::string_view::npos;pos+=1){
+        offsets.push_back(pos);
+        if(offsets.size()>=64)break;
+    }
+    return offsets;
+}
 static J *file_edit(App *a,J *args){
-    const char *before=sget(args,"old_text"),*after=sget(args,"new_text");
-    if(!*before||!strcmp(before,after))return err(tr("old_text 不能为空，且新旧文本须不同。"));
+    const char *before_raw=sget(args,"old_text"),*after_raw=sget(args,"new_text");
+    if(!*before_raw||!strcmp(before_raw,after_raw))return err(tr("old_text 不能为空，且新旧文本须不同。"));
     JsonPtr original(file_read(a,sget(args,"path")));
     J *read=original.get();
     if(get(read,"error"))return original.release();
     if(strcmp(sget(read,"sha256"),sget(args,"expected_sha256"))){
-        return err(tr("文件已变化，或修改前未读取，请重新读取文件。"));
+        J *mismatch=err(tr("文件已变化，或修改前未读取，请重新读取文件。"));
+        put(mismatch,"current_sha256",str(sget(read,"sha256")));
+        return mismatch;
     }
-    const char *content=sget(read,"content"),*match=strstr(content,before);
-    if(!match||strstr(match+1,before)){
-        return err(tr("old_text 必须在文件中精确匹配一次；请加入相邻上下文后重试。"));
+    const std::string_view content(sget(read,"content"));
+    std::string before(before_raw),after(after_raw);
+    auto matches=find_occurrences(content,before);
+    // Normalize LF -> CRLF automatically when editing a CRLF file with LF text.
+    if(matches.empty()&&content.find("\r\n")!=content.npos&&before.find('\n')!=before.npos&&before.find("\r\n")==before.npos){
+        std::string candidate_before=to_crlf(before);
+        auto crlf_matches=find_occurrences(content,candidate_before);
+        if(crlf_matches.size()==1){
+            before=std::move(candidate_before);
+            after=to_crlf(after);
+            matches=std::move(crlf_matches);
+        }
     }
-    size_t size=strlen(content)-strlen(before)+strlen(after),offset=(size_t)(match-content);
+    if(matches.size()!=1){
+        J *failure=err(tr("old_text 必须在文件中精确匹配一次；请加入相邻上下文后重试。"));
+        put(failure,"match_count",json_object_new_int64(static_cast<int64_t>(matches.size())));
+        if(matches.size()>1){
+            J *lines=arr();
+            size_t line=1,cursor=0;
+            for(size_t i=0;i<std::min<size_t>(matches.size(),10);++i){
+                for(;cursor<matches[i];++cursor)if(content[cursor]=='\n')++line;
+                add(lines,json_object_new_int64(static_cast<int64_t>(line)));
+            }
+            put(failure,"match_lines",lines);
+            put(failure,"hint",str("Multiple matches found at match_lines; include 2-3 surrounding lines in old_text and new_text to disambiguate."));
+        }else{
+            put(failure,"hint",str("No exact match found. Call read_file with start_line..end_line around the target to check exact indentation and characters."));
+        }
+        return failure;
+    }
+    size_t offset=matches[0],size=content.size()-before.size()+after.size();
     if(size>FILE_LIMIT)return err(tr("修改后的文件超过 256 KB 限制。"));
     std::string updated(content);
-    updated.replace(offset,strlen(before),after);
-    const std::string preview=std::string(tr("替换前：\n"))+before+tr("\n替换后：\n")+after;
+    updated.replace(offset,before.size(),after);
+    size_t first_line=1;
+    for(size_t i=0;i<offset;i++)if(content[i]=='\n')first_line++;
+    size_t added=0,removed=0;
+    const std::string preview=diff_preview(before,after,first_line,added,removed);
     JsonPtr write(copy(args));
     json_object_object_del(write.get(),"old_text");
     json_object_object_del(write.get(),"new_text");
     put(write.get(),"content",str(updated.c_str()));
-    return file_write(a,write.get(),preview.c_str());
+    J *result=file_write(a,write.get(),&preview,added,removed);
+    if(result&&bget(result,"verified"))put(result,"line",json_object_new_int64(static_cast<int64_t>(first_line)));
+    return result;
 }
 static void definition(J *tools,const char *name,const char *description,const char **fields,int count){
     J *t=obj(),*f=obj(),*p=obj(),*properties=obj(),*required=arr();
@@ -307,7 +546,7 @@ static void definition(J *tools,const char *name,const char *description,const c
             !strcmp(fields[i],"expected_sha256")?"SHA256 from the latest read_file result; null only when creating a new file.":
             !strcmp(fields[i],"old_text")?"Exact original text, including whitespace. Must occur exactly once; include surrounding lines to disambiguate.":
             !strcmp(fields[i],"new_text")?"Replacement text; empty string deletes the matched text.":
-            !strcmp(fields[i],"query")?"Case-sensitive literal single-line search text, not a regular expression (1..256 bytes).":
+            !strcmp(fields[i],"query")?"Literal single-line search text, not a regular expression (1..256 bytes).":
             !strcmp(fields[i],"content")?"Complete UTF-8 file contents (up to 256 KB).":
             !strcmp(fields[i],"command")?
 #ifdef _WIN32
@@ -354,18 +593,49 @@ static J *builtin_tools(){
         ,*text[]={
             "ref","text"
         };
-        definition(tools,"list_files","List up to 200 immediate workspace entries. Explore relevant directories before guessing file names.",path,1);
+        definition(tools,"list_files","List up to 200 workspace entries sorted with directories first and byte sizes on files. Set optional max_depth (1..4) to inspect directory trees in one call.",path,1);
+        {
+            J *list_props=get(get(get(at(tools,0),"function"),"parameters"),"properties");
+            J *depth=obj();
+            put(depth,"type",str("integer"));
+            put(depth,"description",str("Optional traversal depth (1..4, default 1)."));
+            put(list_props,"max_depth",depth);
+        }
         definition(tools,"search_text","Recursively locate literal text with file paths and line numbers. Skips symlinks, protected files, common dependency/build directories and non-UTF-8 or >256 KB files. Up to 120 matching lines, 4000 files, depth 24, 32 MB, 5 seconds; inspect truncated and skipped before claiming absence. Narrow path to continue.",search,2);
-        definition(tools,"read_file","Read a complete UTF-8 file (max 256 KB) and its SHA256. Required before editing an existing file; search snippets are not sufficient.",path,1);
-        definition(tools,"edit_file","Replace one unique exact text occurrence in an existing file. Prefer this for small edits. Supply SHA256 from read_file; use longer old_text if ambiguous. Preserves other bytes and creates a backup. Result verified means bytes were read back, not that the user's goal or tests passed.",edit,4);
+        {
+            J *search_props=get(get(get(at(tools,1),"function"),"parameters"),"properties");
+            J *ci=obj();
+            put(ci,"type",str("boolean"));
+            put(ci,"description",str("Optional case-insensitive matching (default false)."));
+            put(search_props,"case_insensitive",ci);
+        }
+        definition(tools,"read_file","Read a UTF-8 file (full file up to 256 KB with SHA256, or optional 1-based start_line..end_line slice from files up to 16 MB). Read before editing an existing file; search snippets are not sufficient.",path,1);
+        {
+            J *read_props=get(get(get(at(tools,2),"function"),"parameters"),"properties");
+            J *sline=obj(),*eline=obj();
+            put(sline,"type",str("integer"));
+            put(sline,"description",str("Optional 1-based first line to read (inclusive). Omit to read the full file."));
+            put(eline,"type",str("integer"));
+            put(eline,"description",str("Optional 1-based last line to read (inclusive). Omit to read through the end."));
+            put(read_props,"start_line",sline);
+            put(read_props,"end_line",eline);
+        }
+        definition(tools,"edit_file","Replace one unique exact text occurrence in an existing file. Prefer this for small edits. Supply SHA256 from read_file; if ambiguous, match_lines are returned so you can add surrounding context. Preserves other bytes and creates a backup. Result verified means bytes were read back, not that the user's goal or tests passed.",edit,4);
         definition(tools,"write_file","Create a UTF-8 file or replace its entire contents. Prefer edit_file for small changes. Read existing file first and supply SHA256; null only for a new file. Original bytes are backed up and new bytes read back. Verify the task's actual behavior separately.",write,3);
         definition(tools,"run_shell",
 #ifdef _WIN32
-            "Execute noninteractive Windows PowerShell in the workspace, 30s timeout. Use PowerShell syntax, not bash. There is no sandbox. Calls do not share variables or working-directory changes. Do not start persistent/background services. Inspect exit_code, timed_out and output to verify the result.",
+            "Execute noninteractive Windows PowerShell in the workspace (default 30s timeout, configurable up to 300s via timeout_ms). Use PowerShell syntax, not bash. There is no sandbox. Calls do not share variables or working-directory changes. Do not start persistent/background services. Inspect exit_code, timed_out and output to verify the result.",
 #else
-            "Execute noninteractive bash in workspace, 30s timeout, no sandbox. Do not start persistent/background services. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
+            "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms), no sandbox. Do not start persistent/background services. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
 #endif
             cmd,1);
+        {
+            J *shell_props=get(get(get(at(tools,5),"function"),"parameters"),"properties");
+            J *timeout=obj();
+            put(timeout,"type",str("integer"));
+            put(timeout,"description",str("Optional command timeout in milliseconds (1000..300000, default 30000)."));
+            put(shell_props,"timeout_ms",timeout);
+        }
         definition(tools,"desktop_snapshot","Read apps with empty app, then exact app name for controls. Text is sent to model API.",app,1);
         definition(tools,"desktop_action","Invoke an action advertised by current snapshot. Re-snapshot after action.",act,2);
         definition(tools,"desktop_set_text","Replace entire editable control text. Re-snapshot to verify.",text,2);
@@ -401,13 +671,29 @@ J *tool_call(App *a,const char *name,J *args){
     if(!spec||!tool_enabled(*a,name)||!json_object_is_type(args,json_type_object)){
         return err(tr("未知或未启用的工具，或参数不是对象。"));
     }
-    J *properties=get(spec,"properties");
-    bool valid=json_object_object_length(args)==json_object_object_length(properties);
-    json_object_object_foreach(properties,key,description){
-        J *value=NULL;
-        bool nullable=json_object_is_type(get(description,"type"),json_type_array);
-        if(!json_object_object_get_ex(args,key,&value)||(!json_object_is_type(value,json_type_string)&&!(value==NULL&&nullable)))valid=false;
-        if(json_object_is_type(value,json_type_string)&&(size_t)json_object_get_string_len(value)!=strlen(json_object_get_string(value)))valid=false;
+    J *properties=get(spec,"properties"),*required=get(spec,"required");
+    bool valid=true;
+    for(size_t i=0;i<alen(required);i++){
+        if(!json_object_object_get_ex(args,json_object_get_string(at(required,i)),NULL))valid=false;
+    }
+    json_object_object_foreach(args,key,value){
+        J *description=NULL;
+        if(!json_object_object_get_ex(properties,key,&description)){valid=false;continue;}
+        J *type=get(description,"type");
+        bool nullable=json_object_is_type(type,json_type_array);
+        const char *kind=json_object_is_type(type,json_type_string)?json_object_get_string(type):"string";
+        bool req=false;
+        for(size_t i=0;i<alen(required);i++)if(!strcmp(json_object_get_string(at(required,i)),key))req=true;
+        if(!strcmp(kind,"integer")){
+            if(value==NULL){if(req)valid=false;}
+            else if(!json_object_is_type(value,json_type_int))valid=false;
+        }else if(!strcmp(kind,"boolean")){
+            if(value==NULL){if(req)valid=false;}
+            else if(!json_object_is_type(value,json_type_boolean))valid=false;
+        }else{
+            if(!json_object_is_type(value,json_type_string)&&!(value==NULL&&nullable))valid=false;
+            if(json_object_is_type(value,json_type_string)&&(size_t)json_object_get_string_len(value)!=strlen(json_object_get_string(value)))valid=false;
+        }
     }
     if(!valid)return err(tr("工具参数缺失、多余或类型不正确。"));
     std::unique_ptr<ResourceLock> lock;
@@ -415,18 +701,24 @@ J *tool_call(App *a,const char *name,J *args){
         lock=std::make_unique<ResourceLock>(*a,false);
         if(!lock->acquired()||interrupted)return err(interrupted?tr("资源等待已取消。"):tr("工作目录被占用或无法加锁，未执行操作；请返回对应对话处理待批准操作。"));
     }
-    if(!strcmp(name,"list_files"))return file_list(a,sget(args,"path"));
-    if(!strcmp(name,"read_file"))return file_read(a,sget(args,"path"));
+    if(!strcmp(name,"list_files"))return file_list(a,sget(args,"path"),args);
+    if(!strcmp(name,"read_file"))return file_read(a,sget(args,"path"),args);
     if(!strcmp(name,"search_text"))return file_search(a,args);
     if(!strcmp(name,"edit_file"))return file_edit(a,args);
-    if(!strcmp(name,"write_file"))return file_write(a,args,NULL);
+    if(!strcmp(name,"write_file"))return file_write(a,args);
     if(!strcmp(name,"run_shell")){
+        int timeout_ms=30000;
+        if(J *timeout_obj=get(args,"timeout_ms")){
+            int64_t requested=json_object_get_int64(timeout_obj);
+            if(requested<1000||requested>300000)return err(tr("命令超时设置无效。"));
+            timeout_ms=static_cast<int>(requested);
+        }
         if(!approve(a,sget(args,"command"),Operation::Other,tr("执行命令"))){
             J *r=err(tr("用户拒绝执行，不要绕过。"));
             put(r,"denied",json_object_new_boolean(1));
             return r;
         }
-        return run_command(a,sget(args,"command"),30000);
+        return run_command(a,sget(args,"command"),timeout_ms);
     }
     if(!strcmp(name,"desktop_snapshot"))return desktop_snapshot(a,sget(args,"app"));
     if(!approve(a,json_object_to_json_string_ext(args,JSON_C_TO_STRING_PLAIN),Operation::Other,tr("操作桌面"))){

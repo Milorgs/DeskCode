@@ -31,7 +31,7 @@ step "构建"
 make -C "$root" -j"$(nproc)" 2>&1 | tail -20
 
 step "测试（DESK_NO_ARROW=1，与 CI 一致）"
-if ! make -C "$root" test > "$out/test.log" 2>&1; then
+if ! make -C "$root" test < /dev/null > "$out/test.log" 2>&1; then
     grep '^FAIL' "$out/test.log" || tail -20 "$out/test.log"
     echo "测试失败，完整日志：$out/test.log" >&2
     exit 1
@@ -63,16 +63,8 @@ if ! command -v spectacle > /dev/null 2>&1; then
     exit 0
 fi
 
-# 用 desk-window 打开不透明的普通 Konsole 窗口跑 desk，4 秒后截这个窗口。
-# 不要自己拼 konsole --fullscreen，也不要用 DesktopTransparent（桌面小组件专用、半透明）。
-# spectacle -b: 后台模式  -n: 不弹通知  -a: 截活动窗口  -o: 输出路径
-desk-window > /dev/null 2>&1 &
-win=$!
-sleep 4
-spectacle -b -n -a -o "$out/main.png" > /dev/null 2>&1 || true
-sleep 1
-kill "$win" 2>/dev/null || true
-wait "$win" 2>/dev/null || true
+# 在沙箱里截图：独立配置目录 + 本地假模型，不读你的正式配置和 API 密钥。
+"$root/tools/sandbox.sh" --shot "$out/main.png"
 
 if [ -s "$out/main.png" ]; then
     printf '  %s\n' "$out/main.png"

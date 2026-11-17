@@ -1,4 +1,4 @@
-desk-agent for Windows 10/11 x64
+DeskCode for Windows 10/11 x64
 
 Extract the entire ZIP. Double-click desk.exe, or open a terminal here and run .\desk.exe.
 One-line installation for the latest release in PowerShell:

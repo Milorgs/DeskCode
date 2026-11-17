@@ -19,11 +19,13 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.10.11"
+#define VERSION "1.11.4"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
 #define FILE_LIMIT 262144
+#define SLICED_FILE_LIMIT (16*1024*1024)
+#define COMMAND_OUTPUT_LIMIT (8*1024*1024)
 #define RESPONSE_LIMIT 32000000
 using J = json_object;
 struct JsonDeleter {
@@ -43,7 +45,7 @@ struct App {
     double progress_updated=0;
     bool thinking=false;
     double thinking_started=0;
-    int max_steps=20;
+    int max_steps=0;
     std::intptr_t task_events=-1;
     const char *state="等待任务";
     void *desktop_data=nullptr;
@@ -56,6 +58,14 @@ struct App {
     std::uint64_t task_tokens=0;
     bool progress_line=false;
     CurlHandle api_http{};
+    // Headless runs (stdout redirected or --json): the final reply goes to
+    // reply_out (or the JSON result) and is not echoed to the human stream.
+    FILE *reply_out=nullptr;
+    bool json_output=false;
+    // When non-null, run_task appends one {name,target,ok} entry per tool call.
+    J *trace=nullptr;
+    // Set when an approval was needed but no interactive terminal could answer.
+    bool approval_unavailable=false;
 };
 extern std::atomic<int> interrupted;
 extern std::atomic<bool> input_closed;
@@ -100,7 +110,8 @@ int atomic_file(const char *path,const void *data,size_t len,unsigned int mode);
 // inline_row lays the choices out on one line (left/right to move) so a prompt
 // can sit in a single input row, such as the approval answer under its panel.
 std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,
-                                   const std::function<void()> &idle={},bool transient=false,bool inline_row=false);
+                                   const std::function<void()> &idle={},bool transient=false,bool inline_row=false,
+                                   bool allow_escape=false);
 std::vector<std::string> approval_choices(bool preview);
 char *input(const char *prompt,const char *fallback,bool secret);
 void terminal_message(const std::string &text);
@@ -118,6 +129,12 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
 void set_composer_layout(int input_row,int transcript_row,int first_row=1);
 #ifndef _WIN32
 void reset_transcript();
+void scroll_transcript(int rows);
+void scroll_transcript_page(int direction);
+bool scroll_transcript_mouse(int row,int col,int button=0,bool release=false);
+void scroll_transcript_bottom();
+bool transcript_scrollable();
+size_t transcript_hidden_lines();
 #endif
 enum class Operation { Other, FileEdit };
 bool approval_required(const App &app,Operation operation=Operation::Other);
@@ -160,7 +177,7 @@ void desktop_destroy(App *a);
 bool desktop_compiled(void);
 void reset_session(App *a);
 int run_task(App *a,const char *task);
-J *context(App *a,J *tools);
+J *context(App *a,J *tools,bool *compacted=nullptr);
 void save_record(App *a);
 void app_cleanup(App *a);
 #endif

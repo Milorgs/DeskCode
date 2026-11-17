@@ -24,7 +24,7 @@ temporary=$(mktemp "$prefix/bin/.desk-install-XXXXXX")
 trap '[ ! -f "$temporary" ] || unlink "$temporary"' EXIT HUP INT TERM
 install -m 755 "$source_dir/desk" "$temporary"
 mv -f "$temporary" "$prefix/bin/desk"
-printf '%s\n' 'desk-agent installation' > "$prefix/share/desk-agent/installed"
+printf '%s\n' 'DeskCode installation' > "$prefix/share/desk-agent/installed"
 if [ "$setup_path" -eq 1 ]; then
     case ":${PATH:-}:" in
         *":$prefix/bin:"*) ;;
@@ -42,4 +42,4 @@ if [ "$setup_path" -eq 1 ]; then
             ;;
     esac
 fi
-printf '已安装：%s/bin/desk\n重新运行 desk 即可。\n' "$prefix"
+printf '已安装 DeskCode：%s/bin/desk\n重新运行 desk 即可。\n' "$prefix"

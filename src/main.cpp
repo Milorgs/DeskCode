@@ -9,6 +9,7 @@
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 #include <wchar.h>
 #endif
 #include <locale.h>
@@ -55,7 +56,7 @@ static void menu_text(const char *text){
         if(interface_active&&(option||title))fputs(title?"    ":"  ",stdout);
         if(color&&option&&line.find("] ")!=line.npos){
             auto split=line.find("] ")+1;
-            fputs(ui_paint(Tone::Dim,line.substr(0,split)).c_str(),stdout);
+            fputs(ui_number(line.substr(0,split)).c_str(),stdout);
             fputs(ui_paint(Tone::Accent,line.substr(split)).c_str(),stdout);
         }
         else if(color&&title)fputs(ui_paint(Tone::Plain,line,true).c_str(),stdout);
@@ -74,7 +75,7 @@ static void menu_printf(const char *format,...){
     va_end(args);
 }
 static void page_rule(){
-    if(!roomy_interface())return;
+    if(!interface_active||terminal_columns()<40||terminal_rows()<16)return;
     const int width=std::min(terminal_columns()-4,100);
     if(width<4)return;
     std::string line;
@@ -99,7 +100,7 @@ public:
 };
 static void status(App *a){
     const int width=terminal_columns()>0?std::max(24,std::min(terminal_columns()-4,88)):0;
-    printf("\n  %s\n\n",ui_paint(Tone::Bold,tr("desk code 状态")).c_str());
+    printf("\n  %s\n\n",ui_paint(Tone::Bold,tr("DeskCode 状态")).c_str());
     auto row=[&](const char *label,const char *value){
         std::string lead=tr(label);
         while(ui_width(lead)<8)lead+=' ';
@@ -114,11 +115,23 @@ static void status(App *a){
     row("批准",permission_name(*a));
     row("推理",reasoning_name(sget(a->config,"reasoning_effort")));
 }
+// In interactive arrow-menu mode, Ctrl+D at a text field cancels just that
+// field instead of tearing down the whole menu loop; a hung-up pty stays closed.
+static void recover_interactive_eof(){
+    if(!input_closed||interrupted==SIGTERM||env_value("DESK_NO_ARROW")||!isatty(STDIN_FILENO))return;
+#ifndef _WIN32
+    pollfd pfd{STDIN_FILENO,POLLIN,0};
+    if(poll(&pfd,1,0)>0&&(pfd.revents&(POLLHUP|POLLERR|POLLNVAL)))return;
+#endif
+    input_closed=false;
+}
 static char *field(const char *name,const char *fallback,bool secret){
     char prompt[8192];
     if(secret)snprintf(prompt,sizeof prompt,tr("%s%s："),name,fallback&&*fallback?tr(" [回车保留]"):"");
     else snprintf(prompt,sizeof prompt,tr("%s [%s]："),name,fallback?fallback:"");
-    return input(prompt,fallback,secret);
+    char *value=input(prompt,fallback,secret);
+    if(!value)recover_interactive_eof();
+    return value;
 }
 static int menu_choices(Tasks &jobs,const char *options,const char *details=nullptr,int initial=-1);
 static const char *choose_protocol(Tasks &jobs,const char *current){
@@ -140,7 +153,62 @@ static J *editable_model_config(const App &app){
     if(!app.conversation_id.empty())use_reasoning(config,profile_reasoning(app));
     return config;
 }
-static int configure(App *a,Tasks &jobs,const char *name,const char *selected,bool fresh){
+// Ready-made provider entries so a first run needs only an API key. Every
+// preset is a plain OpenAI-compatible or Anthropic endpoint; nothing is added
+// to requests beyond what the user configures.
+struct ProviderPreset {const char *label,*slug,*protocol,*base_url,*model,*key;};
+static const ProviderPreset provider_presets[]={
+    {"OpenAI接口","","openai","https://api.openai.com/v1","",""},
+    {"Anthropic接口","","anthropic","https://api.anthropic.com/v1","",""},
+    {"DeepSeek","deepseek","openai","https://api.deepseek.com/v1","deepseek-chat",""},
+    {"Kimi（月之暗面）","kimi","openai","https://api.moonshot.cn/v1","",""},
+    {"通义千问（阿里云百炼）","qwen","openai","https://dashscope.aliyuncs.com/compatible-mode/v1","qwen-plus",""},
+    {"智谱 GLM","glm","openai","https://open.bigmodel.cn/api/paas/v4","glm-4-plus",""},
+    {"硅基流动 SiliconFlow","siliconflow","openai","https://api.siliconflow.cn/v1","",""},
+    {"OpenRouter","openrouter","openai","https://openrouter.ai/api/v1","",""},
+    {"Ollama 本地模型","ollama","openai","http://127.0.0.1:11434/v1","","ollama"},
+};
+static int number(Tasks &jobs,int maximum,int initial=-1);
+static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial=-1,bool allow_escape=true);
+// Offer the provider's live model list when it answers, otherwise fall back to
+// typing an ID. Listing models is a free GET and sends no conversation data.
+static bool choose_model_id(App *a,Tasks &jobs,J *candidate,const char *suggestion){
+    std::string current=sget(candidate,"model");
+    if(current.empty()&&suggestion)current=suggestion;
+    menu_text(tr("正在获取在线模型列表…"));
+    fflush(stdout);
+    JsonPtr probe(copy(candidate));
+    if(!*sget(probe.get(),"model"))put(probe.get(),"model",str("model-list"));
+    a->error[0]=0;
+    JsonPtr models(api_models(a,probe.get()));
+    a->error[0]=0;
+    const size_t count=alen(models.get());
+    if(count){
+        std::vector<std::string> options;
+        int initial=1;
+        for(size_t i=0;i<count;i++){
+            options.emplace_back(json_object_get_string(at(models.get(),i)));
+            if(options.back()==current)initial=static_cast<int>(i)+1;
+        }
+        options.emplace_back(tr("手动输入模型 ID"));
+        options.emplace_back(tr("返回"));
+        char heading[128];
+        snprintf(heading,sizeof heading,tr("\n选择模型（共 %zu 个）"),count);
+        menu_text(heading);
+        int choice=arrow_menu(jobs,options,initial);
+        if(choice<=0)return false;
+        if(static_cast<size_t>(choice)<=count){
+            put(candidate,"model",str(options[static_cast<size_t>(choice-1)].c_str()));
+            return true;
+        }
+    }else menu_text(tr("未获取到在线模型列表，请手动输入模型 ID。"));
+    char *model=field(tr("模型名称"),current.c_str(),false);
+    if(!model)return false;
+    put(candidate,"model",str(model));
+    free(model);
+    return true;
+}
+static int configure(App *a,Tasks &jobs,const char *name,const ProviderPreset *preset,bool fresh){
     if(!isatty(STDIN_FILENO)){
         seterr(a,tr("配置向导需要交互终端；也可通过 DESK_* 环境变量配置。"));
         return -1;
@@ -156,7 +224,7 @@ static int configure(App *a,Tasks &jobs,const char *name,const char *selected,bo
     JsonPtr candidate_owner(fresh?config_default(name):editable_model_config(*a));
     J *candidate=candidate_owner.get();
     if(!candidate)return -1;
-    const char *protocol=selected?selected:choose_protocol(jobs,sget(candidate,"protocol"));
+    const char *protocol=preset?preset->protocol:choose_protocol(jobs,sget(candidate,"protocol"));
     if(!protocol){
         return 0;
     }
@@ -164,7 +232,8 @@ static int configure(App *a,Tasks &jobs,const char *name,const char *selected,bo
     put(candidate,"protocol",str(protocol));
     if(changed&&!valid_reasoning_effort(candidate,get(candidate,"reasoning_effort")))
         use_reasoning(candidate,nullptr);
-    if(changed)put(candidate,"base_url",str(!strcmp(protocol,"anthropic")?"https://api.anthropic.com/v1":"https://api.openai.com/v1"));
+    if(preset&&fresh)put(candidate,"base_url",str(preset->base_url));
+    else if(changed)put(candidate,"base_url",str(!strcmp(protocol,"anthropic")?"https://api.anthropic.com/v1":"https://api.openai.com/v1"));
     menu_text(tr("\n密钥输入不显示，仅保存在本机私有配置文件。"));
     char *base=field(tr("API 地址"),sget(candidate,"base_url"),false);
     if(!base)return 0;
@@ -190,15 +259,14 @@ static int configure(App *a,Tasks &jobs,const char *name,const char *selected,bo
     curl_url_cleanup(next);
     put(candidate,"base_url",str(base));
     free(base);
-    char *model=field(tr("模型名称"),sget(candidate,"model"),false);
-    if(!model)return 0;
-    put(candidate,"model",str(model));
-    free(model);
+    // A key never follows the configuration to a different host.
     if(host_changed)put(candidate,"api_key",str(""));
+    if(fresh&&preset&&*preset->key)put(candidate,"api_key",str(preset->key));
     char *key=field("API Key",sget(candidate,"api_key"),true);
     if(!key)return 0;
     put(candidate,"api_key",str(key));
     free(key);
+    if(!choose_model_id(a,jobs,candidate,preset?preset->model:nullptr))return 0;
     if(config_valid(a,candidate)){
         return -1;
     }
@@ -210,23 +278,32 @@ static int configure(App *a,Tasks &jobs,const char *name,const char *selected,bo
     if(!rc)set_notice(tr("已保存并选用该模型。"));
     return rc;
 }
-static int add_model(App *a,Tasks &jobs,const char *preset){
-    const char *protocol=choose_protocol(jobs,"openai");
-    if(!protocol)return 0;
+static int add_model(App *a,Tasks &jobs,const char *preset_name){
+    clear_page();
+    menu_text(tr("\n添加模型 · 选择服务商"));
+    std::vector<std::string> options;
+    for(const auto &preset:provider_presets)options.emplace_back(tr(preset.label));
+    options.emplace_back(tr("返回"));
+    int choice=arrow_menu(jobs,options,1);
+    if(choice<=0)return 0;
+    const ProviderPreset &preset=provider_presets[static_cast<size_t>(choice-1)];
     char fallback[64];
     int number=1;
-    do{
-        snprintf(fallback,sizeof fallback,"model-%d",number++);
+    if(*preset.slug){
+        snprintf(fallback,sizeof fallback,"%s",preset.slug);
+        while(get(get(a->store,"profiles"),fallback))snprintf(fallback,sizeof fallback,"%s-%d",preset.slug,++number);
+    }else{
+        do{
+            snprintf(fallback,sizeof fallback,"model-%d",number++);
+        }
+        while(get(get(a->store,"profiles"),fallback));
     }
-    while(get(get(a->store,"profiles"),fallback));
-    char *name=preset?strdup(preset):field(tr("模型配置名称（输入 0 返回）"),fallback,false);
+    char *name=preset_name?strdup(preset_name):field(tr("模型配置名称（输入 0 返回）"),fallback,false);
     if(!name)return 0;
-    int rc=strcmp(name,"0")?configure(a,jobs,name,protocol,true):0;
+    int rc=strcmp(name,"0")?configure(a,jobs,name,&preset,true):0;
     free(name);
     return rc;
 }
-static int number(Tasks &jobs,int maximum,int initial=-1);
-static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial=-1);
 static int select_model(App *a,Tasks &jobs){
     clear_page();
     J *profiles=get(a->store,"profiles");
@@ -289,16 +366,17 @@ static int number(Tasks &jobs,int maximum,int initial){
 }
 static std::string request_text(Tasks &jobs,const char *prompt){
     std::unique_ptr<char,decltype(&free)> text(jobs.readline(prompt),free);
+    if(!text)recover_interactive_eof();
     return text?text.get():"";
 }
-static std::optional<int> arrow_choice(Tasks &jobs,const std::vector<std::string> &items,int initial=1){
+static std::optional<int> arrow_choice(Tasks &jobs,const std::vector<std::string> &items,int initial=1,bool allow_escape=true){
     return terminal_choice(items,initial,content_top,[&]{
         jobs.refresh();
         if(jobs.on_idle)jobs.on_idle();
-    });
+    },false,false,allow_escape);
 }
-static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial){
-    if(auto choice=arrow_choice(jobs,items,initial<0?1:initial))return *choice;
+static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial,bool allow_escape){
+    if(auto choice=arrow_choice(jobs,items,initial<0?1:initial,allow_escape))return *choice;
     for(size_t i=0;i<items.size();i++)menu_printf("  [%zu] %s\n",(i+1)%items.size(),items[i].c_str());
     return number(jobs,static_cast<int>(items.size()-1),initial);
 }
@@ -456,13 +534,14 @@ static void show_user_message(std::string_view body){
     }
     terminal_message(text);
 }
-static void show_conversation_history(App &app,const Conversation &item){
+static size_t show_conversation_history(App &app,const Conversation &item){
     JsonPtr record(history_read(app,item.id));
     J *messages=get(record.get(),"transcript");
+    size_t shown=0;
     for(size_t i=0;i<alen(messages);i++){
         J *message=at(messages,i);
         const char *role=sget(message,"role");
-        if(!strcmp(role,"user"))show_user_message(sget(message,"content"));
+        if(!strcmp(role,"user")){show_user_message(sget(message,"content"));shown++;}
         else if(!strcmp(role,"assistant")){
             J *content=get(message,"content");
             std::string text;
@@ -473,9 +552,13 @@ static void show_conversation_history(App &app,const Conversation &item){
                 if(!text.empty())text+='\n';
                 text+=sget(block,"text");
             }
-            if(!text.empty())terminal_message(std::string("\n")+ui_assistant_marker(ui_color())+text+"\n");
+            if(!text.empty()){
+                terminal_message(std::string("\n")+ui_assistant_marker(ui_color())+ui_markdown(text,2)+"\n");
+                shown++;
+            }
         }
     }
+    return shown;
 }
 static std::string conversation_title(std::string_view source,bool automatic){
     if(!valid_utf8(source))return {};
@@ -554,7 +637,7 @@ class ConversationScreen {
     std::function<void()> previous;
     bool pinned=false;
     int rows=0,columns=0;
-    std::string last_header,last_composer,frame;
+    std::string last_header,last_composer,top_frame,frame;
     bool composer=false,overlay=false;
     double checked=0;
     static std::string clipped(std::string_view text,int width){
@@ -575,6 +658,7 @@ public:
         const int bottom=composer?rows-4:rows;
         printf("\033[r\033[2J\033[%d;%dr\033[%d;1H",content_top,bottom,content_top);
         set_composer_layout(composer?rows-2:0,composer?rows-4:0,content_top);
+        top_frame.clear();
         frame.clear();
         last_composer.clear();
     }
@@ -605,10 +689,14 @@ public:
         fflush(stdout);
     }
     void tick(){
-        if(monotime()-checked<0.05)return;
-        checked=monotime();
         struct winsize size{};
-        if(pinned&&!ioctl(1,TIOCGWINSZ,&size)&&size.ws_row>0&&size.ws_col>0&&(rows!=size.ws_row||columns!=size.ws_col)){
+        const bool resized=pinned&&!ioctl(1,TIOCGWINSZ,&size)&&size.ws_row>0&&size.ws_col>0&&(rows!=size.ws_row||columns!=size.ws_col);
+        if(!resized&&monotime()-checked<0.05){
+            if(has_composer()&&!controls_open)draw_composer();
+            return;
+        }
+        checked=monotime();
+        if(resized){
             rows=size.ws_row;columns=size.ws_col;
             if(!overlay)layout();
             last_header.clear();
@@ -720,27 +808,44 @@ public:
         snprintf(status,sizeof status,tr("思考强度：%s · 批准：%s · %s"),
                  *effort?reasoning_name(effort):tr("默认"),permission.data(),sget(app.config,"model"));
         auto text=ui_clip(status,columns-4);
+        const int rule_width=std::min(columns-4,100);
         std::string rule="  ";
-        for(int i=0;i<std::min(columns-4,100);i++)rule+="─";
-        if(text==last_composer&&rule==frame)return;
-        last_composer=text;frame=rule;
+        for(int i=0;i<rule_width;i++)rule+="─";
+        std::string top_rule;
+        const size_t hidden=transcript_hidden_lines();
+        if(hidden&&rule_width>=24){
+            char badge_buf[96];
+            snprintf(badge_buf,sizeof badge_buf,tr(" ↑ 还有 %zu 行 · PgDn "),hidden);
+            std::string badge=ui_clip(badge_buf,rule_width-4);
+            const int badge_cells=ui_width(badge);
+            const int left_dashes=std::max(2,rule_width-badge_cells-2);
+            const int right_dashes=std::max(0,rule_width-left_dashes-badge_cells);
+            std::string left="  ",right;
+            for(int i=0;i<left_dashes;i++)left+="─";
+            for(int i=0;i<right_dashes;i++)right+="─";
+            top_rule=ui_paint(Tone::Rule,left)+ui_paint(Tone::Accent,badge)+ui_paint(Tone::Rule,right);
+        }else{
+            top_rule=ui_paint(Tone::Rule,rule);
+        }
+        if(text==last_composer&&top_rule==top_frame&&rule==frame)return;
+        last_composer=text;top_frame=top_rule;frame=rule;
         fputs("\0337",stdout);
-        // Both rules share the cached string; draw the top one above the input
-        // and the bottom one directly under it.
         printf("\033[%d;1H\033[2K",rows-3);
-        fputs(ui_paint(Tone::Rule,rule).c_str(),stdout);
+        fputs(top_rule.c_str(),stdout);
         printf("\033[%d;1H\033[2K",rows-1);
         fputs(ui_paint(Tone::Rule,rule).c_str(),stdout);
         printf("\033[%d;1H\033[2K",rows);
         std::string_view footer(text);
+        const bool contrast=env_value("DESK_CONTRAST_NUMBERS");
+        const Tone footer_tone=contrast?Tone::Plain:Tone::Dim;
         auto highlight=app.yes?footer.find(permission):footer.npos;
         fputs("  ",stdout);
         if(highlight!=footer.npos){
-            fputs(ui_paint(Tone::Dim,footer.substr(0,highlight)).c_str(),stdout);
+            fputs(ui_paint(footer_tone,footer.substr(0,highlight),contrast).c_str(),stdout);
             fputs(ui_paint(Tone::Orange,permission).c_str(),stdout);
             footer.remove_prefix(highlight+permission.size());
         }
-        fputs(ui_paint(Tone::Dim,footer).c_str(),stdout);
+        fputs(ui_paint(footer_tone,footer,contrast).c_str(),stdout);
         fputs("\0338",stdout);
         fflush(stdout);
     }
@@ -764,7 +869,7 @@ public:
     }
     // Approval prompts and menu redraws can overwrite the frame rows; drop the
     // cached copy so the next tick paints them again.
-    void refresh_composer(){last_composer.clear();frame.clear();checked=0;tick();}
+    void refresh_composer(){last_composer.clear();top_frame.clear();frame.clear();checked=0;tick();}
     // Show everything the worker has printed so far, ignoring the tick throttle.
     void flush(){jobs.refresh();checked=0;tick();}
     bool awaiting_approval(const Conversation &item){
@@ -783,6 +888,7 @@ public:
     }
     bool submit(Conversation &item,const std::string &task){
         app.error[0]=0;
+        scroll_transcript_bottom();
         // Echo the request into the transcript before starting the job; the
         // assistant reply streams in underneath it.
         show_user_message(task);
@@ -903,20 +1009,23 @@ static void mcp_menu(App *a,Tasks &jobs){
         if(interrupted==SIGTERM||input_closed)return;
     }
 }
+// The "/" command palette. The first six entries keep their numbers so muscle
+// memory (and scripts) survive; local actions follow. Returns 0 back, 1 done,
+// 2 conversation list, 3 new chat, 4 clear context, 5 status, 6 help.
 static int chat_menu(App *a,Tasks &jobs){
     clear_page();
     const auto heading=ui_clip(tr("对话操作"),std::max(1,terminal_columns()-4));
     printf("  %s\n",ui_paint(Tone::Plain,heading,true).c_str());
     std::vector<std::string> items;
-    for(const auto *label:{"选择模型","推理模式","批准模式","新建对话","返回选择对话","更多设置","返回输入"})
+    for(const auto *label:{"选择模型","推理模式","批准模式","新建对话","返回选择对话","更多设置","清空上下文","查看状态","快捷键帮助","返回输入"})
         items.emplace_back(tr(label));
     auto selected=terminal_choice(items,1,content_top+1,[&]{
         jobs.refresh();
         if(jobs.on_idle)jobs.on_idle();
-    },true);
+    },true,false,true);
     if(!selected){
         for(size_t i=0;i<items.size();i++){
-            auto label=ui_paint(Tone::Dim,"["+std::to_string((i+1)%items.size())+"]");
+            auto label=ui_number("["+std::to_string((i+1)%items.size())+"]");
             printf("  %s %s\n",label.c_str(),items[i].c_str());
         }
         selected=number(jobs,static_cast<int>(items.size()-1),0);
@@ -930,16 +1039,67 @@ static int chat_menu(App *a,Tasks &jobs){
     else if(choice==4)return 3;
     else if(choice==5)return 2;
     else if(choice==6)settings_menu(a,jobs,true);
+    else if(choice>=7&&choice<=9)return choice-3;
     return interrupted==SIGTERM?-1:1;
 }
 // The chat title goes through the transcript writer so that, with the pinned
 // input box, it takes the first transcript row instead of being overwritten.
-static void chat_title(const Conversation &item){
+static void chat_title(const App &app,const Conversation &item){
     char line[1024];
     snprintf(line,sizeof line,tr("对话：%s"),title_of(item));
+    const char *home=env_value("HOME");
+    std::string folder;
+    if(home&&!strcmp(app.root,home))folder="~";
+    else folder=path_text(fs_path(app.root).filename());
+    if(folder.empty())folder=app.root;
     std::string text="\n";
-    text+=interface_active?"    "+ui_paint(Tone::Plain,line,true):std::string(line);
+    if(interface_active){
+        text+="  "+ui_paint(Tone::Accent,line,true);
+        text+=ui_paint(Tone::Dim," · "+folder);
+    }else{
+        text+=line;
+    }
     text+="\n";
+    terminal_message(text);
+}
+static void show_inline_status(const App &app){
+    JsonPtr usage(load_tokens(app));
+    std::string body=std::string(tr("模型"))+": "+sget(app.config,"model")+" ("+sget(app.config,"protocol")+")\n"
+        +tr("目录")+": "+app.root+"\n"
+        +tr("批准")+": "+permission_name(app)+" · "+tr("推理")+": "+reasoning_name(sget(app.config,"reasoning_effort"));
+    if(usage)body+="\n"+std::string(tr("词元"))+": "+token_label(model_tokens(usage.get(),app.config));
+    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-4,36),92):72;
+    std::string box=ui_box(tr("DeskCode 状态"),body,width);
+    std::string out="\n";
+    for(size_t start=0;start<box.size();){
+        auto end=box.find('\n',start);
+        out+="  "+box.substr(start,end==std::string::npos?std::string::npos:end-start)+"\n";
+        if(end==std::string::npos)break;
+        start=end+1;
+    }
+    terminal_message(out);
+}
+static void show_inline_help(){
+    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-4,36),92):76;
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 选择模型 · F3 思考强度\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string out="\n";
+    for(size_t start=0;start<box.size();){
+        auto end=box.find('\n',start);
+        out+="  "+box.substr(start,end==std::string::npos?std::string::npos:end-start)+"\n";
+        if(end==std::string::npos)break;
+        start=end+1;
+    }
+    terminal_message(out);
+}
+// First screen of an empty conversation: what to type and where the controls
+// are. Shown again whenever an empty chat is opened, never once history exists.
+static void show_welcome(){
+    std::string text="\n";
+    text+="  "+ui_paint(Tone::Plain,tr("直接描述你要完成的事，例如："),true)+"\n";
+    for(const char *example:{"梳理这个项目的结构、入口和构建方式","运行测试，找出失败原因并修复","给 README 补一段安装与使用说明"}){
+        text+="    "+ui_paint(Tone::Accent,"›")+" "+ui_paint(Tone::Dim,tr(example))+"\n";
+    }
+    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · F2 模型 · F3 思考强度 · 滚轮/PgUp/PgDn 滚动 · Ctrl+D 返回列表"))+"\n";
     terminal_message(text);
 }
 static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
@@ -954,7 +1114,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
     if(!screen||!screen->has_composer())
 #endif
     clear_page();
-    if(conversation)chat_title(*conversation);
+    if(conversation)chat_title(*a,*conversation);
     show_notice();
     // Orientation is one dim line, once per run, above any restored history.
     if(!conversation||conversation->messages==nullptr){
@@ -964,7 +1124,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             terminal_message(ui_paint(Tone::Dim,tr("  工作目录及任务会发送到配置的 API；输入需求开始，或 / 打开操作菜单"))+"\n");
         }
     }
-    if(conversation)show_conversation_history(*a,*conversation);
+    if(conversation&&!show_conversation_history(*a,*conversation))show_welcome();
     const bool guided=terminal_supports_ansi()&&!env_value("DESK_NO_ARROW");
     ChatDraft draft;
 #ifndef _WIN32
@@ -991,7 +1151,8 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
                 snprintf(hint,sizeof hint,tr("  当前模型：%s · F2 模型 · F3 推理\n"),model.c_str());
                 fputs(ui_paint(Tone::Dim,hint).c_str(),stdout);
                 snprintf(summary,sizeof summary,tr("推理模式：%s · 批准模式：%s\n"),reasoning_name(sget(a->config,"reasoning_effort")),permission_name(*a));
-                fputs(ui_paint(Tone::Dim,summary).c_str(),stdout);
+                const bool contrast=env_value("DESK_CONTRAST_NUMBERS");
+                fputs(ui_paint(contrast?Tone::Plain:Tone::Dim,summary,contrast).c_str(),stdout);
                 last_model=std::move(model);
                 last_modes=std::move(modes);
             }
@@ -1058,18 +1219,45 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
         }
         std::string task=line.get();
         if(task.empty())continue;
-        if(task=="/"||task=="/model"||task=="/reasoning"){
+        std::string trimmed=task;
+        while(!trimmed.empty()&&isspace(static_cast<unsigned char>(trimmed.back())))trimmed.pop_back();
+        // Local actions never reach the model: status card, key help and a
+        // context reset that also clears the saved context of this chat.
+        auto clear_context=[&]{
+            reset_session(a);
+            if(conversation){
+                conversation->reset_context=true;
+                persist_conversation(*a,*conversation);
+                history_checkpoint(*a,0);
+            }
+            terminal_message(ui_paint(Tone::Accent,std::string("  ")+tr("已清空当前对话上下文，模型不会再看到之前的内容。"))+"\n");
+        };
+        auto local_action=[&](int action){
+            if(action==4)clear_context();
+            else if(action==5)show_inline_status(*a);
+            else if(action==6)show_inline_help();
+        };
+        if(trimmed=="/status"){local_action(5);continue;}
+        if(trimmed=="/help"){local_action(6);continue;}
+        if(trimmed=="/clear"){local_action(4);continue;}
+        if(trimmed=="/"||trimmed=="/model"||trimmed=="/reasoning"||trimmed=="/approval"||trimmed=="/perm"||trimmed=="/mcp"||trimmed=="/new"){
             size_t revision=a->session_revision,config_revision=a->config_revision;
             a->error[0]=0;
 #ifndef _WIN32
-            if(screen){screen->controls_open=true;screen->begin_overlay();}
+            if(screen&&trimmed!="/new"){screen->controls_open=true;screen->begin_overlay();}
 #endif
-            int selected=1;
-            if(task=="/model")select_model(a,jobs);
-            else if(task=="/reasoning")reasoning_menu(a,jobs);
-            else selected=chat_menu(a,jobs);
+            int selected=1,action=0;
+            if(trimmed=="/model")select_model(a,jobs);
+            else if(trimmed=="/reasoning")reasoning_menu(a,jobs);
+            else if(trimmed=="/approval"||trimmed=="/perm")approval_menu(a,jobs);
+            else if(trimmed=="/mcp")mcp_menu(a,jobs);
+            else if(trimmed=="/new")selected=3;
+            else{
+                selected=chat_menu(a,jobs);
+                if(selected>=4){action=selected;selected=1;}
+            }
 #ifndef _WIN32
-            if(screen){screen->end_overlay();screen->controls_open=false;}
+            if(screen&&trimmed!="/new"){screen->end_overlay();screen->controls_open=false;}
 #endif
             if(conversation){
                 if(revision!=a->session_revision)conversation->reset_context=true;
@@ -1086,16 +1274,18 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             if(screen&&screen->has_composer()){
                 if(a->error[0])terminal_message(std::string(a->error)+"\n");
                 show_notice();
+                local_action(action);
                 continue;
             }
 #endif
             clear_page();
             if(a->error[0])fprintf(stderr,"%s\n",a->error);
-            if(conversation)chat_title(*conversation);
+            if(conversation)chat_title(*a,*conversation);
             show_notice();
             // Put the transcript back the way opening the chat does; anything the
             // worker printed while the menu was up follows from the job output.
             if(conversation)show_conversation_history(*a,*conversation);
+            local_action(action);
 #ifndef _WIN32
             if(screen)screen->refresh_composer();
 #endif
@@ -1117,28 +1307,45 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
     }
 }
 static void show_token_usage(J *usage,J *config){
-    if(usage)printf(tr("  累计词元（接口报告）：%llu\n"),static_cast<unsigned long long>(model_tokens(usage,config)));
+    if(usage)printf(tr("  累计词元（接口报告）：%s\n"),token_label(model_tokens(usage,config)).c_str());
     else menu_text(tr("  无法读取累计词元用量。"));
 }
-static void show_banner(){
+// "~/Documents/x" reads better than a full home path in headers.
+static std::string display_path(const char *path){
+    const char *home=env_value("HOME");
+    if(home&&*home){
+        const size_t length=strlen(home);
+        if(!strncmp(path,home,length)&&(path[length]=='/'||!path[length]))return "~"+std::string(path+length);
+    }
+    return path;
+}
+static void show_banner(const App &app){
     printf("\n  %s %s\n",
-           ui_paint(Tone::Accent,"desk code",true).c_str(),
-           ui_paint(Tone::Dim,VERSION).c_str());
+           ui_paint(Tone::Accent,"DeskCode",true).c_str(),
+           ui_number(VERSION).c_str());
     fputs("  ",stdout);
-    fputs(ui_paint(Tone::Dim,tr("终端编程助手")).c_str(),stdout);
+    const bool contrast=env_value("DESK_CONTRAST_NUMBERS");
+    std::string subtitle=std::string(tr("终端编程助手"))+" · "+display_path(app.root);
+    const int columns=terminal_columns();
+    if(columns>8)subtitle=ui_clip(subtitle,columns-4);
+    fputs(ui_paint(contrast?Tone::Plain:Tone::Dim,subtitle,contrast).c_str(),stdout);
     putchar('\n');
     page_rule();
 }
-static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &items,bool direct=false){
+static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &items,int start_mode=0){
 #ifndef _WIN32
     ConversationScreen screen(*a,jobs,items);
 #endif
-    bool new_chat=direct;
+    // start_mode: 0 show the list, 1 open a new chat, 2 resume the latest one.
+    bool new_chat=start_mode==1,resume=start_mode==2;
     while(interrupted!=SIGTERM&&!input_closed){
         const int count=static_cast<int>(items.size());
         const int create=count+1,rename=count+2,remove=count+3;
         int choice=create;
-        if(!new_chat){
+        if(resume){
+            resume=false;
+            choice=items.empty()?create:1;
+        }else if(!new_chat){
             clear_page();
             menu_text(tr("\n选择对话"));
             if(items.empty())menu_text(tr("还没有对话。"));
@@ -1156,7 +1363,7 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
                 choice=*selected;
             }else{
                 for(size_t i=0;i<items.size();i++){
-                    auto label=ui_paint(Tone::Dim,std::to_string(i+1)+".");
+                    auto label=ui_number(std::to_string(i+1)+".");
                     printf("  %s %s\n",label.c_str(),options[i].c_str());
                 }
                 menu_printf(tr("\n  [%d] 新建对话\n  [%d] 重命名对话\n  [%d] 删除对话\n  [0] 返回主菜单\n"),create,rename,remove);
@@ -1233,7 +1440,7 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         if(interrupted==SIGINT)interrupted=0;
     }
 }
-static int menu(App *a,bool direct=false){
+static int menu(App *a,int start_mode=0){
     InterfaceScreen interface;
     std::string notice;
     Tasks jobs;
@@ -1267,11 +1474,11 @@ static int menu(App *a,bool direct=false){
         advance_conversations(jobs,conversations);
 #endif
     };
-    if(direct)conversation_menu(a,jobs,conversations,true);
+    if(start_mode)conversation_menu(a,jobs,conversations,start_mode);
     for(;;){
         if(input_closed)return 0;
         clear_page();
-        show_banner();
+        show_banner(*a);
         show_notice();
         if(!notice.empty()){puts(notice.c_str());notice.clear();}
         menu_text(tr("  已导入的模型"));
@@ -1279,6 +1486,7 @@ static int menu(App *a,bool direct=false){
         J *profiles=get(a->store,"profiles");
         const char *active_model=sget(a->config,"model");
         const char *active_profile=sget(a->config,"profile");
+        const bool first_run=!json_object_object_length(profiles)&&!*active_model;
         bool active_listed=false;
         if(!json_object_object_length(profiles))menu_text(tr("    暂无已导入的模型"));
         else{
@@ -1286,9 +1494,23 @@ static int menu(App *a,bool direct=false){
             json_object_object_foreach(profiles,name,profile){
                 const char *model=sget(profile,"model");
                 bool current=*active_model&&!strcmp(name,active_profile)&&!strcmp(model,active_model);
+                if(env_value("DESK_CONTRAST_NUMBERS")){
+                    const Tone tone=current?Tone::Accent:Tone::Plain;
+                    std::string row="    "+ui_number(std::to_string(index++)+".",tone)
+                        +ui_paint(tone," "+std::string(model),!current);
+                    if(usage){
+                        row+=ui_paint(tone," · ");
+                        row+=ui_number(token_label(model_tokens(usage.get(),profile)),tone);
+                        row+=ui_paint(tone,tr(" 词元"),!current);
+                    }
+                    if(current)row+=ui_paint(tone,tr(" · 当前"));
+                    puts(row.c_str());
+                    if(current)active_listed=true;
+                    continue;
+                }
                 char row[640];
                 int used=snprintf(row,sizeof row,"    %zu. %s",index++,model);
-                if(usage&&used>0&&used<(int)sizeof row)used+=snprintf(row+used,sizeof row-(size_t)used,tr(" · %llu 词元"),static_cast<unsigned long long>(model_tokens(usage.get(),profile)));
+                if(usage&&used>0&&used<(int)sizeof row)used+=snprintf(row+used,sizeof row-(size_t)used,tr(" · %s 词元"),token_label(model_tokens(usage.get(),profile)).c_str());
                 if(current&&used>0&&used<(int)sizeof row)snprintf(row+used,sizeof row-(size_t)used,"%s",tr(" · 当前"));
                 // The active profile reads as accent; the rest stay quiet.
                 puts(current?ui_paint(Tone::Accent,row).c_str():ui_paint(Tone::Dim,row).c_str());
@@ -1302,8 +1524,15 @@ static int menu(App *a,bool direct=false){
             }else menu_text(tr("  当前模型：未配置"));
         }
         if(!usage&&(active_listed||!*active_model))menu_text(tr("  无法读取累计词元用量。"));
+        if(first_run){
+            putchar('\n');
+            const int columns=terminal_columns();
+            const int width=columns>12?std::min(columns-4,96):96;
+            for(const auto &line:ui_wrap(tr("首次使用：选择「添加模型」，内置 DeepSeek、Kimi、通义千问、智谱、OpenRouter、Ollama 等预设，填入 API Key 即可开始。"),width))
+                puts(("  "+ui_paint(Tone::Accent,line)).c_str());
+        }
         page_rule();
-        int choice=arrow_menu(jobs,{tr("开始对话"),tr("选择模型"),tr("添加模型"),tr("MCP 服务"),tr("设置"),tr("退出")});
+        int choice=arrow_menu(jobs,{tr("开始对话"),tr("选择模型"),tr("添加模型"),tr("MCP 服务"),tr("设置"),tr("退出")},first_run?3:-1,false);
         if(choice<0){if(interrupted==SIGINT&&!input_closed)continue;return 0;}
         if(!choice)return 0;
         int rc=0;
@@ -1317,8 +1546,153 @@ static int menu(App *a,bool direct=false){
     }
 }
 static void help(void){
-    menu_text(tr("运行 desk 后，使用数字菜单完成对话和设置。"));
-    menu_text(tr("desk [选项] [chat|任务|config|doctor|inspect]\n无任务参数打开数字菜单。\ndesk chat 直接进入对话。\ndesk -p \"需求\" 执行一次请求并退出。\n--workspace 目录\n--provider 配置名\n--yes 自动批准操作\n--no-shell 关闭命令工具\n--allow-desktop 开启桌面工具\n--app 应用名称（inspect）\n--max-steps 1..100\n--record 保存私有会话记录\n--verbose 显示详细工具过程\n--version 查看版本\n--help 帮助"));
+    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --allow-desktop  --record  --verbose  --version  --help"));
+}
+#ifdef _WIN32
+#define desk_dup _dup
+#define desk_dup2 _dup2
+#define desk_fdopen _fdopen
+#else
+#define desk_dup dup
+#define desk_dup2 dup2
+#define desk_fdopen fdopen
+#endif
+static int doctor(App &a,bool json){
+#ifdef _WIN32
+    const bool writable=true;
+#else
+    const bool writable=access(a.root,W_OK)==0;
+#endif
+    JsonPtr probe(copy(a.config));
+    a.error[0]=0;
+    const bool model_ok=!config_valid(&a,probe.get());
+    const std::string model_error=model_ok?std::string():std::string(a.error);
+    a.error[0]=0;
+    JsonPtr servers(mcp_load(a));
+    size_t mcp_total=0,mcp_enabled=0;
+    if(servers){
+        json_object_object_foreach(servers.get(),server_name,entry){
+            (void)server_name;
+            mcp_total++;
+            if(!bget(entry,"disabled"))mcp_enabled++;
+        }
+    }
+    const std::string mcp_error=servers?std::string():std::string(a.error);
+    JsonPtr conversations(history_list(a));
+    const bool ok=writable&&model_ok&&servers;
+    if(json){
+        JsonPtr result(obj());
+        put(result.get(),"version",str(VERSION));
+        put(result.get(),"ok",json_object_new_boolean(ok));
+        put(result.get(),"workspace",str(a.root));
+        put(result.get(),"workspace_writable",json_object_new_boolean(writable));
+        put(result.get(),"config_dir",str(a.config_dir));
+        put(result.get(),"model_configured",json_object_new_boolean(model_ok));
+        put(result.get(),"model",str(sget(probe.get(),"model")));
+        put(result.get(),"protocol",str(sget(probe.get(),"protocol")));
+        put(result.get(),"base_url",str(sget(probe.get(),"base_url")));
+        if(!model_ok)put(result.get(),"model_error",str(model_error.c_str()));
+        put(result.get(),"shell",json_object_new_boolean(a.shell));
+        put(result.get(),"desktop_support",json_object_new_boolean(desktop_compiled()));
+        put(result.get(),"mcp_configured",json_object_new_int64(static_cast<int64_t>(mcp_total)));
+        put(result.get(),"mcp_enabled",json_object_new_int64(static_cast<int64_t>(mcp_enabled)));
+        if(!servers)put(result.get(),"mcp_error",str(mcp_error.c_str()));
+        put(result.get(),"conversations",json_object_new_int64(static_cast<int64_t>(alen(conversations.get()))));
+        puts(json_object_to_json_string_ext(result.get(),JSON_C_TO_STRING_PRETTY));
+        return ok?0:1;
+    }
+    printf("\n  %s %s · %s\n\n",ui_paint(Tone::Accent,"DeskCode",true).c_str(),VERSION,tr("环境检查"));
+    auto row=[](int state,const char *label,const std::string &value){
+        const char *mark=state>0?"✓":state==0?"·":"✗";
+        const Tone tone=state>0?Tone::Success:state==0?Tone::Dim:Tone::Error;
+        std::string lead=tr(label);
+        while(ui_width(lead)<10)lead+=' ';
+        printf("  %s %s%s\n",ui_paint(tone,mark).c_str(),ui_paint(Tone::Dim,lead).c_str(),value.c_str());
+    };
+    row(writable?1:-1,"工作目录",display_path(a.root)+(writable?"":tr("（不可写）")));
+    row(model_ok?1:-1,"模型配置",model_ok?std::string(sget(probe.get(),"model"))+" ("+sget(probe.get(),"protocol")+") · "+sget(probe.get(),"base_url"):model_error);
+    row(a.shell?1:0,"命令工具",a.shell?tr("已开启"):tr("已关闭"));
+    row(desktop_compiled()?1:0,"桌面工具",desktop_compiled()?tr("AT-SPI 可用，可在设置中开启"):tr("当前构建未启用"));
+    char mcp_line[160];
+    snprintf(mcp_line,sizeof mcp_line,tr("%zu 个已启用 / 共 %zu 个"),mcp_enabled,mcp_total);
+    row(servers?1:-1,"MCP 服务",servers?std::string(mcp_line):mcp_error);
+    char history_line[96];
+    snprintf(history_line,sizeof history_line,tr("本目录 %zu 个"),alen(conversations.get()));
+    row(1,"对话记录",history_line);
+    row(1,"配置目录",display_path(a.config_dir));
+    const std::string verdict=ok?tr("全部检查通过。"):tr("有需要处理的项目；首次使用请运行 desk 并选择「添加模型」。");
+    printf("\n  %s\n\n",ui_paint(ok?Tone::Success:Tone::Warning,verdict).c_str());
+    return ok?0:1;
+}
+// One request without a menu. When stdout is not a terminal (a pipe, a file,
+// another agent) only the final reply goes there; progress and prompts go to
+// stderr. --json replaces the reply with one machine-readable result object.
+static int run_once(App &a,const char *task,bool json_output){
+    const bool headless=json_output||!isatty(1);
+    int saved_stdout=-1;
+    FILE *reply_stream=nullptr;
+    if(headless){
+        fflush(stdout);
+        saved_stdout=desk_dup(1);
+        if(saved_stdout>=0&&desk_dup2(2,1)>=0&&!json_output){
+            int reply_fd=desk_dup(saved_stdout);
+            if(reply_fd>=0)reply_stream=desk_fdopen(reply_fd,"w");
+            a.reply_out=reply_stream;
+        }
+    }
+    a.json_output=json_output;
+    if(json_output)a.trace=arr();
+    const double started=monotime();
+    int rc=1;
+    const char *status_name="failed";
+    if(config_valid(&a,a.config)){
+        fprintf(stderr,tr("%s 请运行 desk，在菜单中添加模型。\n"),a.error);
+        status_name="not_configured";
+    }else{
+        if(!headless)status(&a);
+        rc=run_task(&a,task)?1:0;
+        if(rc)fprintf(stderr,"%s\n",a.error);
+        if(!rc)status_name="completed";
+        else if(interrupted)status_name="interrupted";
+        else if(a.approval_unavailable)status_name="approval_required";
+        else if(!strcmp(a.state,"已取消"))status_name="denied";
+        else if(!strcmp(a.error,tr("达到步骤上限，任务未确认完成。")))status_name="step_limit";
+    }
+    if(json_output){
+        std::string reply;
+        J *last=at(a.messages,alen(a.messages)?alen(a.messages)-1:0);
+        if(!rc&&!strcmp(sget(last,"role"),"assistant"))reply=sget(last,"content");
+        JsonPtr result(obj());
+        put(result.get(),"status",str(status_name));
+        put(result.get(),"reply",str(reply.c_str()));
+        if(rc)put(result.get(),"error",str(a.error));
+        put(result.get(),"model",str(sget(a.config,"model")));
+        put(result.get(),"protocol",str(sget(a.config,"protocol")));
+        put(result.get(),"workspace",str(a.root));
+        put(result.get(),"tokens",json_object_new_int64(static_cast<int64_t>(std::min<std::uint64_t>(a.task_tokens,INT64_MAX))));
+        put(result.get(),"elapsed_seconds",json_object_new_double(static_cast<double>(static_cast<long long>((monotime()-started)*10))/10));
+        put(result.get(),"tools",a.trace?copy(a.trace):arr());
+        put(result.get(),"version",str(VERSION));
+        const char *text=json_object_to_json_string_ext(result.get(),JSON_C_TO_STRING_PLAIN);
+        FILE *out=saved_stdout>=0?desk_fdopen(saved_stdout,"w"):stdout;
+        if(out){
+            fputs(text,out);
+            fputc('\n',out);
+            fflush(out);
+            if(out!=stdout){fclose(out);saved_stdout=-1;}
+        }
+    }
+    if(reply_stream){fflush(reply_stream);fclose(reply_stream);a.reply_out=nullptr;}
+    if(saved_stdout>=0){
+        fflush(stdout);
+        desk_dup2(saved_stdout,1);
+#ifdef _WIN32
+        _close(saved_stdout);
+#else
+        close(saved_stdout);
+#endif
+    }
+    return rc;
 }
 static int run_cli(int argc,char **argv){
     setlocale(LC_ALL,"");
@@ -1336,11 +1710,13 @@ static int run_cli(int argc,char **argv){
         return *end||fd<3?2:task_worker(static_cast<std::intptr_t>(fd));
     }
     App a={
-        .yes=false,.shell=true,.desktop=false,.record=false,.max_steps=20,.state="等待任务",.stream_text={}
+        .yes=false,.shell=true,.desktop=false,.record=false,.max_steps=0,.state="等待任务",.stream_text={}
     };
     auto cleanup_app=[](App *app){app_cleanup(app);};
     std::unique_ptr<App,decltype(cleanup_app)> resources(&a,cleanup_app);
     const char *workspace=".",*profile=NULL,*task=NULL,*app="";
+    bool json_output=false,resume=false;
+    std::string stdin_task;
     int rc=0;
     for(int i=1;i<argc;i++){
         const char *arg=argv[i];
@@ -1362,13 +1738,15 @@ static int run_cli(int argc,char **argv){
             continue;
         }
         if(!strcmp(arg,"--lang")){i++;continue;}
-        if(!strcmp(arg,"--yes"))a.yes=true;
+        if(!strcmp(arg,"--yes")){a.yes=true;a.auto_edit=false;}
+        else if(!strcmp(arg,"--json"))json_output=true;
+        else if(!strcmp(arg,"-c")||!strcmp(arg,"--continue"))resume=true;
         else if(!strcmp(arg,"--no-shell"))a.shell=false;
         else if(!strcmp(arg,"--allow-shell"))a.shell=true;
         else if(!strcmp(arg,"--allow-desktop"))a.desktop=true;
         else if(!strcmp(arg,"--record"))a.record=true;
         else if(!strcmp(arg,"--verbose"))a.verbose=true;
-        else if(!strcmp(arg,"--workspace")||!strcmp(arg,"--provider")||!strcmp(arg,"--app")||!strcmp(arg,"--max-steps")){
+        else if(!strcmp(arg,"--workspace")||!strcmp(arg,"--provider")||!strcmp(arg,"--app")||!strcmp(arg,"--max-steps")||!strcmp(arg,"--approval")){
             if(i+1>=argc){
                 rc=2;
                 fputs(tr("选项缺少参数。\n"),stderr);
@@ -1378,17 +1756,27 @@ static int run_cli(int argc,char **argv){
             if(!strcmp(arg,"--workspace"))workspace=v;
             else if(!strcmp(arg,"--provider"))profile=v;
             else if(!strcmp(arg,"--app"))app=v;
+            else if(!strcmp(arg,"--approval")){
+                if(!strcmp(v,"full")){a.yes=true;a.auto_edit=false;}
+                else if(!strcmp(v,"edit")){a.yes=false;a.auto_edit=true;}
+                else if(!strcmp(v,"ask")){a.yes=false;a.auto_edit=false;}
+                else{
+                    fputs(tr("--approval 只接受 ask、edit 或 full。\n"),stderr);
+                    rc=2;
+                    goto cleanup;
+                }
+            }
             else{
                 char *end;
                 long n=strtol(v,&end,10);
-                if(*end||n<1||n>100){
+                if(end==v||*end||n<0||n>100){
                     rc=2;
                     goto cleanup;
                 }
                 a.max_steps=(int)n;
             }
         }
-        else if(arg[0]=='-'||task){
+        else if((arg[0]=='-'&&strcmp(arg,"-"))||task){
             fputs(tr("未知参数，请运行 desk --help。\n"),stderr);
             rc=2;
             goto cleanup;
@@ -1396,6 +1784,21 @@ static int run_cli(int argc,char **argv){
         else task=arg;
     }
     if(task&&!strcmp(task,"code"))task=nullptr;
+    if(task&&!strcmp(task,"-")){
+        char chunk[8192];
+        size_t count;
+        while((count=fread(chunk,1,sizeof chunk,stdin))>0){
+            stdin_task.append(chunk,count);
+            if(stdin_task.size()>1048576)break;
+        }
+        while(!stdin_task.empty()&&isspace(static_cast<unsigned char>(stdin_task.back())))stdin_task.pop_back();
+        if(stdin_task.empty()||stdin_task.size()>1048576||!valid_utf8(stdin_task)){
+            fputs(tr("标准输入没有可用的需求文本（须为 1 MB 以内的 UTF-8）。\n"),stderr);
+            rc=2;
+            goto cleanup;
+        }
+        task=stdin_task.c_str();
+    }
     if(!canonical_directory(workspace,a.root)){
         fputs(tr("工作目录不存在。\n"),stderr);
         rc=1;
@@ -1418,7 +1821,7 @@ static int run_cli(int argc,char **argv){
         a.config=copy(c);
     }
     if(task&&!strcmp(task,"doctor")){
-        printf(tr("desk %s\n命令工具：%s\n桌面支持：%s\nAPI 配置：%s（未联网验证）\n"),VERSION,a.shell?tr("开启"):tr("关闭"),desktop_compiled()?tr("可用，真实桌面操作仍需验证"):tr("当前构建未启用"),config_valid(&a,a.config)?tr("不完整"):tr("完整"));
+        rc=doctor(a,json_output);
         goto cleanup;
     }
     if(task&&!strcmp(task,"config")){
@@ -1434,8 +1837,21 @@ static int run_cli(int argc,char **argv){
         json_object_put(snapshot);
         goto cleanup;
     }
+    if(resume&&!task){
+        if(!isatty(STDIN_FILENO)){
+            fputs(tr("--continue 需要交互终端。\n"),stderr);
+            rc=2;
+            goto cleanup;
+        }
+        rc=menu(&a,2);
+        goto cleanup;
+    }
     if(!task&&isatty(STDIN_FILENO)){
         rc=menu(&a);
+        goto cleanup;
+    }
+    if(task&&strcmp(task,"chat")){
+        rc=run_once(a,task,json_output);
         goto cleanup;
     }
     if(config_valid(&a,a.config)){
@@ -1443,13 +1859,7 @@ static int run_cli(int argc,char **argv){
         rc=1;
         goto cleanup;
     }
-    if(task&&!strcmp(task,"chat")){
-        rc=menu(&a,true);
-    }else if(task){
-        status(&a);
-        rc=run_task(&a,task)?1:0;
-        if(rc)fprintf(stderr,"%s\n",a.error);
-    }
+    if(task)rc=menu(&a,1);
     else {Tasks jobs;chat(&a,jobs);}
     cleanup:
     return input_closed?0:interrupted==SIGTERM?143:interrupted==SIGINT?130:rc;

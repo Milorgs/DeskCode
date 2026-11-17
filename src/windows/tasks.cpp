@@ -150,7 +150,7 @@ int task_worker(std::intptr_t raw){
     WinHandle control(reinterpret_cast<HANDLE>(raw));Lines source{control.get()};std::string line;if(!source.next(line))return 1;
     JsonPtr data(json_tokener_parse(line.c_str()));if(!data)return 1;set_language(sget(data.get(),"language"));
     App app;app.conversation_worker=bget(data.get(),"conversation");app.config=copy(get(data.get(),"config"));snprintf(app.root,sizeof app.root,"%s",sget(data.get(),"root"));snprintf(app.config_dir,sizeof app.config_dir,"%s",sget(data.get(),"config_dir"));
-    app.yes=bget(data.get(),"yes");app.auto_edit=bget(data.get(),"auto_edit");app.shell=bget(data.get(),"shell");app.desktop=bget(data.get(),"desktop");app.record=bget(data.get(),"record");app.verbose=bget(data.get(),"verbose");app.max_steps=iget(data.get(),"max_steps",20);app.task_events=static_cast<std::intptr_t>(json_object_get_int64(get(data.get(),"events")));
+    app.yes=bget(data.get(),"yes");app.auto_edit=bget(data.get(),"auto_edit");app.shell=bget(data.get(),"shell");app.desktop=bget(data.get(),"desktop");app.record=bget(data.get(),"record");app.verbose=bget(data.get(),"verbose");app.max_steps=iget(data.get(),"max_steps",0);app.task_events=static_cast<std::intptr_t>(json_object_get_int64(get(data.get(),"events")));
     app.conversation_id=sget(data.get(),"conversation_id");
     if(!app.conversation_id.empty())app.messages=history_context(app,app.conversation_id);
     WinHandle events(reinterpret_cast<HANDLE>(app.task_events)),cancel(reinterpret_cast<HANDLE>(static_cast<std::intptr_t>(json_object_get_int64(get(data.get(),"cancel")))));

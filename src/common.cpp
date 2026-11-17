@@ -151,6 +151,8 @@ void app_cleanup(App *a){
     json_object_put(a->store);
     json_object_put(a->config);
     json_object_put(a->messages);
+    json_object_put(a->trace);
+    a->trace=nullptr;
 }
 size_t alen(J *j){
     return j&&json_object_is_type(j,json_type_array)?json_object_array_length(j):0;
@@ -240,7 +242,7 @@ int approve(App *a,const char *description,Operation operation,const char *title
         fflush(stdout);
     };
     preview(compact);
-    if(a->task_events<0&&!isatty(STDIN_FILENO))return 0;
+    if(a->task_events<0&&!isatty(STDIN_FILENO)){a->approval_unavailable=true;return 0;}
     bool yes=false;
     for(;;){
         fflush(stdout);

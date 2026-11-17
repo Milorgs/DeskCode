@@ -26,7 +26,9 @@ bool win_spawn(const std::wstring &executable,std::wstring command,const std::ws
     process=std::move(child);return true;
 }
 std::string safe_output(std::string_view bytes){
+    if(valid_utf8(bytes))return std::string(bytes);
     std::string result;
+    result.reserve(bytes.size());
     for(size_t i=0;i<bytes.size();){
         auto c=static_cast<unsigned char>(bytes[i]);size_t size=c<0x80?1:c>=0xc2&&c<=0xdf?2:c>=0xe0&&c<=0xef?3:c>=0xf0&&c<=0xf4?4:0;
         if(size&&size<=bytes.size()-i&&valid_utf8(bytes.substr(i,size))){result.append(bytes.substr(i,size));i+=size;}
@@ -49,11 +51,24 @@ J *run_command(App *app,const char *command,int timeout_ms){
     auto drain=[&]{for(int i=0;i<16;i++){
         DWORD available=0;if(!PeekNamedPipe(read.get(),nullptr,0,nullptr,&available,nullptr)||!available)break;
         char bytes[4096];DWORD count=0;if(!ReadFile(read.get(),bytes,(std::min)(available,static_cast<DWORD>(sizeof bytes)),&count,nullptr)||!count)break;
-        size_t keep=(std::min)(static_cast<size_t>(count),16000-output.size());output.append(bytes,keep);if(keep<count)truncated=true;
+        size_t keep=(std::min)(static_cast<size_t>(count),static_cast<size_t>(COMMAND_OUTPUT_LIMIT)-output.size());
+        if(keep)output.append(bytes,keep);
+        if(keep<count)truncated=true;
     }};
     for(;;){drain();if(WaitForSingleObject(process.get(),10)==WAIT_OBJECT_0){GetExitCodeProcess(process.get(),&code);break;}if(interrupted)break;if(monotime()>=until){timed=true;break;}}
     TerminateJobObject(job.get(),1);WaitForSingleObject(process.get(),2000);drain();
     if(interrupted)return err(tr("命令已取消。"));
+    if(truncated){
+        size_t tail=0;
+        while(tail<output.size()&&tail<3&&(static_cast<unsigned char>(output[output.size()-1-tail])&0xc0)==0x80)tail++;
+        if(tail<output.size()){
+            auto lead=static_cast<unsigned char>(output[output.size()-1-tail]);
+            size_t expected=lead<0x80?1:lead<0xe0?2:lead<0xf0?3:lead<0xf8?4:0;
+            if(expected>tail+1)output.resize(output.size()-1-tail);
+        }
+    }
+    auto safe=safe_output(output);
+    if(safe.size()>INT_MAX)return err(tr("命令输出无法转换为 JSON。"));
     J *result=obj();put(result,"exit_code",json_object_new_int64(code));put(result,"timed_out",json_object_new_boolean(timed));put(result,"truncated",json_object_new_boolean(truncated));
-    auto safe=safe_output(output);put(result,"output",json_object_new_string_len(safe.data(),static_cast<int>(safe.size())));return result;
+    put(result,"output",json_object_new_string_len(safe.data(),static_cast<int>(safe.size())));return result;
 }

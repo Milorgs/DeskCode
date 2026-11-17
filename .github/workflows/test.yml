@@ -140,5 +140,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; keeping the published package."
           else
-            gh release create "$tag" dist/desk-agent-windows-x64.zip dist/desk-agent-linux-x64.tar.gz dist/SHA256SUMS.txt --target "$GITHUB_SHA" --title "desk-agent $DESK_VERSION — Windows / Linux" --notes-file "docs/releases/$tag.md"
+            gh release create "$tag" dist/desk-agent-windows-x64.zip dist/desk-agent-linux-x64.tar.gz dist/SHA256SUMS.txt --target "$GITHUB_SHA" --title "DeskCode $DESK_VERSION — Windows / Linux" --notes-file "docs/releases/$tag.md"
           fi
