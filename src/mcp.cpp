@@ -99,6 +99,7 @@ struct Client {
     App &app;
     std::string name,session,version;
     JsonPtr config;
+    CurlHandle http_handle{};
     long next_id=0;
 #ifndef _WIN32
     pid_t child=-1;
@@ -106,6 +107,19 @@ struct Client {
     std::string pending;
 #endif
     Client(App &a,const char *n,J *c):app(a),name(n),config(copy(c)){}
+    bool healthy(){
+        if(*sget(config.get(),"url"))return !session.empty()||version.empty();
+#ifndef _WIN32
+        if(child<=0||input<0||output<0)return false;
+        int status=0;
+        pid_t ended=waitpid(child,&status,WNOHANG);
+        if(ended==0)return true;
+        if(ended==child)child=-1;
+        return false;
+#else
+        return false;
+#endif
+    }
     ~Client(){
         close_remote();
 #ifndef _WIN32
@@ -116,15 +130,18 @@ struct Client {
             int status=0;double until=monotime()+0.3;
             pid_t result=0;
             while((result=waitpid(child,&status,WNOHANG))==0&&monotime()<until)usleep(10000);
-            kill(-child,SIGKILL);
-            if(result==0)while(waitpid(child,&status,0)<0&&errno==EINTR){}
+            if(result==0){
+                kill(-child,SIGKILL);
+                while(waitpid(child,&status,0)<0&&errno==EINTR){}
+            }
         }
 #endif
     }
     void close_remote() noexcept {
         if(session.empty()||!*sget(config.get(),"url"))return;
         try{
-            CurlHandle handle(curl_easy_init());
+            CurlHandle handle=std::move(http_handle);
+            if(!handle)handle.reset(curl_easy_init());
             if(!handle)return;
             HttpHeaders headers;
             headers.append("Mcp-Session-Id: "+session);
@@ -265,8 +282,16 @@ struct Client {
         auto &app=*static_cast<App *>(pointer);check_exit(app);progress_tick(&app);return interrupted?1:0;
     }
     JsonPtr http(J *message,long id,bool notification){
-        CurlHandle handle(curl_easy_init());
+        // Borrow the client's persistent handle for connection reuse; if an SSE
+        // callback re-enters http() to answer a server ping, fall back to a
+        // fresh handle so the active stream is never reset mid-transfer.
+        CurlHandle handle=std::move(http_handle);
+        if(!handle)handle.reset(curl_easy_init());
         if(!handle)throw Failure("Could not initialize MCP HTTP client.");
+        struct ReturnHandle {
+            CurlHandle &slot,&borrowed;
+            ~ReturnHandle(){if(!slot)slot=std::move(borrowed);}
+        } restore_handle{http_handle,handle};
         std::string body=encoded(message);Transfer transfer{*this,id,notification,{},{},{},{},{},JsonPtr{},0,false};
         HttpHeaders headers;
         headers.append("Content-Type: application/json");headers.append("Accept: application/json, text/event-stream");
@@ -332,7 +357,7 @@ struct Client {
         // normal message reconnects each time and the notice is just noise.
         if(explicit_test)progress(&app,tr("正在连接 MCP…"));
         JsonPtr params(obj());put(params.get(),"protocolVersion",str(protocol));put(params.get(),"capabilities",obj());
-        J *info=obj();put(info,"name",str("desk-agent"));put(info,"version",str(VERSION));put(params.get(),"clientInfo",info);
+        J *info=obj();put(info,"name",str("DeskCode"));put(info,"version",str(VERSION));put(params.get(),"clientInfo",info);
         auto result=request("initialize",params.get());version=sget(result.get(),"protocolVersion");
         if(version!="2025-06-18"&&version!="2025-03-26"&&version!="2024-11-05")throw Failure("MCP server selected an unsupported protocol version.");
         if(!get(get(result.get(),"capabilities"),"tools"))throw Failure("MCP server does not advertise tools.");
@@ -388,7 +413,9 @@ void mcp_close(App &app){delete static_cast<Registry *>(app.mcp_data);app.mcp_da
 bool mcp_prepare(App &app,bool explicit_test,const char *only){
     JsonPtr servers(mcp_load(app));if(!servers)return false;
     std::string configuration=encoded(servers.get());auto *previous=static_cast<Registry *>(app.mcp_data);
-    if(!explicit_test&&previous&&previous->configuration==configuration)return true;
+    if(!explicit_test&&previous&&previous->configuration==configuration
+       &&std::all_of(previous->clients.begin(),previous->clients.end(),[](const auto &c){return c->healthy();}))
+        return true;
     mcp_close(app);auto registry=std::make_unique<Registry>();registry->configuration=configuration;
     try{
         json_object_object_foreach(servers.get(),name,entry){

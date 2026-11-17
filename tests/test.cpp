@@ -1,6 +1,7 @@
 #include "desk.hpp"
 #include "tasks.hpp"
 #include "mcp.hpp"
+#include "ui.hpp"
 #include <curl/curl.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -9,6 +10,7 @@
 #include <pty.h>
 #include <termios.h>
 #include <algorithm>
+#include <functional>
 #include <filesystem>
 #include <poll.h>
 #include <fcntl.h>
@@ -113,6 +115,111 @@ static void test_files(void){
     char *hash=sha256("abc",3);
     CHECK(!strcmp(hash,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
     free(hash);
+    // Sliced read_file: exact 1-based line range on normal and >256 KB files.
+    {
+        std::string multi="第一行\n第二行\n第三行\n第四行\n";
+        char multi_path[PATH_MAX];
+        CHECK(!path_suffix(multi_path,a.root,"/lines.txt"));
+        CHECK(!atomic_file(multi_path,multi.data(),multi.size(),0600));
+        char *multi_hash=sha256(multi.data(),multi.size());
+        JsonPtr slice_args(args("lines.txt"));
+        put(slice_args.get(),"start_line",json_object_new_int(2));
+        put(slice_args.get(),"end_line",json_object_new_int(3));
+        JsonPtr slice_res(tool_call(&a,"read_file",slice_args.get()));
+        CHECK(!get(slice_res.get(),"error"));
+        CHECK(bget(slice_res.get(),"sliced"));
+        CHECK(iget(slice_res.get(),"start_line",0)==2);
+        CHECK(iget(slice_res.get(),"end_line",0)==3);
+        CHECK(iget(slice_res.get(),"total_lines",0)==4);
+        CHECK(!strcmp(sget(slice_res.get(),"content"),"第二行\n第三行\n"));
+        CHECK(!strcmp(sget(slice_res.get(),"sha256"),multi_hash));
+        free(multi_hash);
+
+        // Invalid range and wrong parameter types must be rejected.
+        put(slice_args.get(),"start_line",json_object_new_int(0));
+        slice_res.reset(tool_call(&a,"read_file",slice_args.get()));
+        CHECK(get(slice_res.get(),"error"));
+        put(slice_args.get(),"start_line",str("2"));
+        slice_res.reset(tool_call(&a,"read_file",slice_args.get()));
+        CHECK(get(slice_res.get(),"error"));
+
+        // Files >256 KB fail full read_file, but succeed with a line slice.
+        std::string huge;
+        huge.reserve(320000);
+        for(int i=1;i<=5000;i++)huge+="Line "+std::to_string(i)+": 0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
+        CHECK(huge.size()>FILE_LIMIT);
+        char huge_path[PATH_MAX];
+        CHECK(!path_suffix(huge_path,a.root,"/huge.log"));
+        CHECK(!atomic_file(huge_path,huge.data(),huge.size(),0600));
+        JsonPtr full_req(args("huge.log")),full_res(tool_call(&a,"read_file",full_req.get()));
+        CHECK(get(full_res.get(),"error"));
+        JsonPtr huge_slice(args("huge.log"));
+        put(huge_slice.get(),"start_line",json_object_new_int(4999));
+        put(huge_slice.get(),"end_line",json_object_new_int(5000));
+        JsonPtr huge_res(tool_call(&a,"read_file",huge_slice.get()));
+        CHECK(!get(huge_res.get(),"error"));
+        CHECK(iget(huge_res.get(),"total_lines",0)==5000);
+        CHECK(strstr(sget(huge_res.get(),"content"),"Line 4999:")&&strstr(sget(huge_res.get(),"content"),"Line 5000:"));
+        CHECK(!get(huge_res.get(),"sha256"));
+
+        // Sorted list_files with file sizes and recursive max_depth.
+        char sub_dir[PATH_MAX],sub_file[PATH_MAX];
+        CHECK(!path_suffix(sub_dir,a.root,"/subdir"));
+        CHECK(!mkdirs(sub_dir,0700));
+        CHECK(!path_suffix(sub_file,a.root,"/subdir/nested.txt"));
+        CHECK(!atomic_file(sub_file,"nested",6,0600));
+        JsonPtr list_req(args("."));
+        put(list_req.get(),"max_depth",json_object_new_int(2));
+        JsonPtr list_res(tool_call(&a,"list_files",list_req.get()));
+        CHECK(!get(list_res.get(),"error"));
+        J *entries=get(list_res.get(),"entries");
+        CHECK(alen(entries)>=3);
+        CHECK(bget(at(entries,0),"directory")); // directories sorted first
+        bool found_nested=false;
+        for(size_t idx=0;idx<alen(entries);++idx){
+            J *item=at(entries,idx);
+            if(!strcmp(sget(item,"name"),"subdir/nested.txt")){
+                found_nested=true;
+                CHECK(iget(item,"size",0)==6);
+            }
+        }
+        CHECK(found_nested);
+
+        // Case-insensitive search_text and CRLF-tolerant edit_file + match_lines diagnostics.
+        const char *crlf_doc="Header=Alpha\r\nSection=DeskCode\r\nFooter=Alpha\r\n";
+        char crlf_path[PATH_MAX];
+        CHECK(!path_suffix(crlf_path,a.root,"/crlf.txt"));
+        CHECK(!atomic_file(crlf_path,crlf_doc,strlen(crlf_doc),0600));
+        JsonPtr ci_search(args("crlf.txt"));
+        put(ci_search.get(),"query",str("deskcode"));
+        put(ci_search.get(),"case_insensitive",json_object_new_boolean(1));
+        JsonPtr ci_res(tool_call(&a,"search_text",ci_search.get()));
+        CHECK(alen(get(ci_res.get(),"matches"))==1&&iget(at(get(ci_res.get(),"matches"),0),"line",0)==2);
+
+        char *crlf_hash=sha256(crlf_doc,strlen(crlf_doc));
+        JsonPtr dup_edit(args("crlf.txt"));
+        put(dup_edit.get(),"old_text",str("Alpha"));
+        put(dup_edit.get(),"new_text",str("Beta"));
+        put(dup_edit.get(),"expected_sha256",str(crlf_hash));
+        JsonPtr dup_res(tool_call(&a,"edit_file",dup_edit.get()));
+        CHECK(get(dup_res.get(),"error"));
+        CHECK(iget(dup_res.get(),"match_count",0)==2);
+        CHECK(alen(get(dup_res.get(),"match_lines"))==2);
+        CHECK(json_object_get_int(at(get(dup_res.get(),"match_lines"),0))==1);
+        CHECK(json_object_get_int(at(get(dup_res.get(),"match_lines"),1))==3);
+
+        // LF old_text/new_text against CRLF file succeeds and preserves CRLF.
+        JsonPtr lf_edit(args("crlf.txt"));
+        put(lf_edit.get(),"old_text",str("Header=Alpha\nSection=DeskCode"));
+        put(lf_edit.get(),"new_text",str("Header=Updated\nSection=DeskCode"));
+        put(lf_edit.get(),"expected_sha256",str(crlf_hash));
+        free(crlf_hash);
+        JsonPtr lf_res(tool_call(&a,"edit_file",lf_edit.get()));
+        CHECK(!get(lf_res.get(),"error")&&bget(lf_res.get(),"verified"));
+        char *after_crlf=read_bytes(crlf_path,FILE_LIMIT,NULL);
+        CHECK(after_crlf&&!strcmp(after_crlf,"Header=Updated\r\nSection=DeskCode\r\nFooter=Alpha\r\n"));
+        free(after_crlf);
+    }
     app_cleanup(&a);
 }
 static void fixture(App *a,const char *name,const void *data,size_t length){
@@ -312,9 +419,16 @@ static void test_process(void){
     CHECK(!strcmp(sget(r,"output"),"unset"));
     json_object_put(r);
     unsetenv("DESK_API_KEY");
-    r=run_command(&a,"head -c 17000 /dev/zero",2000);
+    r=run_command(&a,"head -c 3000000 /dev/zero > large.bin && head -c 3000000 large.bin",5000);
+    CHECK(iget(r,"exit_code",-1)==0);
+    CHECK(!bget(r,"timed_out"));
+    CHECK(!bget(r,"truncated"));
+    CHECK(json_object_get_string_len(get(r,"output"))==3000000);
+    json_object_put(r);
+    r=run_command(&a,"head -c 9000000 /dev/zero",5000);
+    CHECK(iget(r,"exit_code",-1)==0);
     CHECK(bget(r,"truncated"));
-    CHECK(json_object_get_string_len(get(r,"output"))==16000);
+    CHECK(json_object_get_string_len(get(r,"output"))==COMMAND_OUTPUT_LIMIT);
     json_object_put(r);
     r=run_command(&a,"sleep 10 & echo $! > child.pid; wait",50);
     CHECK(bget(r,"timed_out"));
@@ -361,10 +475,61 @@ static void test_context_and_validation(void){
     add(a.messages,m);
     J *defs=schemas(&a),*ctx=context(&a,defs);
     CHECK(ctx);
-    CHECK(alen(ctx)==13);
+    CHECK(alen(ctx)==21);
     CHECK(alen(a.messages)==21);
     CHECK(!strcmp(sget(at(ctx,alen(ctx)-1),"content"),"current"));
     json_object_put(ctx);
+    J *call_reply=json_tokener_parse(R"({"role":"assistant","tool_calls":[{"id":"shot","type":"function","function":{"name":"mcp_screenshot","arguments":"{}"}}]})");
+    add(a.messages,call_reply);
+    J *shot=obj();
+    put(shot,"role",str("tool"));
+    put(shot,"tool_call_id",str("shot"));
+    const std::string oversized=R"({"content":[{"type":"image","data":")"+std::string(CONTEXT_LIMIT*2,'A')+
+        R"("},{"type":"text","text":"Desktop tree still available"},{"type":"text","text":")"+
+        std::string(CONTEXT_LIMIT*2,'x')+R"("}]})";
+    put(shot,"content",str(oversized.c_str()));
+    add(a.messages,shot);
+    bool compacted=false;
+    JsonPtr compact(context(&a,defs,&compacted));
+    CHECK(compact&&compacted);
+    CHECK(alen(compact.get())==5);
+    CHECK(!strcmp(sget(at(compact.get(),2),"content"),"current"));
+    CHECK(!strcmp(sget(at(compact.get(),4),"tool_call_id"),"shot"));
+    CHECK(strstr(sget(at(compact.get(),4),"content"),"Desktop tree still available"));
+    CHECK(strstr(sget(at(compact.get(),4),"content"),"smaller screenshot"));
+    CHECK(!strstr(sget(at(compact.get(),4),"content"),"AAAAAAAA"));
+    CHECK(strlen(sget(shot,"content"))==oversized.size());
+    J *followup=obj();
+    put(followup,"role",str("user"));
+    put(followup,"content",str("continue"));
+    add(a.messages,followup);
+    compact.reset(context(&a,defs,&compacted));
+    CHECK(compact&&!compacted);
+    const size_t followup_size=alen(compact.get());
+    CHECK(followup_size==24);
+    CHECK(!strcmp(sget(at(compact.get(),followup_size-2),"tool_call_id"),"shot"));
+    CHECK(strstr(sget(at(compact.get(),followup_size-2),"content"),"Desktop tree still available"));
+    CHECK(!json_object_array_del_idx(a.messages,alen(a.messages)-1,1));
+    for(int i=0;i<20;++i){
+        const std::string id="extra-"+std::to_string(i);
+        J *reply=copy(call_reply),*tool=copy(shot);
+        put(at(get(reply,"tool_calls"),0),"id",str(id.c_str()));
+        put(tool,"tool_call_id",str(id.c_str()));
+        const std::string result=R"({"output":")"+std::string(8000,'x')+R"("})";
+        put(tool,"content",str(result.c_str()));
+        add(a.messages,reply);
+        add(a.messages,tool);
+    }
+    compact.reset(context(&a,defs,&compacted));
+    CHECK(compact&&compacted);
+    CHECK(strstr(sget(at(compact.get(),1),"content"),"Automatic context summary"));
+    CHECK(!strcmp(sget(at(compact.get(),2),"content"),"current"));
+    CHECK(alen(compact.get())<43);
+    CHECK(!strcmp(sget(at(compact.get(),alen(compact.get())-1),"tool_call_id"),"extra-19"));
+    for(size_t i=3;i<alen(compact.get());i+=2){
+        CHECK(!strcmp(sget(at(get(at(compact.get(),i),"tool_calls"),0),"id"),
+            sget(at(compact.get(),i+1),"tool_call_id")));
+    }
     json_object_put(defs);
     J *data=json_tokener_parse("{\"stop_reason\":\"max_tokens\",\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"write_file\",\"input\":{}}]}");
     CHECK(!native_response(&a,data));
@@ -590,6 +755,8 @@ static void test_recovery_and_loops(void){
     put(write,"expected_sha256",nullptr);
     CHECK(!workflow(&a,{
         model_tool("missing","run_shell",command("test -f ready.txt")),
+        model_tool("missing2","run_shell",command("test -r ready.txt")),
+        model_tool("missing3","run_shell",command("test -s ready.txt")),
         model_tool("create","write_file",write),
         model_tool("retry","run_shell",command("test -f ready.txt")),
         model_reply(nullptr,"已创建并核对。")
@@ -598,22 +765,23 @@ static void test_recovery_and_loops(void){
     app_cleanup(&a);
     a=fresh();
     fixture(&a,"/stable.txt","stable",6);
-    write=args("must-not-exist.txt");
-    put(write,"content",str("not executed"));
+    write=args("after-repeat.txt");
+    put(write,"content",str("executed"));
     put(write,"expected_sha256",nullptr);
     J *last=arr();
     add(last,model_call("read3","read_file",args("stable.txt")));
-    add(last,model_call("pending","write_file",write));
-    CHECK(workflow(&a,{
+    add(last,model_call("read4","read_file",args("stable.txt")));
+    add(last,model_call("write-after-repeat","write_file",write));
+    CHECK(!workflow(&a,{
         model_tool("read1","read_file",args("stable.txt")),
         model_tool("read2","read_file",args("stable.txt")),
-        model_reply(last)
-    })!=0);
-    CHECK(strstr(a.error,"相同工具"));
-    CHECK(strstr(sget(at(a.messages,alen(a.messages)-1),"content"),"未确认执行"));
+        model_reply(last),
+        model_reply(nullptr,"已改用其他操作。")
+    }));
+    CHECK(strstr(sget(at(a.messages,alen(a.messages)-3),"content"),"cached_result"));
     char path[PATH_MAX];
-    CHECK(!path_suffix(path,a.root,"/must-not-exist.txt"));
-    CHECK(access(path,F_OK)!=0&&errno==ENOENT);
+    CHECK(!path_suffix(path,a.root,"/after-repeat.txt"));
+    CHECK(access(path,F_OK)==0);
     app_cleanup(&a);
     a=fresh();
     write=args("must-not-exist.txt");
@@ -644,6 +812,16 @@ static void test_recovery_and_loops(void){
     char *kept=read_bytes(path,FILE_LIMIT,nullptr);
     CHECK(kept&&!strcmp(kept,"keep"));
     free(kept);
+    app_cleanup(&a);
+    // Exploratory read_file miss on an optional file resolves once a subsequent read succeeds.
+    a=fresh();
+    fixture(&a,"/present.txt","present",7);
+    CHECK(!workflow(&a,{
+        model_tool("probe","read_file",args("optional-missing.toml")),
+        model_tool("actual","read_file",args("present.txt")),
+        model_reply(nullptr,"Found present.txt and answered.")
+    }));
+    CHECK(!strcmp(a.state,"本轮结束"));
     app_cleanup(&a);
 }
 static void test_native_error_flags(void){
@@ -765,7 +943,7 @@ static void test_menu(void){
     CHECK(strstr(output,"[1] 开始对话"));
     CHECK(strstr(output,"[1] OpenAI接口"));
     CHECK(strstr(output,"[2] Anthropic接口"));
-    CHECK(!strstr(output,"API Key"));
+    CHECK(!strstr(output,"API Key："));
     app_cleanup(&a);
 }
 static std::string task_state(Tasks &jobs,int id){
@@ -961,6 +1139,10 @@ static void test_language_preferences(void){
     J *user=obj();put(user,"role",str("user"));put(user,"content",str("Keep my request exactly."));add(a.messages,user);
     CHECK(save_language(a,"en"));CHECK(!strcmp(language_code(),"en"));
     CHECK(!strcmp(tr("等待任务"),"Waiting for a task"));
+    CHECK(!strcmp(tr("文件超过 256 KB 限制。"),"The file exceeds the 256 KB limit."));
+    CHECK(!strcmp(tr("修改后的文件超过 256 KB 限制。"),"The edited file exceeds the 256 KB limit."));
+    CHECK(!strcmp(tr("无法读取文件，文件可能不是普通文件或超过 256 KB。"),"Could not read the file. It may not be a regular file or may exceed 256 KB."));
+    CHECK(!strcmp(tr("-p 需要一个需求文本。\n"),"-p requires a prompt.\n"));
     CHECK(before==json_object_to_json_string_ext(a.config,JSON_C_TO_STRING_PLAIN));
     CHECK(store==json_object_to_json_string_ext(a.store,JSON_C_TO_STRING_PLAIN));
     CHECK(alen(a.messages)==1&&!strcmp(sget(at(a.messages,0),"content"),"Keep my request exactly."));
@@ -1318,6 +1500,46 @@ static void test_compact_output(void){
         std::string history=json_object_to_json_string_ext(a.messages,JSON_C_TO_STRING_PLAIN);CHECK(history.find("hidden-command-output")!=std::string::npos);CHECK(history.find("hidden-intermediate-comment")!=std::string::npos);
         app_cleanup(&a);
     }
+
+    App a=fresh();
+    a.max_steps=0;
+    a.conversation_worker=true;
+    a.task_events=open("/dev/null",O_WRONLY);
+    CHECK(a.task_events>=0);
+    std::vector<std::string> replies;
+    for(int i=0;i<22;++i){
+        const std::string id="command-"+std::to_string(i);
+        replies.push_back(model_tool(id.c_str(),"run_shell",command("true")));
+    }
+    fixture(&a,"/first.txt","first",5);
+    fixture(&a,"/second.txt","second",6);
+    replies.push_back(model_tool("first","read_file",args("first.txt")));
+    replies.push_back(model_tool("second","read_file",args("second.txt")));
+    replies.push_back(model_reply(nullptr,"Finished commands and reads."));
+
+    fflush(stdout);
+    FILE *log=tmpfile();
+    CHECK(log);
+    int saved=dup(STDOUT_FILENO);
+    CHECK(saved>=0&&dup2(fileno(log),STDOUT_FILENO)>=0);
+    const int rc=workflow(&a,replies);
+    fflush(stdout);
+    CHECK(dup2(saved,STDOUT_FILENO)>=0);
+    close(saved);
+    const long size=ftell(log);
+    CHECK(size>=0);
+    rewind(log);
+    std::string output(static_cast<size_t>(size),'\0');
+    CHECK(fread(output.data(),1,output.size(),log)==output.size());
+    fclose(log);
+    CHECK(!rc&&output.find("Finished commands and reads.")!=output.npos);
+    for(const auto *label:{"正在执行命令…","正在读取文件…"}){
+        const auto first=output.find(label);
+        CHECK(first!=output.npos&&output.find(label,first+1)==output.npos);
+    }
+    close(a.task_events);
+    a.task_events=-1;
+    app_cleanup(&a);
 }
 static void test_exit_during_work(void){
     for(bool command_running:{false,true}){
@@ -1398,18 +1620,43 @@ static void test_chat_history_scroll(){
     CHECK(terminal_until(master,output,"\033[?1006h"));
     CHECK(output.find("NEWEST_SCROLL_LINE")!=std::string::npos);
     CHECK(output.find("OLDEST_SCROLL_LINE")==std::string::npos);
+    CHECK(output.find("\033[1;89H│")!=std::string::npos);
+    CHECK(output.find("\033[28;89H┃")!=std::string::npos);
     output.clear();
-    for(int i=0;i<15;i++)type_terminal(master,output,"\033[<64;4;4M");
+    for(int i=0;i<60;i++)type_terminal(master,output,"\033[<64;4;4M");
     CHECK(terminal_until(master,output,"OLDEST_SCROLL_LINE"));
     output.clear();
-    for(int i=0;i<15;i++)type_terminal(master,output,"\033[<65;4;4M");
+    for(int i=0;i<60;i++)type_terminal(master,output,"\033[<65;4;4M");
     CHECK(terminal_until(master,output,"NEWEST_SCROLL_LINE"));
+    // Clicking and dragging the scrollbar jumps directly to top and bottom.
     output.clear();
+    type_terminal(master,output,"\033[<0;89;1M");
+    CHECK(terminal_until(master,output,"OLDEST_SCROLL_LINE"));
+    CHECK(terminal_until(master,output,"\033[1;89H┃"));
+    CHECK(terminal_until(master,output,"\033[28;89H│"));
+    output.clear();
+    type_terminal(master,output,"\033[<32;40;32M");
+    CHECK(terminal_until(master,output,"NEWEST_SCROLL_LINE"));
+    CHECK(terminal_until(master,output,"\033[28;89H┃"));
+    output.clear();
+    // Release outside the track ends capture; later motion cannot scroll.
+    type_terminal(master,output,"\033[<0;40;32m");
+    type_terminal(master,output,"\033[<32;89;1M");
+    CHECK(output.find("OLDEST_SCROLL_LINE")==std::string::npos);
+    // Grabbing inside the thumb must not jump before movement begins.
+    type_terminal(master,output,"\033[<0;89;28M\033[<32;89;28M");
+    CHECK(output.find("History line 26")==std::string::npos);
+    type_terminal(master,output,"\033[<0;89;28m");
     type_terminal(master,output,"\033[5~\033[5~");
     CHECK(terminal_until(master,output,"OLDEST_SCROLL_LINE"));
+    CHECK(terminal_until(master,output,"more · PgDn"));
     output.clear();
     type_terminal(master,output,"\033[6~\033[6~");
     CHECK(terminal_until(master,output,"NEWEST_SCROLL_LINE"));
+    std::string full_rule="\033[29;1H\033[2K  ";
+    for(int i=0;i<80;i++)full_rule+="─";
+    CHECK(terminal_until(master,output,full_rule.c_str()));
+    CHECK(output.substr(output.rfind("\033[29;1H\033[2K")).find("more · PgDn")==std::string::npos);
     leave_chat_and_exit(master);
     int status=0;
     CHECK(waitpid(child,&status,0)==child);
@@ -1421,6 +1668,74 @@ static void test_chat_history_scroll(){
     }
     close(master);
     CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    // Legacy native-selection settings must not disable scrollbar dragging.
+    // Up/Down remain available for keyboard scrolling.
+    child=forkpty(&master,nullptr,nullptr,&window);
+    CHECK(child>=0);
+    if(!child){
+        setenv("TERM","xterm-256color",1);
+        setenv("NO_COLOR","1",1);
+        setenv("DESK_NO_ARROW","1",1);
+        setenv("INPUTRC","/dev/null",1);
+        setenv("DESK_NATIVE_MOUSE_SELECTION","1",1);
+        unsetenv("DESK_NO_COMPOSER");
+        execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    output.clear();
+    CHECK(terminal_until(master,output,"Select a number:"));
+    type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"Choose a conversation"));
+    type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"\033[?1007h"));
+    CHECK(terminal_until(master,output,"\033[?1000h"));
+    CHECK(output.find("OLDEST_SCROLL_LINE")==std::string::npos);
+    output.clear();
+    for(int i=0;i<60;i++)type_terminal(master,output,"\033[A");
+    CHECK(terminal_until(master,output,"OLDEST_SCROLL_LINE"));
+    output.clear();
+    for(int i=0;i<60;i++)type_terminal(master,output,"\033[B");
+    CHECK(terminal_until(master,output,"NEWEST_SCROLL_LINE"));
+    leave_chat_and_exit(master);
+    CHECK(waitpid(child,&status,0)==child);
+    close(master);
+    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    // Inline approval row: wheel scrolling reviews the diff/transcript above
+    // the choices without shifting focus away from Cancel (choice 0).
+    for(bool native_select:{false,true}){
+        child=forkpty(&master,nullptr,nullptr,&window);
+        CHECK(child>=0);
+        if(!child){
+            unsetenv("DESK_NO_ARROW");
+            unsetenv("DESK_NO_COMPOSER");
+            setenv("TERM","xterm-256color",1);
+            setenv("NO_COLOR","1",1);
+            if(native_select)setenv("DESK_NATIVE_MOUSE_SELECTION","1",1);
+            else unsetenv("DESK_NATIVE_MOUSE_SELECTION");
+            set_composer_layout(30,28,1);
+            terminal_message(body+"\n");
+            printf("\033[30;1H\033[2K");
+            fflush(stdout);
+            auto picked=terminal_choice({"Allow","Deny","Cancel"},0,30,{},true,true);
+            reset_transcript();
+            printf("\nINLINE_PICK=%d\n",picked.value_or(-9));
+            fflush(stdout);
+            _exit(0);
+        }
+        output.clear();
+        CHECK(terminal_until(master,output,"❯ 0. Cancel"));
+        CHECK(output.find("OLDEST_SCROLL_LINE")==std::string::npos);
+        output.clear();
+        if(native_select){for(int i=0;i<60;i++)type_terminal(master,output,"\033[A");}
+        else{for(int i=0;i<60;i++)type_terminal(master,output,"\033[<64;4;4M");}
+        CHECK(terminal_until(master,output,"OLDEST_SCROLL_LINE"));
+        output.clear();
+        type_terminal(master,output,"\n");
+        CHECK(terminal_until(master,output,"INLINE_PICK=0"));
+        CHECK(waitpid(child,&status,0)==child);
+        close(master);
+        CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    }
     app_cleanup(&a);
 }
 static void test_chat_actions_layout(){
@@ -1464,6 +1779,17 @@ static void test_chat_actions_layout(){
 
     output.clear();
     type_terminal(master,output,"\x04");
+    CHECK(terminal_until(master,output,"0. Main menu"));
+    // Ctrl+D in the conversation selector steps back to the main menu instead
+    // of closing DeskCode, and Ctrl+D on the main menu stays put.
+    output.clear();
+    type_terminal(master,output,"\x04");
+    CHECK(terminal_until(master,output,"0. Exit"));
+    type_terminal(master,output,"\x04");
+    usleep(80000);
+    CHECK(kill(child,0)==0);
+    output.clear();
+    type_terminal(master,output,"1\n");
     CHECK(terminal_until(master,output,"0. Main menu"));
     output.clear();
     type_terminal(master,output,"0\n");
@@ -2056,17 +2382,274 @@ static void test_mcp(){
     }
     CHECK(!echo.empty()&&!fail.empty());CHECK(echo.size()<=64);
     JsonPtr input(json_tokener_parse("{\"value\":{\"count\":3,\"ok\":true,\"list\":[1,2]}}"));
-    a.yes=false;JsonPtr denied(mcp_call(a,echo.c_str(),input.get()));CHECK(bget(denied.get(),"denied"));
+    {
+        int saved_stdin=dup(STDIN_FILENO),null_in=open("/dev/null",O_RDONLY);
+        CHECK(saved_stdin>=0&&null_in>=0&&dup2(null_in,STDIN_FILENO)>=0);
+        close(null_in);
+        a.yes=false;JsonPtr denied(mcp_call(a,echo.c_str(),input.get()));CHECK(bget(denied.get(),"denied"));
+        CHECK(dup2(saved_stdin,STDIN_FILENO)>=0);
+        close(saved_stdin);
+    }
     a.yes=true;JsonPtr result(mcp_call(a,echo.c_str(),input.get()));CHECK(!tool_failed(result.get()));
     CHECK(json_object_equal(get(result.get(),"structuredContent"),input.get()));CHECK(!bget(result.get(),"inheritedSecret"));
     CHECK(!strcmp(sget(result.get(),"xauthority"),"/test/session.xauth"));
     CHECK(!strcmp(sget(result.get(),"explicitEnv"),"explicit-test-value"));pid_t child=iget(result.get(),"pid",0);CHECK(child>0);
+    // If a stdio MCP server crashes between turns, mcp_prepare restarts it automatically.
+    CHECK(kill(child,SIGKILL)==0);
+    {double until=monotime()+2;while(alive(child)&&monotime()<until)usleep(10000);}
+    CHECK(mcp_prepare(a));
+    result.reset(mcp_call(a,echo.c_str(),input.get()));CHECK(!tool_failed(result.get()));
+    pid_t restarted=iget(result.get(),"pid",0);CHECK(restarted>0&&restarted!=child);
+    child=restarted;
     JsonPtr failed(mcp_call(a,fail.c_str(),input.get()));CHECK(tool_failed(failed.get()));
     CHECK(!workflow(&a,{model_tool("external",echo.c_str(),copy(input.get())),model_reply(nullptr,"MCP model integration complete")}));
     JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==8);
     JsonPtr follow(capture(&a,1));J *messages=get(get(follow.get(),"body"),"messages");CHECK(strstr(sget(at(messages,alen(messages)-1),"content"),"MCP_ECHO_OK"));
     mcp_close(a);CHECK(kill(child,0)<0&&errno==ESRCH);
     put(get(loaded.get(),"fixture"),"disabled",json_object_new_boolean(true));CHECK(mcp_save(a,loaded.get()));CHECK(mcp_prepare(a));tools.reset(mcp_tools(a));CHECK(alen(tools.get())==0);
+    app_cleanup(&a);
+}
+// ---------------------------------------------------------------------------
+// Platform features: layout, Markdown, diff preview, headless mode, presets.
+// ---------------------------------------------------------------------------
+static void test_layout_and_markdown(){
+    CHECK(ui_width("\033[38;5;111m中文ab\033[0m")==6);
+    const std::string clipped=ui_clip("\033[1mabcdefghij\033[0m",5);
+    CHECK(ui_width(clipped)==5);
+    CHECK(clipped.find("\033[0m")!=std::string::npos);
+    const auto wrapped=ui_wrap("\033[38;5;114m+ abcdefghij\033[0m",6);
+    CHECK(wrapped.size()==2);
+    for(const auto &line:wrapped)CHECK(ui_width(line)<=6);
+    CHECK(wrapped[1].rfind("\033[38;5;114m",0)==0);
+    // Without colour the reply is untouched apart from the hanging indent, and
+    // terminal control bytes from the model never reach the terminal.
+    {
+        MarkdownStream plain(false,2);
+        std::string out=plain.feed("# Title\nline **two**\x1b[31m");
+        out+=plain.finish();
+        CHECK(out=="# Title\n  line **two**[31m");
+    }
+    // With colour the structure is styled identically however it is chunked.
+    const std::string source="# 标题\n- 第一项 **重点**\n普通 `code` 文本\n```cpp\nint x=1;\n```\n> 引用\n---\n";
+    std::string whole,chunked;
+    {MarkdownStream md(true,0);whole=md.feed(source);whole+=md.finish();}
+    {MarkdownStream md(true,0);for(char c:source)chunked+=md.feed(std::string(1,c));chunked+=md.finish();}
+    CHECK(whole==chunked);
+    CHECK(whole.find("# ")==std::string::npos);
+    CHECK(whole.find("标题")!=std::string::npos);
+    CHECK(whole.find("•")!=std::string::npos);
+    CHECK(whole.find("**")==std::string::npos);
+    CHECK(whole.find("\033[1m")!=std::string::npos);
+    CHECK(whole.find('`')==std::string::npos);
+    CHECK(whole.find("┌─")!=std::string::npos&&whole.find("└─")!=std::string::npos);
+    CHECK(whole.find("│ ")!=std::string::npos&&whole.find("int x=1;")!=std::string::npos);
+    CHECK(whole.find("▎")!=std::string::npos);
+    CHECK(whole.find("────")!=std::string::npos);
+    // Plain lines stay byte-identical, so ordinary replies look as before.
+    {MarkdownStream md(true,2);std::string out=md.feed("PLAIN_REPLY\nnext");out+=md.finish();CHECK(out=="PLAIN_REPLY\n  next");}
+}
+static std::string capture_stdout(const std::function<void()> &body){
+    fflush(stdout);
+    FILE *log=tmpfile();CHECK(log);
+    int saved=dup(STDOUT_FILENO);CHECK(saved>=0);
+    CHECK(dup2(fileno(log),STDOUT_FILENO)>=0);
+    body();
+    fflush(stdout);
+    CHECK(dup2(saved,STDOUT_FILENO)>=0);close(saved);
+    long size=ftell(log);CHECK(size>=0);rewind(log);
+    std::string text(static_cast<size_t>(size),'\0');
+    CHECK(fread(text.data(),1,text.size(),log)==text.size());
+    fclose(log);
+    return text;
+}
+static void test_diff_preview(){
+    CHECK(set_language("zh"));
+    App a=fresh();a.yes=true;a.verbose=true;
+    const char *original="alpha\nbeta\ngamma\ndelta\n";
+    fixture(&a,"/diff.txt",original,strlen(original));
+    char *hash=sha256(original,strlen(original));
+    JsonPtr edit(args("diff.txt"));
+    put(edit.get(),"old_text",str("beta"));
+    put(edit.get(),"new_text",str("BETA"));
+    put(edit.get(),"expected_sha256",str(hash));
+    free(hash);
+    JsonPtr result;
+    std::string shown=capture_stdout([&]{result.reset(tool_call(&a,"edit_file",edit.get()));});
+    CHECK(bget(result.get(),"verified"));
+    CHECK(iget(result.get(),"line",0)==2);
+    CHECK(shown.find("修改 diff.txt（+1 −1 行）")!=std::string::npos);
+    CHECK(shown.find("@@ 第 2 行 @@")!=std::string::npos);
+    CHECK(shown.find("- beta")!=std::string::npos&&shown.find("+ BETA")!=std::string::npos);
+    // A whole-file overwrite shows only the changed middle with context.
+    JsonPtr read(tool_call(&a,"read_file",JsonPtr(args("diff.txt")).get()));
+    JsonPtr write(args("diff.txt"));
+    put(write.get(),"content",str("alpha\nBETA\nGAMMA\ndelta\n"));
+    put(write.get(),"expected_sha256",str(sget(read.get(),"sha256")));
+    shown=capture_stdout([&]{result.reset(tool_call(&a,"write_file",write.get()));});
+    CHECK(bget(result.get(),"verified"));
+    CHECK(shown.find("覆盖 diff.txt（+1 −1 行）")!=std::string::npos);
+    CHECK(shown.find("  alpha")!=std::string::npos&&shown.find("- gamma")!=std::string::npos);
+    CHECK(shown.find("+ GAMMA")!=std::string::npos&&shown.find("  delta")!=std::string::npos);
+    JsonPtr created(args("new.txt"));
+    put(created.get(),"content",str("one\ntwo\n"));
+    put(created.get(),"expected_sha256",nullptr);
+    shown=capture_stdout([&]{result.reset(tool_call(&a,"write_file",created.get()));});
+    CHECK(shown.find("新建 new.txt（+2 −0 行）")!=std::string::npos);
+    app_cleanup(&a);
+}
+struct Captured {int status=-1;std::string out,err;};
+static Captured run_desk(const std::vector<std::string> &arguments,const std::vector<std::pair<std::string,std::string>> &environment,const std::string &input){
+    int in[2],out[2],errs[2];
+    CHECK(!pipe(in)&&!pipe(out)&&!pipe(errs));
+    pid_t child=fork();CHECK(child>=0);
+    if(!child){
+        dup2(in[0],0);dup2(out[1],1);dup2(errs[1],2);
+        for(int fd:{in[0],in[1],out[0],out[1],errs[0],errs[1]})close(fd);
+        for(const auto &[key,value]:environment)setenv(key.c_str(),value.c_str(),1);
+        std::vector<char *> argv{const_cast<char *>("desk")};
+        for(const auto &argument:arguments)argv.push_back(const_cast<char *>(argument.c_str()));
+        argv.push_back(nullptr);
+        execv("./build/desk",argv.data());
+        _exit(127);
+    }
+    close(in[0]);close(out[1]);close(errs[1]);
+    if(!input.empty())CHECK(write(in[1],input.data(),input.size())==static_cast<ssize_t>(input.size()));
+    close(in[1]);
+    Captured result;
+    bool out_open=true,err_open=true;
+    double until=monotime()+20;
+    while((out_open||err_open)&&monotime()<until){
+        pollfd fds[2]={{out[0],POLLIN,0},{errs[0],POLLIN,0}};
+        if(poll(fds,2,100)<=0)continue;
+        char buffer[4096];
+        if(out_open&&(fds[0].revents&(POLLIN|POLLHUP))){ssize_t n=read(out[0],buffer,sizeof buffer);if(n>0)result.out.append(buffer,static_cast<size_t>(n));else out_open=false;}
+        if(err_open&&(fds[1].revents&(POLLIN|POLLHUP))){ssize_t n=read(errs[0],buffer,sizeof buffer);if(n>0)result.err.append(buffer,static_cast<size_t>(n));else err_open=false;}
+    }
+    close(out[0]);close(errs[0]);
+    int status=0;
+    CHECK(waitpid(child,&status,0)==child);
+    result.status=WIFEXITED(status)?WEXITSTATUS(status):-1;
+    return result;
+}
+static std::vector<std::pair<std::string,std::string>> model_environment(App &a){
+    return {{"DESK_BASE_URL",sget(a.config,"base_url")},{"DESK_MODEL","model-test"},{"DESK_API_KEY","fake-test-key"},{"DESK_API_TYPE","openai"},{"NO_COLOR","1"}};
+}
+static void test_headless(){
+    // --json: stdout carries exactly one result object; progress goes to stderr.
+    {
+        App a=fresh();json_object_put(a.config);a.config=config("headless-json","openai");
+        fixture(&a,"/note.txt","note body",9);
+        const auto first=model_tool("read","read_file",args("note.txt")),second=model_reply(nullptr,"JSON_DONE");
+        const char *responses[]={first.c_str(),second.c_str()};
+        pid_t server=fake_server(&a,responses,2);
+        auto run=run_desk({"--json","--lang","en","--workspace",a.root,"-p","read the note"},model_environment(a),"");
+        server_done(server);
+        CHECK(run.status==0);
+        CHECK(std::count(run.out.begin(),run.out.end(),'\n')==1);
+        JsonPtr result(json_tokener_parse(run.out.c_str()));
+        CHECK(result);
+        CHECK(!strcmp(sget(result.get(),"status"),"completed"));
+        CHECK(!strcmp(sget(result.get(),"reply"),"JSON_DONE"));
+        CHECK(!strcmp(sget(result.get(),"model"),"model-test"));
+        CHECK(alen(get(result.get(),"tools"))==1);
+        J *tool=at(get(result.get(),"tools"),0);
+        CHECK(!strcmp(sget(tool,"name"),"read_file")&&!strcmp(sget(tool,"target"),"note.txt")&&bget(tool,"ok"));
+        CHECK(run.out.find("fake-test-key")==std::string::npos&&run.err.find("fake-test-key")==std::string::npos);
+        app_cleanup(&a);
+    }
+    // Piped stdout and "-p -": only the raw final reply is printed on stdout.
+    {
+        App a=fresh();json_object_put(a.config);a.config=config("headless-text","openai");
+        const auto reply=model_reply(nullptr,"# Heading\nTEXT_DONE");
+        const char *responses[]={reply.c_str()};
+        pid_t server=fake_server(&a,responses,1);
+        auto run=run_desk({"--lang","en","--workspace",a.root,"-p","-"},model_environment(a),"summarize from stdin\n");
+        server_done(server);
+        CHECK(run.status==0);
+        CHECK(run.out=="# Heading\nTEXT_DONE\n");
+        JsonPtr request(capture(&a,0));J *messages=get(get(request.get(),"body"),"messages");
+        CHECK(!strcmp(sget(at(messages,alen(messages)-1),"content"),"summarize from stdin"));
+        app_cleanup(&a);
+    }
+    // Without a terminal an approval cannot be answered: the result says so.
+    for(bool allowed:{false,true}){
+        App a=fresh();json_object_put(a.config);a.config=config("headless-approval","openai");
+        J *write=args("made.txt");put(write,"content",str("made"));put(write,"expected_sha256",nullptr);
+        const auto action=model_tool("write","write_file",write),done=model_reply(nullptr,"WROTE");
+        const char *responses[]={action.c_str(),done.c_str()};
+        pid_t server=fake_server(&a,responses,allowed?2:1);
+        std::vector<std::string> arguments{"--json","--lang","en","--workspace",a.root};
+        if(allowed){arguments.push_back("--approval");arguments.push_back("edit");}
+        arguments.push_back("-p");arguments.push_back("create made.txt");
+        auto run=run_desk(arguments,model_environment(a),"");
+        server_done(server);
+        JsonPtr result(json_tokener_parse(run.out.c_str()));
+        CHECK(result);
+        const std::string path=std::string(a.root)+"/made.txt";
+        if(allowed){
+            CHECK(run.status==0&&!strcmp(sget(result.get(),"status"),"completed"));
+            CHECK(access(path.c_str(),F_OK)==0);
+        }else{
+            CHECK(run.status==1&&!strcmp(sget(result.get(),"status"),"approval_required"));
+            CHECK(strstr(sget(result.get(),"error"),"--approval"));
+            CHECK(access(path.c_str(),F_OK)!=0);
+        }
+        app_cleanup(&a);
+    }
+    // Bad approval values are a usage error, and doctor reports in JSON.
+    {
+        App a=fresh();
+        auto bad=run_desk({"--approval","maybe","-p","x"},{},"");
+        CHECK(bad.status==2);
+        auto doctor=run_desk({"doctor","--json","--workspace",a.root},{},"");
+        JsonPtr report(json_tokener_parse(doctor.out.c_str()));
+        CHECK(report);
+        CHECK(!bget(report.get(),"model_configured")&&bget(report.get(),"workspace_writable"));
+        CHECK(!strcmp(sget(report.get(),"version"),VERSION));
+        app_cleanup(&a);
+    }
+}
+static void test_provider_presets(){
+    App a=fresh();
+    const char *responses[]={"{\"data\":[{\"id\":\"alpha-model\"},{\"id\":\"beta-model\"}]}"};
+    J *probe=config("probe","openai");json_object_put(a.config);a.config=probe;
+    pid_t server=fake_server(&a,responses,1);
+    const std::string base=sget(a.config,"base_url");
+    int master=-1;pid_t child=forkpty(&master,nullptr,nullptr,nullptr);CHECK(child>=0);
+    if(!child){execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
+    std::string output;
+    CHECK(terminal_until(master,output,"First run: choose Add model"));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    output.clear();type_terminal(master,output,"3\n");
+    CHECK(terminal_until(master,output,"[9] Ollama (local)"));
+    CHECK(output.find("[3] DeepSeek")!=std::string::npos&&output.find("[1] OpenAI API")!=std::string::npos);
+    CHECK(terminal_until(master,output,"Select a number:"));
+    output.clear();type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"[model-1]"));
+    output.clear();type_terminal(master,output,"\n");
+    CHECK(terminal_until(master,output,"API URL ["));
+    output.clear();type_terminal(master,output,base+"\n");
+    CHECK(terminal_until(master,output,"API Key"));
+    output.clear();type_terminal(master,output,"fake-preset-key\n");
+    CHECK(terminal_until(master,output,"[2] beta-model"));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    output.clear();type_terminal(master,output,"2\n");
+    CHECK(terminal_until(master,output,"Save without testing"));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    output.clear();type_terminal(master,output,"2\n");
+    CHECK(terminal_until(master,output,"Saved and selected this model."));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    type_terminal(master,output,"0\n");
+    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);
+    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    server_done(server);
+    App saved{};CHECK(!store_load(&saved));
+    J *profile=get(get(saved.store,"profiles"),"model-1");
+    CHECK(profile);
+    CHECK(!strcmp(sget(profile,"model"),"beta-model"));
+    CHECK(!strcmp(sget(profile,"api_key"),"fake-preset-key"));
+    CHECK(output.find("fake-preset-key")==std::string::npos);
+    app_cleanup(&saved);
     app_cleanup(&a);
 }
 int main(int argc,char **argv){
@@ -2078,6 +2661,10 @@ int main(int argc,char **argv){
     char directory[]="/tmp/desk-c-test-XXXXXX";
     CHECK(mkdtemp(directory));
     strcpy(sandbox,directory);
+    test_layout_and_markdown();
+    test_diff_preview();
+    test_headless();
+    test_provider_presets();
     test_mcp();
     test_http_reuse();
     test_tool_configuration();

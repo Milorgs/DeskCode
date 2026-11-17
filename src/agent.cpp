@@ -18,29 +18,296 @@ void reset_session(App *a){
     a->messages=arr();
     a->state="等待任务";
 }
-J *context(App *a,J *tools){
-    size_t n=alen(a->messages),first=n;
-    for(size_t i=0;i<n;i++)if(!strcmp(sget(at(a->messages,i),"role"),"user"))first=i;
-    if(first==n)return copy(a->messages);
-    J *selected=nullptr;
-    int turns=0;
-    for(size_t start=first;;){
-        J *candidate=arr();
-        for(size_t i=start;i<n;i++)add(candidate,copy(at(a->messages,i)));
-        size_t bytes=strlen(json_object_to_json_string_ext(candidate,JSON_C_TO_STRING_PLAIN))+strlen(json_object_to_json_string_ext(tools,JSON_C_TO_STRING_PLAIN));
-        if(bytes>CONTEXT_LIMIT){
-            json_object_put(candidate);
-            if(!selected)seterr(a,tr("本轮超过上下文预算，请拆分任务或选择新建对话。"));
+
+static size_t json_bytes(J *value){
+    if(!value)return 4;
+    size_t length=0;
+    json_object_to_json_string_length(value,JSON_C_TO_STRING_PLAIN,&length);
+    return length;
+}
+
+static bool image_block(J *block){
+    return !strncmp(sget(block,"type"),"image",5);
+}
+
+// A provider bills an image at roughly a thousand tokens whatever its base64
+// length, so charging the payload would compact on the first screenshot and
+// price a dozen of them like a library of books.
+static constexpr size_t IMAGE_BYTES=8192;
+// Newest tool results keep their detail: summarising them would leave the model
+// blind to the state it just inspected.
+static constexpr size_t FRESH_RESULTS=3;
+// Newest screenshots stay attached, older ones become a note. The budget does
+// the real trimming; this only keeps a request from carrying megabytes.
+static constexpr size_t FRESH_IMAGES=3;
+static constexpr size_t MIN_CONTEXT_LIMIT=16384;
+
+// DESK_CONTEXT_BYTES raises or lowers the budget for models with a wider or
+// narrower window than the built-in default assumes.
+static size_t context_limit(void){
+    static const size_t limit=[]{
+        const char *value=env_value("DESK_CONTEXT_BYTES");
+        if(!value||!*value)return static_cast<size_t>(CONTEXT_LIMIT);
+        char *end=nullptr;
+        long long parsed=strtoll(value,&end,10);
+        if(end==value||parsed<static_cast<long long>(MIN_CONTEXT_LIMIT))return static_cast<size_t>(CONTEXT_LIMIT);
+        return static_cast<size_t>(std::min<long long>(parsed,RESPONSE_LIMIT));
+    }();
+    return limit;
+}
+
+// Tool results carry their blocks inside a JSON string, so the cost estimate
+// looks at the parsed form to find the payload worth billing flat.
+static size_t message_bytes(J *message){
+    size_t bytes=json_bytes(message);
+    J *blocks=get(message,"content");
+    JsonPtr parsed;
+    if(!json_object_is_type(blocks,json_type_array)){
+        if(strcmp(sget(message,"role"),"tool"))return bytes;
+        parsed.reset(json_tokener_parse(sget(message,"content")));
+        blocks=get(parsed.get(),"content");
+        if(!json_object_is_type(blocks,json_type_array))return bytes;
+    }
+    for(size_t i=0;i<alen(blocks);++i){
+        J *block=at(blocks,i);
+        if(!image_block(block))continue;
+        size_t length=json_bytes(block);
+        if(length>IMAGE_BYTES)bytes-=length-IMAGE_BYTES;
+    }
+    return bytes;
+}
+
+static size_t context_bytes(J *messages,J *tools){
+    size_t total=json_bytes(tools);
+    for(size_t i=0;i<alen(messages);++i)total+=message_bytes(at(messages,i));
+    return total;
+}
+
+static std::string excerpt(std::string_view text,size_t limit){
+    if(text.size()<=limit)return std::string(text);
+    while(limit>0&&(static_cast<unsigned char>(text[limit])&0xc0)==0x80)--limit;
+    return std::string(text.substr(0,limit))+"…";
+}
+
+static std::string tool_excerpt_parsed(J *result,const char *fallback,size_t limit){
+    J *blocks=get(result,"content");
+    if(!json_object_is_type(blocks,json_type_array))return excerpt(fallback,limit);
+    std::string summary;
+    bool omitted_image=false;
+    for(size_t i=0;i<alen(blocks);++i){
+        J *block=at(blocks,i);
+        omitted_image|=image_block(block);
+        if(!strcmp(sget(block,"type"),"text")&&summary.size()<limit){
+            summary+=excerpt(sget(block,"text"),limit-summary.size());
+            summary+='\n';
+        }
+    }
+    if(omitted_image){
+        summary+="[Image omitted to fit context. If visual detail is still needed, request a smaller screenshot with a reduced resolution or byte limit.]";
+    }
+    return summary;
+}
+
+static std::string tool_excerpt(const char *content,size_t limit){
+    JsonPtr result(json_tokener_parse(content));
+    return tool_excerpt_parsed(result.get(),content,limit);
+}
+
+static J *compact_message(J *message,bool fresh=false){
+    const char *content=sget(message,"content");
+    if(fresh||strcmp(sget(message,"role"),"tool")||strlen(content)<=8192)return copy(message);
+
+    JsonPtr original(json_tokener_parse(content)),result(obj());
+    put(result.get(),"context_compacted",json_object_new_boolean(true));
+    put(result.get(),"summary",str(tool_excerpt_parsed(original.get(),content,8192).c_str()));
+    if(tool_failed(original.get())){
+        const char *error=sget(original.get(),"error");
+        put(result.get(),"error",str(*error?excerpt(error,512).c_str():"The tool reported a failure."));
+    }
+    J *shortened=copy(message);
+    put(shortened,"content",str(json_object_to_json_string_ext(result.get(),JSON_C_TO_STRING_PLAIN)));
+    return shortened;
+}
+
+static std::string recap(J *messages,size_t begin,size_t end){
+    std::string notes;
+    const size_t recent=std::max(begin,end>8?end-8:0);
+    for(size_t i=recent;i>begin;--i){
+        J *message=at(messages,i-1);
+        if(!strcmp(sget(message,"role"),"user")){
+            notes+="user: "+excerpt(sget(message,"content"),720)+"\n";
             break;
         }
-        json_object_put(selected);selected=candidate;
-        if(start==0||turns++>=6)break;
+    }
+    for(size_t i=recent;i<end;++i){
+        J *message=at(messages,i);
+        std::string_view role=sget(message,"role");
+        notes+=std::string(role)+": ";
+        if(role=="tool"){
+            notes+=tool_excerpt(sget(message,"content"),360);
+        }else{
+            notes+=excerpt(sget(message,"content"),360);
+            J *calls=get(message,"tool_calls");
+            for(size_t j=0;j<std::min<size_t>(alen(calls),2);++j){
+                J *function=get(at(calls,j),"function");
+                notes+=" "+excerpt(sget(function,"name"),80)+" "+excerpt(sget(function,"arguments"),160);
+            }
+        }
+        notes+='\n';
+    }
+    return notes;
+}
+
+static void append_recap(J *messages,const std::string &notes){
+    if(notes.empty())return;
+    J *request=obj(),*summary=obj();
+    put(request,"role",str("user"));
+    put(request,"content",str("Carry forward a summary of the preceding context."));
+    put(summary,"role",str("assistant"));
+    const std::string content="Automatic context summary. The following are excerpts of prior requests and tool observations. Verify state before repeating any operation.\n"+notes;
+    put(summary,"content",str(content.c_str()));
+    add(messages,request);
+    add(messages,summary);
+}
+
+static void append_messages(J *dest,J *source,size_t start=0){
+    for(size_t i=start;i<alen(source);++i)add(dest,copy(at(source,i)));
+}
+
+// A trimmed request keeps a recap in front of it, unless that recap itself
+// pushes the request back over the budget.
+static J *with_recap(App *a,J *body,size_t first,J *tools){
+    if(!first)return body;
+    JsonPtr original(body);
+    JsonPtr wrapped(arr());
+    append_recap(wrapped.get(),recap(a->messages,0,first));
+    append_messages(wrapped.get(),body);
+    if(context_bytes(wrapped.get(),tools)>context_limit())return original.release();
+    return wrapped.release();
+}
+
+// An older screenshot costs tokens on every later request while the newest views
+// answer the question being asked. Older ones become a note the model can act
+// on instead of megabytes of base64 it cannot read.
+static void strip_stale_images(J *messages){
+    size_t kept=0;
+    for(size_t i=alen(messages);i>0;--i){
+        J *message=at(messages,i-1);
+        if(strcmp(sget(message,"role"),"tool"))continue;
+        JsonPtr parsed(json_tokener_parse(sget(message,"content")));
+        J *blocks=get(parsed.get(),"content");
+        if(!json_object_is_type(blocks,json_type_array))continue;
+        bool images=false;
+        for(size_t j=0;j<alen(blocks);++j)images|=image_block(at(blocks,j));
+        if(!images||kept++<FRESH_IMAGES)continue;
+        for(size_t j=0;j<alen(blocks);++j){
+            J *block=at(blocks,j);
+            if(!image_block(block))continue;
+            json_object_object_del(block,"data");
+            json_object_object_del(block,"source");
+            json_object_object_del(block,"image_url");
+            put(block,"type",str("text"));
+            put(block,"text",str("[Image omitted from an earlier step. Take a fresh screenshot if that view is still needed.]"));
+        }
+        put(message,"content",str(json_object_to_json_string_ext(parsed.get(),JSON_C_TO_STRING_PLAIN)));
+    }
+}
+
+static J *compact_context(App *a,J *tools,size_t first){
+    const size_t end=alen(a->messages);
+    const size_t limit=context_limit();
+    // The newest results keep their detail for as long as the budget allows.
+    std::vector<char> fresh(end-first,0);
+    for(size_t i=end,kept=0;i>first&&kept<FRESH_RESULTS;--i){
+        if(!strcmp(sget(at(a->messages,i-1),"role"),"tool")){
+            fresh[i-1-first]=1;
+            ++kept;
+        }
+    }
+    auto build=[&](bool detailed){
+        JsonPtr body(arr());
+        for(size_t i=first;i<end;++i)add(body.get(),compact_message(at(a->messages,i),detailed&&fresh[i-first]));
+        return body;
+    };
+
+    JsonPtr kept=build(true);
+    if(context_bytes(kept.get(),tools)<=limit)return with_recap(a,kept.release(),first,tools);
+    // Still too big: summarise every result, newest ones included. Their images
+    // become notes, so the model keeps the shape of what it saw.
+    JsonPtr terse=build(false);
+    if(context_bytes(terse.get(),tools)<=limit)return with_recap(a,terse.release(),first,tools);
+
+    // Drop complete groups of calls and results from the front of this turn.
+    // The latest user request stays intact even if all tool groups must be dropped.
+    const size_t tools_bytes=json_bytes(tools),terse_count=alen(terse.get());
+    std::vector<size_t> terse_used(terse_count+1,0);
+    for(size_t i=0;i<terse_count;++i)terse_used[i+1]=terse_used[i]+message_bytes(at(terse.get(),i));
+    for(size_t start=1;start<terse_count;){
+        ++start;
+        while(start<terse_count&&!strcmp(sget(at(terse.get(),start),"role"),"tool"))++start;
+        JsonPtr candidate(arr());
+        append_recap(candidate.get(),recap(terse.get(),1,start));
+        size_t recap_bytes=0;
+        for(size_t i=0;i<alen(candidate.get());++i)recap_bytes+=message_bytes(at(candidate.get(),i));
+        const size_t remaining_bytes=terse_used[1]+(terse_used[terse_count]-terse_used[start]);
+        if(tools_bytes+recap_bytes+remaining_bytes<=limit){
+            add(candidate.get(),copy(at(terse.get(),0)));
+            append_messages(candidate.get(),terse.get(),start);
+            return candidate.release();
+        }
+    }
+    return nullptr;
+}
+
+J *context(App *a,J *tools,bool *compacted){
+    if(compacted)*compacted=false;
+    const size_t n=alen(a->messages);
+    size_t first=n;
+    for(size_t i=0;i<n;i++)if(!strcmp(sget(at(a->messages,i),"role"),"user"))first=i;
+    if(first==n)return copy(a->messages);
+
+    // Bill every message once, then walk back through whole turns while the
+    // request still fits: the budget decides what is sent, not a turn count.
+    const size_t tools_bytes=json_bytes(tools),limit=context_limit();
+    std::vector<size_t> used(n+1,0);
+    for(size_t i=0;i<n;++i)used[i+1]=used[i]+message_bytes(at(a->messages,i));
+    auto fits=[&](size_t start){return used[n]-used[start]+tools_bytes<=limit;};
+
+    if(!fits(first)){
+        J *selected=compact_context(a,tools,first);
+        if(selected){
+            if(compacted)*compacted=true;
+        }else seterr(a,tr("本轮超过上下文预算，请拆分任务或选择新建对话。"));
+        return selected;
+    }
+
+    // Try shortening bulky tool output before dropping an earlier turn.
+    size_t start=first,total=used[n]-used[first]+tools_bytes;
+    std::vector<JsonPtr> shortened(first);
+    while(start>0){
         size_t previous=start;
         for(size_t i=start;i>0;i--)if(!strcmp(sget(at(a->messages,i-1),"role"),"user")){previous=i-1;break;}
         if(previous==start)break;
+        size_t turn_bytes=used[start]-used[previous];
+        if(turn_bytes>limit-total){
+            turn_bytes=0;
+            for(size_t i=previous;i<start;++i){
+                shortened[i].reset(compact_message(at(a->messages,i)));
+                turn_bytes+=message_bytes(shortened[i].get());
+            }
+            if(turn_bytes>limit-total)break;
+        }
+        total+=turn_bytes;
         start=previous;
     }
-    return selected;
+
+    JsonPtr history(arr());
+    for(size_t i=start;i<n;++i){
+        if(i<first&&shortened[i])add(history.get(),shortened[i].release());
+        else add(history.get(),copy(at(a->messages,i)));
+    }
+    strip_stale_images(history.get());
+    return with_recap(a,history.release(),start,tools);
 }
 J *parse_tool_arguments(const char *text){
     size_t length=strlen(text);
@@ -135,13 +402,24 @@ struct Observation {
     JsonPtr args,result;
     int count=1;
 };
+static bool readonly_probe(const char *name){
+    return !strcmp(name,"read_file")||!strcmp(name,"list_files")||!strcmp(name,"search_text");
+}
 static void recovery(App *a,std::vector<FailedOperation> &unresolved,const char *name,J *args,bool failed){
     const char *kind=domain(name),*target=sget(args,"path");
     char full[PATH_MAX];
     if(*target&&!resolve_file(a,target,full))target=full;
     auto matches=[&](const FailedOperation &entry){return entry.kind==kind&&entry.target==target;};
     if(!failed){
-        std::erase_if(unresolved,[&](const FailedOperation &entry){return matches(entry)&&(!entry.mutation||mutation(name));});
+        std::erase_if(unresolved,[&](const FailedOperation &entry){
+            if(matches(entry)&&(!entry.mutation||mutation(name)))return true;
+            // Exploratory read/list/search misses are resolved once workspace
+            // exploration or editing moves forward; failed mutations and shell
+            // commands still require explicit recovery.
+            if(!entry.mutation&&(entry.kind=="file"||entry.kind=="list_files"||entry.kind=="search_text")
+               &&(readonly_probe(name)||mutation(name)))return true;
+            return false;
+        });
         return;
     }
     for(auto &entry:unresolved){
@@ -153,12 +431,11 @@ static void recovery(App *a,std::vector<FailedOperation> &unresolved,const char 
     unresolved.push_back({kind,target,mutation(name)});
 }
 static bool repeated(std::vector<Observation> &seen,const char *name,J *args,J *result){
-    if(mutation(name)&&!tool_failed(result)){
+    if((mutation(name)||!strcmp(name,"run_shell"))&&!tool_failed(result)){
         /* Changes invalidate old observations, so a post-edit read is fresh. */
         seen.clear();
         return false;
     }
-    if(!strcmp(name,"run_shell")&&!tool_failed(result))return false;
     for(auto &entry:seen){
         if(entry.name!=name||!json_object_equal(entry.args.get(),args))continue;
         entry.count=json_object_equal(entry.result.get(),result)?entry.count+1:1;
@@ -167,6 +444,16 @@ static bool repeated(std::vector<Observation> &seen,const char *name,J *args,J *
     }
     seen.push_back({name,JsonPtr(copy(args)),JsonPtr(copy(result))});
     return false;
+}
+static J *repeated_result(const std::vector<Observation> &seen,const char *name,J *args){
+    for(const auto &entry:seen){
+        if(entry.count>=3&&entry.name==name&&json_object_equal(entry.args.get(),args)){
+            J *result=copy(entry.result.get());
+            put(result,"cached_result",json_object_new_boolean(true));
+            return result;
+        }
+    }
+    return nullptr;
 }
 static void show_call(const char *name,J *args){
     const char *label=!strcmp(name,"read_file")?tr("读取文件"):!strcmp(name,"list_files")?tr("查看目录"):
@@ -273,44 +560,59 @@ int run_task(App *a,const char *task){
     a->state="执行中";
     a->error[0]=0;
     a->task_tokens=0;
+    a->approval_unavailable=false;
     const double task_started=monotime();
     if(!mcp_prepare(*a)){a->state="失败";return -1;}
     JsonPtr tool_owner(schemas(a));
     J *tools=tool_owner.get();
     std::vector<FailedOperation> unresolved;
     std::vector<Observation> seen;
-    int failures=0,rc=-1;
-    bool trimmed=false,desktop_unverified=false;
+    int rc=-1;
+    bool announced_compaction=false,desktop_unverified=false;
+    std::string_view last_activity;
     const char *reply_marker=a->conversation_id.empty()?"":ui_assistant_marker(ui_color());
-    for(int step=1;step<=a->max_steps&&!interrupted;step++){
-        J *history=context(a,tools);
+    // Chat replies hang under the "● " marker; one-shot output stays flush.
+    const int reply_indent=*reply_marker?2:0;
+    // Headless runs keep the reply off the human stream entirely.
+    const bool quiet_reply=a->reply_out||a->json_output;
+    for(std::uint64_t step=1;!interrupted;++step){
+        if(a->max_steps>0&&step>static_cast<std::uint64_t>(a->max_steps))break;
+        bool compacted=false;
+        J *history=context(a,tools,&compacted);
         if(!history)break;
-        if(!trimmed&&alen(history)<alen(a->messages)){
+        if(compacted&&!announced_compaction){
             progress_clear(a);
-            puts(tr("较早的任务未发送给模型，当前任务及其工具结果完整保留。"));
-            trimmed=true;
+            puts(tr("已压缩上下文，继续当前任务。"));
+            announced_compaction=true;
         }
         J *reply=nullptr;
         bool streamed=false;
+        std::unique_ptr<MarkdownStream> markdown;
         {
             ThinkingProgress thinking(*a);
-            if(a->verbose)printf(tr("[%d/%d] 正在请求模型…\n"),step,a->max_steps);
+            if(a->verbose){
+                if(a->max_steps>0)printf(tr("[%d/%d] 正在请求模型…\n"),static_cast<int>(step),a->max_steps);
+                else puts(tr("正在请求模型…"));
+            }
             else progress(a,tr("正在思考…"));
             fflush(stdout);
             // Print text as it arrives; the first chunk clears the "thinking"
             // row and opens the reply so the transcript fills in live.
-            a->stream_text=[a,&streamed,reply_marker](const std::string &part){
+            if(!quiet_reply)a->stream_text=[a,&streamed,&last_activity,&markdown,reply_marker,reply_indent](const std::string &part){
                 if(!streamed){
                     streamed=true;
+                    last_activity={};
                     progress_clear(a);
                     putchar('\n');
                     fputs(reply_marker,stdout);
+                    markdown=std::make_unique<MarkdownStream>(ui_color(),reply_indent);
                 }
-                fputs(part.c_str(),stdout);
+                fputs(markdown->feed(part).c_str(),stdout);
                 fflush(stdout);
             };
             reply=api_complete(a,a->config,history,tools);
             a->stream_text=nullptr;
+            if(markdown){fputs(markdown->finish().c_str(),stdout);fflush(stdout);}
         }
         json_object_put(history);
         if(!reply)break;
@@ -331,8 +633,15 @@ int run_task(App *a,const char *task){
                 break;
             }
             progress_clear(a);
-            if(streamed)putchar('\n');
-            else printf("%s%s\n",reply_marker,sget(reply,"content"));
+            if(quiet_reply){
+                if(a->reply_out){
+                    fputs(sget(reply,"content"),a->reply_out);
+                    fputc('\n',a->reply_out);
+                    fflush(a->reply_out);
+                }
+            }
+            else if(streamed)putchar('\n');
+            else printf("%s%s\n",reply_marker,ui_markdown(sget(reply,"content"),reply_indent).c_str());
             add(a->messages,reply);
             a->state="本轮结束";
             rc=0;
@@ -340,7 +649,7 @@ int run_task(App *a,const char *task){
         }
         add(a->messages,reply);
         if(streamed)putchar('\n');
-        else if(a->verbose&&*sget(reply,"content"))printf("%s%s\n",reply_marker,sget(reply,"content"));
+        else if(a->verbose&&*sget(reply,"content"))printf("%s%s\n",reply_marker,ui_markdown(sget(reply,"content"),reply_indent).c_str());
         for(size_t i=0;i<alen(calls);i++){
             J *call=at(calls,i),*fn=get(call,"function");
             if(interrupted){
@@ -350,17 +659,24 @@ int run_task(App *a,const char *task){
             const char *name=sget(fn,"name");
             J *args=parse_tool_arguments(sget(fn,"arguments"));
             if(a->verbose)show_call(name,args);
-            else progress(a,activity(name));
+            else {
+                const char *label=activity(name);
+                if(!a->conversation_worker||last_activity!=label)progress(a,label);
+                last_activity=label;
+            }
             double tool_started=monotime();
-            J *result=tool_call(a,name,args);
+            J *result=repeated_result(seen,name,args);
+            const bool cached=result!=nullptr;
+            if(!cached)result=tool_call(a,name,args);
             a->progress_line=false;
             bool denied=bget(result,"denied");
-            bool failed=tool_failed(result),loop=repeated(seen,name,args,result);
-            recovery(a,unresolved,name,args,failed);
+            bool failed=tool_failed(result);
+            if(cached||repeated(seen,name,args,result)){
+                put(result,"recovery_hint",str(tr("相同调用已三次返回相同结果。改用其他工具或参数，或先修复导致失败的条件。")));
+            }
+            if(!cached)recovery(a,unresolved,name,args,failed);
             a->error[0]=0;
-            if(failed)failures++;
-            else if(unresolved.empty())failures=0;
-            if(!failed&&!strncmp(name,"desktop_",8)){
+            if(!cached&&!failed&&!strncmp(name,"desktop_",8)){
                 if(mutation(name))desktop_unverified=true;
                 else if(*sget(args,"app"))desktop_unverified=false;
             }
@@ -370,13 +686,22 @@ int run_task(App *a,const char *task){
                 if(*sget(result,"error"))fprintf(stderr,"%s\n",sget(result,"error"));
                 else fprintf(stderr,tr("操作失败（退出码 %d）。\n"),iget(result,"exit_code",-1));
             }
+            if(a->trace){
+                J *entry=obj();
+                put(entry,"name",str(name));
+                const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):sget(args,"app");
+                if(*target)put(entry,"target",str(excerpt(target,240).c_str()));
+                put(entry,"ok",json_object_new_boolean(!failed));
+                if(failed&&*sget(result,"error"))put(entry,"error",str(excerpt(sget(result,"error"),240).c_str()));
+                add(a->trace,entry);
+            }
             tool_result(a,sget(call,"id"),result);
             json_object_put(args);
             json_object_put(result);
-            if(denied||interrupted||failures>=3||loop){
+            if(denied||interrupted){
                 pending(a,calls,i+1);
                 if(denied)a->state="已取消";
-                seterr(a,denied?tr("操作已取消。"):interrupted?tr("任务已停止。"):loop?tr("相同工具调用三次返回相同结果，已停止重复操作；可补充信息后继续。"):tr("三次操作失败且尚未恢复，已停止。"));
+                seterr(a,denied?tr("操作已取消。"):tr("任务已停止。"));
                 goto done;
             }
         }
@@ -386,6 +711,8 @@ int run_task(App *a,const char *task){
     if(!a->error[0]&&rc)seterr(a,interrupted?tr("任务已停止。"):tr("达到步骤上限，任务未确认完成。"));
     if(interrupted)a->state="已取消";
     else if(rc&&strcmp(a->state,"已取消"))a->state="失败";
+    if(rc&&!interrupted&&a->approval_unavailable)
+        seterr(a,tr("需要批准，但当前没有可交互的终端；请使用 --approval edit 或 --approval full 重新运行。"));
     {
         // One closing line per turn: how long it worked, tokens used, outcome.
         const char *outcome=rc==0?tr("完成"):interrupted||!strcmp(a->state,"已取消")?tr("已停止"):tr("未完成");
@@ -396,7 +723,9 @@ int run_task(App *a,const char *task){
             line+=tokens;
         }
         line+=" · ";line+=outcome;
-        printf("\n%s\n",ui_paint(rc==0?Tone::Dim:Tone::Warning,line).c_str());
+        const bool emphasize_summary=rc==0&&env_value("DESK_CONTRAST_NUMBERS");
+        const Tone tone=rc!=0?Tone::Warning:emphasize_summary?Tone::Accent:Tone::Dim;
+        printf("\n%s\n",ui_paint(tone,line,emphasize_summary).c_str());
         fflush(stdout);
     }
     history_checkpoint(*a,history_start+1);

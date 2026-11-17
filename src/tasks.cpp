@@ -268,7 +268,7 @@ int task_worker(std::intptr_t fd){
     snprintf(app.root,sizeof app.root,"%s",sget(data.get(),"root"));
     snprintf(app.config_dir,sizeof app.config_dir,"%s",sget(data.get(),"config_dir"));
     app.yes=bget(data.get(),"yes");app.auto_edit=bget(data.get(),"auto_edit");app.shell=bget(data.get(),"shell");app.desktop=bget(data.get(),"desktop");app.record=bget(data.get(),"record");app.verbose=bget(data.get(),"verbose");
-    app.max_steps=iget(data.get(),"max_steps",20);app.task_events=iget(data.get(),"events",-1);
+    app.max_steps=iget(data.get(),"max_steps",0);app.task_events=iget(data.get(),"events",-1);
     if(app.task_events>=0)fcntl(app.task_events,F_SETFD,FD_CLOEXEC);
     auto cleanup=[](App *a){app_cleanup(a);};std::unique_ptr<App,decltype(cleanup)> guard(&app,cleanup);
     std::string task=sget(data.get(),"task");

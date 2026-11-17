@@ -135,7 +135,7 @@ void platform_initialize(){}
 const char *env_value(const char *name){return std::getenv(name);}
 #endif
 
-std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,const std::function<void()> &on_idle,bool transient,bool inline_row){
+std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,const std::function<void()> &on_idle,bool transient,bool inline_row,bool allow_escape){
     if(items.empty())return 0;
     if(input_closed||interrupted==SIGTERM)return -1;
     if(!isatty(STDIN_FILENO)||!terminal_supports_ansi()||env_value("DESK_NO_ARROW"))return std::nullopt;
@@ -184,6 +184,26 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
         return read(STDIN_FILENO,&key,1)==1?static_cast<int>(key):end_input;
     };
 #endif
+    struct MenuCursor {
+        bool hidden=env_value("DESK_KEEP_MENU_CURSOR")==nullptr;
+        MenuCursor(){if(hidden)fputs("\033[?25l",stdout);}
+        ~MenuCursor(){if(hidden){fputs("\033[?25h",stdout);fflush(stdout);}}
+    } menu_cursor;
+#ifndef _WIN32
+    const bool inline_scroll=inline_row&&transcript_scrollable();
+    const bool native_selection=env_value("DESK_NATIVE_MOUSE_SELECTION")!=nullptr;
+    struct InlineScrollModes {
+        bool mouse=false;
+        InlineScrollModes(bool scroll):mouse(scroll){
+            if(!scroll)return;
+            fputs(mouse?"\033[?1007h\033[?1000h\033[?1002h\033[?1006h":"\033[?1007h",stdout);
+            fflush(stdout);
+        }
+        ~InlineScrollModes(){
+            if(mouse){fputs("\033[?1006l\033[?1002l\033[?1000l",stdout);fflush(stdout);}
+        }
+    } scroll_modes(inline_scroll);
+#endif
     size_t selected=initial>0&&static_cast<size_t>(initial)<=items.size()?static_cast<size_t>(initial-1):items.size()-1;
     int rows=terminal_rows(),columns=terminal_columns();
     auto capacity=[&](int height){return std::min(items.size(),static_cast<size_t>(std::max(1,height-top)));};
@@ -195,22 +215,34 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
     size_t first=0;
     std::string typed;
     const bool color=terminal_supports_color();
-    auto option_label=[&](size_t i,bool focused){
+    auto option_label=[&](size_t i,bool focused,int max_label=0){
         auto number=std::to_string((i+1)%items.size())+".";
-        if(!color)return number+" "+labels[i];
-        return ui_paint(Tone::Dim,number)+" "+(focused?ui_paint(Tone::Accent,labels[i],true):labels[i]);
+        std::string text=max_label>0?ui_clip(labels[i],max_label):labels[i];
+        if(!color)return number+" "+text;
+        return ui_number(number)+" "+(focused?ui_paint(Tone::Accent,text,true):text);
     };
     if(inline_row)visible=1;
     auto draw=[&]{
         if(inline_row){
             // One row: "❯ Allow   Deny   Show full   Cancel", focused one in accent.
-            std::string row="\r\033[2K";
+            // Narrow windows drop the padding of unfocused items and tighten
+            // the gaps so the row never wraps onto the status line.
+            int labels_cells=0;
+            for(size_t i=0;i<items.size();i++)
+                labels_cells+=static_cast<int>(std::to_string((i+1)%items.size()).size())+2+ui_width(labels[i]);
+            const int gaps=static_cast<int>(items.size())-1;
+            const int roomy_cells=labels_cells+2*static_cast<int>(items.size())+3*gaps;
+            const bool compact=columns>0&&roomy_cells>columns;
+            const char *gap=!compact?"   ":(labels_cells+2+2*gaps<=columns?"  ":" ");
+            std::string row="\r\033[2K\033[?7l";
             for(size_t i=0;i<items.size();i++){
                 const bool focused=i==selected;
-                if(i)row+="   ";
-                row+=focused?"❯ ":"  ";
+                if(i)row+=gap;
+                if(focused)row+="❯ ";
+                else if(!compact)row+="  ";
                 row+=option_label(i,focused);
             }
+            row+="\033[?7h";
             fputs(row.c_str(),stdout);
             fflush(stdout);
             return;
@@ -223,7 +255,8 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
             // The focused row gets the accent colour and a bold label. Unselected
             // rows keep full brightness: dim text disappears on translucent
             // backgrounds, which is a common Konsole setup.
-            auto label=option_label(i,focused);
+            const int max_label=columns>12?columns-8:0;
+            auto label=option_label(i,focused,max_label);
             printf("\r\033[2K%s%s\n",focused?"❯ ":"  ",label.c_str());
         }
         fputs("\033[?7h",stdout);
@@ -249,10 +282,10 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
             draw();
         }
         int key=read_key();
-        if(key==end_input)break;
+        if(key==end_input){input_closed=true;break;}
         if(key==idle){
             if(!escape.empty()&&monotime()-escape_started>=0.2){
-                if(escape=="\x1b"&&transient)return finish(0);
+                if(escape=="\x1b"&&(transient||allow_escape))return finish(0);
                 escape.clear();
             }
             continue;
@@ -265,12 +298,40 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
             typed.clear();
             continue;
         }
-        if(key==4){input_closed=true;break;}
+        if(key==4){
+            if(inline_row||(transient&&!allow_escape)){input_closed=true;break;}
+            if(allow_escape)return finish(0);
+            continue;
+        }
         if(key==27){escape="\x1b";escape_started=monotime();continue;}
         if(!escape.empty()){
             escape+=static_cast<char>(key);
             if(escape.size()==2&&(key=='['||key=='O'))continue;
-            if(escape.size()>2&&((key>='0'&&key<='9')||key==';')&&escape.size()<16)continue;
+            if(escape.size()==3&&escape[1]=='['&&key=='<')continue;
+            if(escape.size()>2&&((key>='0'&&key<='9')||key==';')&&escape.size()<32)continue;
+#ifndef _WIN32
+            if(inline_scroll){
+                if(escape.starts_with("\x1b[<")&&(key=='M'||key=='m')){
+                    int button=0,col=0,row=0;
+                    if(sscanf(escape.c_str()+3,"%d;%d;%d",&button,&col,&row)==3){
+                        const int code=button&~28;
+                        if(key=='M'&&code==64)scroll_transcript(-1);
+                        else if(key=='M'&&code==65)scroll_transcript(1);
+                        else scroll_transcript_mouse(row,col,code,key=='m');
+                    }
+                    escape.clear();
+                    continue;
+                }
+                if(native_selection&&(escape=="\x1b[A"||escape=="\x1bOA")){scroll_transcript(-1);escape.clear();continue;}
+                if(native_selection&&(escape=="\x1b[B"||escape=="\x1bOB")){scroll_transcript(1);escape.clear();continue;}
+                if(escape=="\x1b[5~"||escape=="\x1b[5;2~"){scroll_transcript_page(-1);escape.clear();continue;}
+                if(escape=="\x1b[6~"||escape=="\x1b[6;2~"){scroll_transcript_page(1);escape.clear();continue;}
+                if(escape=="\x1b[1;5A"){scroll_transcript(-3);escape.clear();continue;}
+                if(escape=="\x1b[1;5B"){scroll_transcript(3);escape.clear();continue;}
+                if(escape=="\x1b[1;5H"){scroll_transcript(-1000000);escape.clear();continue;}
+                if(escape=="\x1b[1;5F"){scroll_transcript(1000000);escape.clear();continue;}
+            }
+#endif
             if(escape=="\x1b[A"||escape=="\x1bOA")key=up;
             else if(escape=="\x1b[B"||escape=="\x1bOB")key=down;
             else if(inline_row&&(escape=="\x1b[D"||escape=="\x1bOD"))key=up;

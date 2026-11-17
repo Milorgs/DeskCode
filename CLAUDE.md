@@ -1,6 +1,6 @@
-# desk-agent
+# DeskCode
 
-C++20 终端 AI 助手，产品名 `desk code`。支持 OpenAI Chat Completions 与 Anthropic 原生 Messages 两套接口。
+C++20 终端 AI 助手，产品名 `DeskCode`。支持 OpenAI Chat Completions 与 Anthropic 原生 Messages 两套接口。
 
 ## 构建与测试
 
@@ -33,6 +33,14 @@ make install               # 跑 ./install.sh，装到 ~/.local/bin/desk
 
 **字形宽度**：`⏺ ⎿ ❯ ╭ ╮ ╰ ╯ ┃ ⠋ …` 在 `zh_CN.UTF-8` + Noto Sans CJK 回退下实测全部 1 列，汉字 2 列。盒线字符属 Unicode「宽度不确定」类，若哪天边框错位，先查 Konsole 的 `IgnoreWcWidth` 和 wcwidth 判定。
 
+## 测试隔离（必须遵守）
+
+**测试不碰正式环境。** 用户的 `~/.config/desk-agent` 里有正式对话记录、MCP 设置和真实 API 密钥。所有手动测试一律用 `tools/sandbox.sh`：独立配置目录 `/tmp/desk-sandbox/config`，模型接口指向本地假服务器 `tools/fake_model.py`，工作目录 `/tmp/desk-sandbox/work`。不要在正式配置下发测试消息，不要用 `--workspace` 指向用户目录做测试。
+
+**不要用剪贴板粘贴往窗口里输入。** 桌面工具的 `type_text` 在 KDE 上走剪贴板，测试文字会留在剪贴板里，被用户下一次粘贴带进正式对话（曾把「用 run_shell 执行 echo hi」带进用户自己的对话）。往沙箱窗口输入用逐键 `press_key`，或用 pty 脚本。
+
+**API 密钥不得出现在仓库、提交、日志、截图和 /tmp 里。** 改动涉及配置或网络时，用密钥本身在 `git log --all -p`、工作区和 /tmp 中检索确认（不要打印密钥）。
+
 ## 真机视觉验证
 
 pty 测试全绿不代表在真实 Konsole 里可用——布局阈值、对比度、字形只有在真机才暴露。验证流程：
@@ -43,7 +51,7 @@ tools/verify-ui.sh        # 构建 + 测试 + 安装 + 截图到 /tmp/desk-verif
 
 截图用 `spectacle -b -n -a -o <path>`（后台模式、无通知、**截活动窗口**）。`grim` / `import` / `scrot` 都**没装**，别试。
 
-需要弹窗看界面时用 `desk-window`（`~/.local/bin/desk-window`，参数原样传给它），它打开不透明普通 Konsole 窗口。不要加 `--fullscreen`，不要用 `DesktopTransparent` / `桌面透明终端` / `org.milorgs.desktop-konsole`——那是桌面小组件专用配置。只需在当前终端跑就直接 `desk`。
+需要弹窗看界面时用 `tools/sandbox.sh`（内部调用 `desk-window`）（`~/.local/bin/desk-window`，参数原样传给它），它打开不透明普通 Konsole 窗口。不要加 `--fullscreen`，不要用 `DesktopTransparent` / `桌面透明终端` / `org.milorgs.desktop-konsole`——那是桌面小组件专用配置。只需在当前终端跑就直接 `desk`。
 
 改界面后必须看图，不要只信断言。
 

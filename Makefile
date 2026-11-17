@@ -26,9 +26,9 @@ build/desk: $(CORE_OBJ) $(APP_OBJ) | build
 build/test: $(CORE_OBJ) $(TEST_OBJ) | build
 	$(CXX) $(CXXFLAGS) $(WARN) $^ $(LDFLAGS) $(LDLIBS) -lutil -o $@
 test: build/desk build/test
-	DESK_NO_ARROW=1 ./build/test
+	DESK_NO_ARROW=1 ./build/test < /dev/null
 test-mcp-http: build/desk
-	python3 tests/mcp_http.py
+	python3 tests/mcp_http.py < /dev/null
 sanitize:
 	$(MAKE) clean
 	$(MAKE) test CXXFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' LDFLAGS='-fsanitize=address,undefined'
