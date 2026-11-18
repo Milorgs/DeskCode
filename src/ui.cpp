@@ -43,6 +43,8 @@ size_t decode(std::string_view text,uint32_t &code){
     return width;
 }
 // East Asian wide and fullwidth ranges take two cells; combining marks take none.
+// Emoji with default emoji presentation (Unicode East Asian Width "W") are
+// listed too: terminals draw ✅ ❌ ✨ 🚀 ⭐ two cells wide.
 int cell_width(uint32_t code){
     if(code<32||code==127)return 0;
     if((code>=0x0300&&code<=0x036f)||(code>=0x200b&&code<=0x200f)||(code>=0xfe00&&code<=0xfe0f))return 0;
@@ -51,6 +53,17 @@ int cell_width(uint32_t code){
        (code>=0xfe30&&code<=0xfe6f)||(code>=0xff00&&code<=0xff60)||
        (code>=0xffe0&&code<=0xffe6)||(code>=0x1f300&&code<=0x1f64f)||
        (code>=0x1f900&&code<=0x1f9ff)||(code>=0x20000&&code<=0x3fffd))return 2;
+    static constexpr uint32_t emoji[][2]={
+        {0x231a,0x231b},{0x23e9,0x23ec},{0x23f0,0x23f0},{0x23f3,0x23f3},{0x25fd,0x25fe},
+        {0x2614,0x2615},{0x2648,0x2653},{0x267f,0x267f},{0x2693,0x2693},{0x26a1,0x26a1},
+        {0x26aa,0x26ab},{0x26bd,0x26be},{0x26c4,0x26c5},{0x26ce,0x26ce},{0x26d4,0x26d4},
+        {0x26ea,0x26ea},{0x26f2,0x26f3},{0x26f5,0x26f5},{0x26fa,0x26fa},{0x26fd,0x26fd},
+        {0x2705,0x2705},{0x270a,0x270b},{0x2728,0x2728},{0x274c,0x274c},{0x274e,0x274e},
+        {0x2753,0x2755},{0x2757,0x2757},{0x2795,0x2797},{0x27b0,0x27b0},{0x27bf,0x27bf},
+        {0x2b1b,0x2b1c},{0x2b50,0x2b50},{0x2b55,0x2b55},{0x1f004,0x1f004},{0x1f0cf,0x1f0cf},
+        {0x1f18e,0x1f18e},{0x1f191,0x1f19a},{0x1f200,0x1f2ff},{0x1f680,0x1f6ff},
+        {0x1f7e0,0x1f7eb},{0x1fa70,0x1faff}};
+    for(const auto &range:emoji)if(code>=range[0]&&code<=range[1])return 2;
     return 1;
 }
 }
@@ -247,6 +260,15 @@ std::string paint_if(bool color,Tone tone,std::string_view text,bool bold=false)
     return result;
 }
 bool fence_start(std::string_view text){return text.starts_with("```")||text.starts_with("~~~");}
+size_t fence_run(std::string_view text,char fence){
+    size_t n=0;
+    while(n<text.size()&&text[n]==fence)n++;
+    return n;
+}
+bool blank(std::string_view text){
+    for(char c:text)if(c!=' '&&c!='\t'&&c!='\r')return false;
+    return true;
+}
 bool fence_prefix(std::string_view text){
     return text.size()<3&&(std::string_view("```").starts_with(text)||std::string_view("~~~").starts_with(text));
 }
@@ -268,6 +290,8 @@ void MarkdownStream::restyle(){
 }
 
 void MarkdownStream::inline_char(char c){
+    // Inside `code` everything is literal, including ** and 2**10.
+    if(code_span_&&c!='`'){out_+=c;return;}
     if(c=='*'){
         if(star_held_){star_held_=false;bold_=!bold_;restyle();}
         else star_held_=true;
@@ -304,16 +328,20 @@ bool MarkdownStream::classify(bool at_newline){
     while(lead<line.size()&&line[lead]==' ')lead++;
     std::string_view body=line.substr(lead);
     if(in_code_){
-        if(lead<=3&&fence_start(body)){
-            if(!at_newline)return false;
+        // Close only on the same fence character, at least as long as the
+        // opening fence and with nothing after it; a ```python line inside a
+        // ````markdown block is content.
+        const size_t run=fence_char_?fence_run(body,fence_char_):0;
+        if(lead<=3&&run>0&&!at_newline&&(run<fence_len_?run==body.size():blank(body.substr(run))))return false;
+        if(lead<=3&&fence_len_&&run>=fence_len_&&blank(body.substr(run))){
             indent();
             out_+=paint_if(color_,Tone::Rule,"└─");
             in_code_=false;
+            fence_char_=0;fence_len_=0;
             kind_=Kind::Plain;
             pending_.clear();
             return true;
         }
-        if(!at_newline&&lead<=3&&fence_prefix(body))return false;
         kind_=Kind::Code;
         indent();
         out_+=paint_if(color_,Tone::Rule,"│ ");
@@ -332,7 +360,9 @@ bool MarkdownStream::classify(bool at_newline){
             if(!at_newline&&fence_prefix(body))return false;
             if(fence_start(body)){
                 if(!at_newline)return false;
-                std::string language(body.substr(3));
+                fence_char_=first;
+                fence_len_=fence_run(body,first);
+                std::string language(body.substr(fence_len_));
                 while(!language.empty()&&(language.back()==' '||language.back()=='\t'))language.pop_back();
                 while(!language.empty()&&language.front()==' ')language.erase(0,1);
                 indent();

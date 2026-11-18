@@ -36,6 +36,9 @@ private:
     int indent_;
     bool first_line_=true,line_start_=true,in_code_=false,bold_=false,code_span_=false;
     bool star_held_=false;
+    // The open fence: its character and length; a closing fence must match.
+    char fence_char_=0;
+    size_t fence_len_=0;
     Kind kind_=Kind::Plain;
     std::string pending_,out_;
     void indent();

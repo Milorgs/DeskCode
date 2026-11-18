@@ -307,3 +307,31 @@ bool record_tokens(App &app,J *config,std::uint64_t amount){
     const char *text=json_object_to_json_string_ext(usage.get(),JSON_C_TO_STRING_PLAIN);
     return strlen(text)<=1048576&&atomic_file(path,text,strlen(text),0600)==0;
 }
+
+// Worker output is shown as it arrives. Invalid bytes become U+FFFD instead of
+// stalling the transcript; a sequence cut at the end waits for the rest unless
+// the worker has stopped producing output (final), when it becomes U+FFFD too.
+std::string display_utf8(std::string_view text,size_t &used,bool final){
+    std::string shown;
+    shown.reserve(text.size());
+    size_t i=0;
+    while(i<text.size()){
+        const auto c=static_cast<unsigned char>(text[i]);
+        if(c<0x80){shown+=static_cast<char>(c);i++;continue;}
+        const size_t width=c>=0xc2&&c<=0xdf?2:c>=0xe0&&c<=0xef?3:c>=0xf0&&c<=0xf4?4:0;
+        if(!width){shown+="\xEF\xBF\xBD";i++;continue;}
+        size_t have=1;
+        while(have<width&&i+have<text.size()&&(static_cast<unsigned char>(text[i+have])&0xc0)==0x80)have++;
+        if(have==width&&valid_utf8(text.substr(i,width))){shown.append(text.substr(i,width));i+=width;continue;}
+        if(i+have==text.size()&&have<width){
+            const auto second=have>1?static_cast<unsigned char>(text[i+1]):0;
+            const bool impossible=have>1&&((c==0xe0&&second<0xa0)||(c==0xed&&second>=0xa0)||(c==0xf0&&second<0x90)||(c==0xf4&&second>=0x90));
+            if(!impossible&&!final)break;
+            if(!impossible){shown+="\xEF\xBF\xBD";i+=have;continue;}
+        }
+        shown+="\xEF\xBF\xBD";
+        i++;
+    }
+    used=i;
+    return shown;
+}

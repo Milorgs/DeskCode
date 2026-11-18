@@ -15,7 +15,7 @@ It supports Linux x86_64 and Windows 10/11 x64, OpenAI-compatible APIs, the nati
 ### Linux
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Milorgs/desk-agent/main/install-linux.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-linux.sh | sh
 ```
 
 脚本会下载最新 Linux 版本，安装到 `~/.local/bin/desk`，并尝试加入当前用户的 PATH。安装后重新打开终端，输入 `desk`。
@@ -25,16 +25,16 @@ This downloads the latest Linux release, installs `desk` to `~/.local/bin`, and 
 ### Windows PowerShell
 
 ```powershell
-irm https://raw.githubusercontent.com/Milorgs/desk-agent/main/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 | iex
 ```
 
 脚本会下载最新 Windows 版本，安装到当前用户目录，并加入用户 PATH。安装后重新打开 PowerShell，输入 `desk`。
 
 This downloads the latest Windows release, installs it for the current user, and adds it to the user PATH. Open a new PowerShell window and run `desk`.
 
-手动下载： [GitHub Releases](https://github.com/Milorgs/desk-agent/releases)。
+手动下载： [GitHub Releases](https://github.com/Milorgs/DeskCode/releases)。
 
-Manual downloads: [GitHub Releases](https://github.com/Milorgs/desk-agent/releases).
+Manual downloads: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases).
 
 ## 第一次使用 / First run
 
@@ -102,13 +102,13 @@ desk doctor --json                                        # 机器可读的环�
 [0] 退出 / Exit
 ```
 
-对话中按 `/` 打开命令面板（选择模型、推理模式、批准模式、新建对话、清空上下文、查看状态、快捷键帮助等），`F2` 切换模型，`F3` 调整推理强度。鼠标放进对话窗口直接用滚轮上下滚动审查对话（审批 diff 时同样可滚轮翻阅），也可以按住右侧滚动条拖动定位；按住 `Shift` 拖动鼠标选择文字，也支持 `↑/↓`、`PgUp/PgDn` 翻页、`Ctrl+↑/↓` 逐行滚动，二级菜单按 `Esc` 返回。Linux 下：
+对话中按 `/` 打开命令面板（选择模型、推理模式、批准模式、新建对话、清空上下文、查看状态、快捷键帮助等），`F2` 切换模型，`F3` 调整推理强度。鼠标放进对话窗口直接用滚轮上下滚动审查对话（审批 diff 时同样可滚轮翻阅），也可以按住右侧滚动条拖动定位；按住 `Shift` 拖动鼠标选择文字，也支持 `↑/↓`、`PgUp/PgDn` 翻页、`Ctrl+↑/↓` 逐行滚动；`Ctrl+P/Ctrl+N`（或 `Alt+↑/↓`）调出本对话之前发送的需求，底部状态栏显示估算的上下文占用比例。二级菜单按 `Esc` 返回。Linux 下：
 
 - `Ctrl+D`：返回选择对话，任务继续运行。
 - `Ctrl+C`：停止当前任务。
 - `0`：普通需求内容，不是退出键。
 
-In a chat, press `/` for the command palette (model, reasoning, approval, new chat, clear context, status, keyboard shortcuts, and more), `F2` to switch models, or `F3` to adjust reasoning. Hover the mouse inside the conversation and use the scroll wheel to review messages and approval diffs or drag the right-hand scrollbar to navigate; hold `Shift` while dragging to select text, or use `Up/Down`, `PgUp/PgDn` by page, and `Ctrl+Up/Down` by line; `Esc` leaves submenus. On Linux:
+In a chat, press `/` for the command palette (model, reasoning, approval, new chat, clear context, status, keyboard shortcuts, and more), `F2` to switch models, or `F3` to adjust reasoning. Hover the mouse inside the conversation and use the scroll wheel to review messages and approval diffs or drag the right-hand scrollbar to navigate; hold `Shift` while dragging to select text, or use `Up/Down`, `PgUp/PgDn` by page, and `Ctrl+Up/Down` by line. `Ctrl+P/Ctrl+N` (or `Alt+Up/Down`) recall earlier requests of the conversation, and the status line shows an estimate of how much of the context budget is in use. `Esc` leaves submenus. On Linux:
 
 - `Ctrl+D`: return to the conversation list while the task continues.
 - `Ctrl+C`: stop the current task.
@@ -116,9 +116,9 @@ In a chat, press `/` for the command palette (model, reasoning, approval, new ch
 
 ## 安装包和源码 / Packages and source
 
-最新版本：**1.11.4**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64。
+最新版本：**1.11.5**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64。
 
-Latest version: **1.11.4**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries. The Windows package targets Windows 10/11 x64.
+Latest version: **1.11.5**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries. The Windows package targets Windows 10/11 x64.
 
 也可以直接进入对话或执行一次请求：
 
@@ -149,8 +149,8 @@ A source build needs C++20, Make, pkg-config, libcurl, json-c, OpenSSL, and Read
 
 ## 项目链接 / Links
 
-- [GitHub repository](https://github.com/Milorgs/desk-agent)
-- [Releases](https://github.com/Milorgs/desk-agent/releases)
+- [GitHub repository](https://github.com/Milorgs/DeskCode)
+- [Releases](https://github.com/Milorgs/DeskCode/releases)
 - [开发记录 / Development notes](docs/development.md)
 
 我会继续把可运行版本和 Windows/Linux 安装包放到 GitHub。

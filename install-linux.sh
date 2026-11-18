@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo='Milorgs/desk-agent'
+repo='Milorgs/DeskCode'
 asset="https://github.com/$repo/releases/latest/download/desk-agent-linux-x64.tar.gz"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/desk-agent-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM

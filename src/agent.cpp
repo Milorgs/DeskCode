@@ -89,6 +89,24 @@ static std::string excerpt(std::string_view text,size_t limit){
     return std::string(text.substr(0,limit))+"…";
 }
 
+// Text from tools or the model printed to the terminal: cut on a character
+// boundary and without control bytes, so it cannot split UTF-8 or drive the
+// terminal (colour codes in command output are dropped as well).
+static std::string printable(std::string_view text,size_t limit){
+    std::string cut=excerpt(text,limit),shown;
+    shown.reserve(cut.size());
+    for(size_t i=0;i<cut.size();i++){
+        const auto c=static_cast<unsigned char>(cut[i]);
+        if(c==0x1b&&i+1<cut.size()&&cut[i+1]=='['){
+            i+=2;
+            while(i<cut.size()&&!(cut[i]>='@'&&cut[i]<='~'))i++;
+            continue;
+        }
+        if((c<32&&c!='\n'&&c!='\t')||c==127)continue;
+        shown+=static_cast<char>(c);
+    }
+    return valid_utf8(shown)?shown:std::string();
+}
 static std::string tool_excerpt_parsed(J *result,const char *fallback,size_t limit){
     J *blocks=get(result,"content");
     if(!json_object_is_type(blocks,json_type_array))return excerpt(fallback,limit);
@@ -468,7 +486,7 @@ static void show_call(const char *name,J *args){
         head+="("+inner+")";
     }
     printf("%s\n",ui_paint(Tone::Accent,ui_clip(head,width)).c_str());
-    if(!strcmp(name,"search_text"))printf(tr("  查找：%.256s\n"),sget(args,"query"));
+    if(!strcmp(name,"search_text"))printf(tr("  查找：%s\n"),printable(sget(args,"query"),256).c_str());
     fflush(stdout);
 }
 static void show_result(const char *name,J *r,double elapsed){
@@ -503,7 +521,7 @@ static void show_result(const char *name,J *r,double elapsed){
     printf("%s\n",ui_paint(failed?Tone::Error:Tone::Dim,ui_clip(line,std::max(24,terminal_columns()-6))).c_str());
     if(!strcmp(name,"run_shell")&&*sget(r,"output")){
         const char *output=sget(r,"output");
-        printf("%.*s\n",1600,output);
+        printf("%s\n",printable(output,1600).c_str());
         if(strlen(output)>1600||bget(r,"truncated"))puts(tr("  …输出已截断，模型可见工具返回的输出片段。"));
     }
 }
@@ -580,6 +598,11 @@ int run_task(App *a,const char *task){
         bool compacted=false;
         J *history=context(a,tools,&compacted);
         if(!history)break;
+        {
+            // Rounded up so any content shows at least 1%.
+            const size_t limit=context_limit(),used=context_bytes(history,tools);
+            task_context(*a,static_cast<int>(std::min<size_t>(100,(used*100+limit-1)/limit)));
+        }
         if(compacted&&!announced_compaction){
             progress_clear(a);
             puts(tr("已压缩上下文，继续当前任务。"));

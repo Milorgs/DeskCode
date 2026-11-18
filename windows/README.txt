@@ -2,7 +2,7 @@ DeskCode for Windows 10/11 x64
 
 Extract the entire ZIP. Double-click desk.exe, or open a terminal here and run .\desk.exe.
 One-line installation for the latest release in PowerShell:
-  irm https://raw.githubusercontent.com/Milorgs/desk-agent/main/install-windows.ps1 | iex
+  irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 | iex
 
 Manual package installation (current user only):
   powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
