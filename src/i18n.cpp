@@ -120,7 +120,7 @@ constexpr Translation catalog[]={
     {"执行命令","Run command"},
     {"读取桌面","Read desktop"},
     {"操作桌面","Operate desktop"},
-    {"  查找：%.256s\n","  Search: %.256s\n"},
+    {"  查找：%s\n","  Search: %s\n"},
     {"  %s（%.1f 秒）","  %s (%.1f s)"},
     {"失败","Failed"},
     {"完成","Done"},
@@ -429,7 +429,7 @@ constexpr Translation catalog[]={
     {"对话快捷键与指令","Chat shortcuts and commands"},
     {"  F2 选择模型 · F3 思考强度 · / 打开操作菜单\n  PgUp/PgDn 翻页 · Ctrl+↑/↓ 逐行滚动 · Ctrl+C 停止 · Ctrl+D 返回列表\n  指令：/new 新建 · /clear 清空上下文 · /approval 批准 · /mcp 服务 · /status 状态","  F2 Model · F3 Reasoning · / Actions menu\n  PgUp/PgDn Page scroll · Ctrl+Up/Down Line scroll · Ctrl+C Stop · Ctrl+D Conversations\n  Commands: /new · /clear · /approval · /mcp · /status"},
     {"  / 命令面板 · F2 选择模型 · F3 思考强度\n  PgUp/PgDn 翻页 · Ctrl+↑/↓ 逐行滚动 · Ctrl+Home/End 首尾\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）","  / Command palette · F2 Model · F3 Reasoning\n  PgUp/PgDn Page · Ctrl+Up/Down Line · Ctrl+Home/End Top/bottom\n  Ctrl+C Stop the task · Ctrl+D Conversations (the task keeps running)"},
-    {"  / 命令面板 · F2 选择模型 · F3 思考强度\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）","  / Command palette · F2 Model · F3 Reasoning\n  Mouse wheel / Up/Down Scroll · PgUp/PgDn Page · Ctrl+Home/End Top/bottom\n  Ctrl+C Stop the task · Ctrl+D Conversations (the task keeps running)"},
+    {"  / 命令面板 · F2 选择模型 · F3 思考强度\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）","  / Command palette · F2 Model · F3 Reasoning\n  Mouse wheel / Up/Down Scroll · PgUp/PgDn Page · Ctrl+Home/End Top/bottom\n  Ctrl+P/Ctrl+N or Alt+Up/Down Recall earlier requests · Shift+drag Select text\n  Ctrl+C Stop the task · Ctrl+D Conversations (the task keeps running)"},
     {"OpenAI接口","OpenAI API"},
     {"Anthropic接口","Anthropic API"},
     {"Kimi（月之暗面）","Kimi (Moonshot)"},
@@ -479,6 +479,8 @@ constexpr Translation catalog[]={
     {"--approval 只接受 ask、edit 或 full。\n","--approval accepts ask, edit or full.\n"},
     {"标准输入没有可用的需求文本（须为 1 MB 以内的 UTF-8）。\n","No request text on stdin (UTF-8, up to 1 MB).\n"},
     {"--continue 需要交互终端。\n","--continue needs an interactive terminal.\n"},
+    {" · 上下文约 %d%%（估算）"," · Context ~%d%% (est.)"},
+    {"…较早的输出已省略","… earlier output omitted"},
 };
 std::string preference_path(){
     return config_base()+"/desk-agent/ui.json";

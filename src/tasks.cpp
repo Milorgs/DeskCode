@@ -30,6 +30,8 @@ struct Job {
     int id=0,master=-1,events=-1,feed=-1;
     pid_t pid=-1;
     bool active=true,alive=true,cancelled=false,truncated=false;
+    // Bytes cut from the front of output; output starts at this offset.
+    std::uint64_t dropped=0;
     bool retired=false;
     double retired_at=0;
     bool thinking=false;
@@ -38,6 +40,8 @@ struct Job {
     // Wall time of the current turn and tokens the worker has reported for it.
     double turn_started=0;
     std::uint64_t tokens=0;
+    // Share of the context budget used by the latest request; -1 until known.
+    int context=-1;
     std::string pending_events;
     std::string title,workspace,state="执行中",output;
 };
@@ -50,7 +54,7 @@ void drain(Job &j){
         if(j.output.size()>65536){
             size_t cut=j.output.size()-65536;
             while(cut<j.output.size()&&(static_cast<unsigned char>(j.output[cut])&0xc0)==0x80)cut++;
-            j.output.erase(0,cut);j.truncated=true;
+            j.output.erase(0,cut);j.truncated=true;j.dropped+=cut;
         }
     }
 }
@@ -62,6 +66,11 @@ void task_tokens(App &app){
     if(app.task_events<0)return;
     char message[9];message[0]='k';
     std::uint64_t value=app.task_tokens;memcpy(message+1,&value,sizeof value);
+    ssize_t n=write(app.task_events,message,sizeof message);(void)n;
+}
+void task_context(App &app,int percent){
+    if(app.task_events<0)return;
+    const char message[2]={'x',static_cast<char>(std::clamp(percent,0,100))};
     ssize_t n=write(app.task_events,message,sizeof message);(void)n;
 }
 ResourceLock::ResourceLock(App &app,bool desktop){
@@ -124,6 +133,11 @@ void Tasks::refresh(){
                 if(k+9>j.pending_events.size())break;
                 std::uint64_t value=0;memcpy(&value,j.pending_events.data()+k+1,sizeof value);
                 j.tokens=value;k+=8;used=k+1;continue;
+            }
+            if(event=='x'){
+                if(k+2>j.pending_events.size())break;
+                j.context=static_cast<unsigned char>(j.pending_events[k+1]);
+                k+=1;used=k+1;continue;
             }
             used=k+1;
             j.changed_at=monotime();
@@ -190,6 +204,7 @@ int Tasks::start(App &app,const std::string &task,const std::string &workspace){
     pid_t pid=forkpty(&master,nullptr,nullptr,sized?&size:nullptr);
     if(pid==0){
         if(prctl(PR_SET_PDEATHSIG,SIGTERM)||getppid()!=controller)_exit(127);
+        signal(SIGTSTP,SIG_DFL);
         close(payload[1]);close(events[0]);
         fcntl(payload[0],F_SETFD,0);fcntl(events[1],F_SETFD,0);
         char number[32];snprintf(number,sizeof number,"%d",payload[0]);
@@ -216,6 +231,7 @@ J *Tasks::snapshot(){
         put(v,"thinking_seconds",json_object_new_double(thinking?monotime()-j.thinking_started:0));
         put(v,"turn_seconds",json_object_new_double(j.active&&j.turn_started>0?monotime()-j.turn_started:0));
         put(v,"tokens",json_object_new_int64(static_cast<int64_t>(j.tokens)));
+        put(v,"context_percent",json_object_new_int(j.context));
         add(items,v);
     }return items;
 }
@@ -242,7 +258,7 @@ bool Tasks::resume(int id,const std::string &task,J *settings){
 char *Tasks::readline(const char *prompt){
     return editable_input(prompt,nullptr,false,[this]{refresh();if(on_idle)on_idle();});
 }
-std::string Tasks::output(int id,bool *truncated){refresh();Job *j=impl->find(id);if(!j)return {};if(truncated)*truncated=j->truncated;return j->output;}
+std::string Tasks::output(int id,bool *truncated,std::uint64_t *dropped){refresh();Job *j=impl->find(id);if(dropped)*dropped=0;if(!j)return {};if(truncated)*truncated=j->truncated;if(dropped)*dropped=j->dropped;return j->output;}
 bool Tasks::decide(int id,bool allow){refresh();Job *j=impl->find(id);return j&&j->active&&j->state=="等待确认"&&write_all(j->master,allow?"1\n":"2\n");}
 bool Tasks::respond(int id,int answer){
     refresh();Job *j=impl->find(id);

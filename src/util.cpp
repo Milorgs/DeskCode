@@ -112,6 +112,8 @@ struct TranscriptViewport {
     std::vector<std::string> lines;
     size_t top=0;
     bool following=true;
+    // The chat is open but the frame is suspended; keep collecting lines.
+    bool recording=false;
     bool dragging=false;
     int drag_offset=0;
     size_t drag_start_top=0;
@@ -242,9 +244,9 @@ struct TranscriptViewport {
         if(last==0)return;
         const bool bar=has_scrollbar();
         const auto thumb=bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0};
-        fputs("\0337",stdout);
+        fputs("\0337\033[?7l",stdout);
         for(int row=first;row<=last;row++)draw_row(row,bar,thumb);
-        fputs("\0338",stdout);
+        fputs("\033[?7h\0338",stdout);
         fflush(stdout);
     }
 
@@ -260,9 +262,9 @@ struct TranscriptViewport {
         const size_t offset=lines.size()-top;
         if(offset>static_cast<size_t>(last-first))return;
         const bool bar=has_scrollbar();
-        fputs("\0337",stdout);
+        fputs("\0337\033[?7l",stdout);
         draw_row(first+static_cast<int>(offset),bar,bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0});
-        fputs("\0338",stdout);
+        fputs("\033[?7h\0338",stdout);
         fflush(stdout);
     }
 
@@ -329,6 +331,38 @@ int scroll_wheel_up(int,int){transcript_view.scroll(-1);return 0;}
 int scroll_wheel_down(int,int){transcript_view.scroll(1);return 0;}
 int scroll_top(int,int){transcript_view.scroll(-1000000);return 0;}
 int scroll_bottom(int,int){transcript_view.scroll(1000000);return 0;}
+// Recall of earlier requests. The draft typed before the first recall is kept
+// and comes back after stepping past the newest entry.
+const std::vector<std::string> *recall_history=nullptr;
+size_t recall_position=0;
+bool recalling=false;
+std::string recall_stash;
+void recall_show(const std::string &text){
+    rl_replace_line(text.c_str(),0);
+    rl_point=rl_end;
+}
+int recall_previous(int,int){
+    if(!recall_history||recall_history->empty())return rl_ding();
+    if(!recalling){
+        recall_stash.assign(rl_line_buffer,static_cast<size_t>(rl_end));
+        recall_position=recall_history->size();
+        recalling=true;
+    }
+    if(!recall_position)return rl_ding();
+    recall_show((*recall_history)[--recall_position]);
+    return 0;
+}
+int recall_next(int,int){
+    if(!recalling||!recall_history)return rl_ding();
+    if(recall_position+1<recall_history->size()){
+        recall_show((*recall_history)[++recall_position]);
+        return 0;
+    }
+    recalling=false;
+    recall_show(recall_stash);
+    recall_stash.clear();
+    return 0;
+}
 int scroll_mouse(int,int){
     char report[32]{};
     for(size_t i=0;i<sizeof(report)-1;i++){
@@ -362,17 +396,29 @@ struct EditorSession {
         rl_bind_key('\t',rl_insert);
         rl_variable_bind("horizontal-scroll-mode","on");
     }
+    // Bind a key for this session only; the destructor puts the previous
+    // binding back. Sequences that are prefixes of longer ones stay untouched.
+    bool bind(const char *sequence,rl_command_func_t *handler){
+        if(!scroll_keymap)scroll_keymap=rl_get_keymap();
+        int type=ISFUNC;
+        auto previous=rl_function_of_keyseq(sequence,scroll_keymap,&type);
+        if(type!=ISFUNC)return false;
+        if(rl_bind_keyseq_in_map(sequence,handler,scroll_keymap))return false;
+        previous_scroll_bindings.emplace_back(sequence,previous);
+        return true;
+    }
+    void enable_history(const std::vector<std::string> *history){
+        recall_history=history;
+        recalling=false;
+        recall_stash.clear();
+        if(!history)return;
+        bind("\020",recall_previous);
+        bind("\016",recall_next);
+        bind("\033[1;3A",recall_previous);
+        bind("\033[1;3B",recall_next);
+    }
     void enable_scrolling(){
         if(!transcript_view.last)return;
-        scroll_keymap=rl_get_keymap();
-        auto bind=[&](const char *sequence,rl_command_func_t *handler){
-            int type=ISFUNC;
-            auto previous=rl_function_of_keyseq(sequence,scroll_keymap,&type);
-            if(type!=ISFUNC)return false;
-            if(rl_bind_keyseq_in_map(sequence,handler,scroll_keymap))return false;
-            previous_scroll_bindings.emplace_back(sequence,previous);
-            return true;
-        };
         bind("\033[5~",scroll_up);
         bind("\033[5;2~",scroll_up);
         bind("\033[6~",scroll_down);
@@ -403,6 +449,9 @@ struct EditorSession {
     }
     ~EditorSession(){
         transcript_view.dragging=false;
+        recall_history=nullptr;
+        recalling=false;
+        recall_stash.clear();
         if(mouse_reporting){
             fputs("\033[?1006l\033[?1002l\033[?1000l",stdout);
             fflush(stdout);
@@ -431,10 +480,11 @@ size_t transcript_hidden_lines(){
     const size_t bottom=transcript_view.tail();
     return bottom>transcript_view.top?bottom-transcript_view.top:0;
 }
-void set_composer_layout(int input_row,int transcript_row,int first_row){
+void set_composer_layout(int input_row,int transcript_row,int first_row,bool keep_transcript){
     auto &view=transcript_view;
     view.first=first_row;
     view.last=input_row?transcript_row:0;
+    view.recording=!view.last&&keep_transcript;
     if(!view.last)return;
     int columns=std::max(1,terminal_columns());
     if(columns!=view.columns){
@@ -444,7 +494,9 @@ void set_composer_layout(int input_row,int transcript_row,int first_row){
     }
     view.top=view.following?view.tail():std::min(view.top,view.tail());
     view.draw();
-    if(editor&&editor->installed)printf("\033[%d;1H",input_row);
+    // The input row hosts readline or the inline approval choices; either way
+    // the cursor belongs there after a relayout.
+    printf("\033[%d;1H",input_row);
 }
 void terminal_message(const std::string &text){
     if(text.empty())return;
@@ -458,6 +510,11 @@ void terminal_message(const std::string &text){
         if(view.following){view.top=view.tail();view.draw();}
         else view.draw_scrollbar();
         return;
+    }
+    if(view.recording){
+        view.transcript+=text;
+        if(text.back()!='\n')view.transcript+='\n';
+        view.columns=0;
     }
     if(!editor||!editor->installed){fwrite(text.data(),1,text.size(),stdout);fflush(stdout);return;}
     std::string line=rl_line_buffer;
@@ -498,6 +555,7 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
         if(draft){
             draft->paused=false;
             session.enable_scrolling();
+            session.enable_history(draft->history);
             rl_bind_keyseq("\033OQ",choose_chat_model);
             rl_bind_keyseq("\033OR",choose_chat_reasoning);
             rl_bind_keyseq("\033[12~",choose_chat_model);

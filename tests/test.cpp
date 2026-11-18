@@ -1362,6 +1362,9 @@ static void test_reasoning_modes(void){
             else if(!native)CHECK(!strcmp(sget(body,"reasoning_effort"),levels[i-1]));
             else if(i==1){CHECK(!strcmp(sget(get(body,"thinking"),"type"),"disabled"));CHECK(!get(body,"output_config"));}
             else{CHECK(!strcmp(sget(get(body,"thinking"),"type"),"adaptive"));CHECK(!strcmp(sget(get(body,"output_config"),"effort"),levels[i-1]));CHECK(iget(body,"max_tokens",0)==tokens);}
+            // OpenAI streams report usage only when asked for it.
+            if(!native)CHECK(bget(get(body,"stream_options"),"include_usage"));
+            else CHECK(!get(body,"stream_options"));
         }
         server_done(server);
         put(a.config,"reasoning_effort",str("xhigh"));const char *rejected[]={"{\"error\":{\"message\":\"unsupported effort\"}}"};server=fake_server(&a,rejected,1,400);
@@ -1736,6 +1739,207 @@ static void test_chat_history_scroll(){
         close(master);
         CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
     }
+    app_cleanup(&a);
+}
+// Earlier requests come back with Ctrl+P/Ctrl+N (and Alt+Up/Down); the draft
+// typed before recalling is restored, and the footer shows context fill.
+static void test_prompt_recall_and_context(){
+    App a=fresh();
+    json_object_put(a.config);a.config=config("recall","openai");
+    const std::string reply=model_reply(nullptr,"RECALL_DONE");
+    const char *responses[]={reply.c_str()};
+    pid_t server=fake_server(&a,responses,1);
+    CHECK(!save_config(&a,a.config));
+    const char *id="22222222222222222222222222222222";
+    CHECK(history_save(a,id,"Recall chat",a.config));
+    a.conversation_id=id;
+    for(const char *text:{"ALPHA_ONE_X","BRAVO_TWO_Y"}){
+        J *user=obj();put(user,"role",str("user"));put(user,"content",str(text));add(a.messages,user);
+        J *answer=obj();put(answer,"role",str("assistant"));put(answer,"content",str("ok"));add(a.messages,answer);
+    }
+    history_checkpoint(a,0);
+    int master=-1;
+    winsize window{30,100,0,0};
+    pid_t child=forkpty(&master,nullptr,nullptr,&window);
+    CHECK(child>=0);
+    if(!child){
+        setenv("TERM","xterm-256color",1);
+        setenv("NO_COLOR","1",1);
+        setenv("DESK_NO_ARROW","1",1);
+        setenv("INPUTRC","/dev/null",1);
+        unsetenv("DESK_NO_COMPOSER");
+        execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    std::string output;
+    CHECK(terminal_until(master,output,"Select a number:"));
+    type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"Choose a conversation"));
+    type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"\033[?1006h"));
+    type_terminal(master,output,"draft");
+    output.clear();
+    type_terminal(master,output,"\x10");
+    CHECK(terminal_until(master,output,"BRAVO_TWO_Y"));
+    output.clear();
+    type_terminal(master,output,"\033[1;3A");
+    CHECK(terminal_until(master,output,"ALPHA_ONE_X"));
+    output.clear();
+    type_terminal(master,output,"\x0e\x0e");
+    CHECK(terminal_until(master,output,"draft"));
+    // Clear the restored draft, recall the newest request and send it.
+    type_terminal(master,output,std::string(5,'\x7f'));
+    output.clear();
+    type_terminal(master,output,"\x10\n");
+    CHECK(terminal_until(master,output,"RECALL_DONE"));
+    CHECK(terminal_until(master,output," · Context ~"));
+    CHECK(terminal_until(master,output,"(est.)"));
+    // Reopening a finished chat shows the saved reply once, not again from
+    // the worker's raw output.
+    output.clear();
+    type_terminal(master,output,"\x04");
+    CHECK(terminal_until(master,output,"Choose a conversation"));
+    output.clear();
+    type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"RECALL_DONE"));
+    {
+        double until=monotime()+0.6;
+        while(monotime()<until){
+            pollfd ready{master,POLLIN,0};
+            if(poll(&ready,1,50)>0){char bytes[4096];ssize_t n=read(master,bytes,sizeof bytes);if(n>0)output.append(bytes,static_cast<size_t>(n));}
+        }
+    }
+    size_t replies=0;
+    for(size_t at_=output.find("RECALL_DONE");at_!=std::string::npos;at_=output.find("RECALL_DONE",at_+1))replies++;
+    CHECK(replies==1);
+    CHECK(output.find("Worked for")==std::string::npos);
+    leave_chat_and_exit(master);
+    int status=0;
+    CHECK(waitpid(child,&status,0)==child);
+    close(master);
+    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    server_done(server);
+    JsonPtr request(capture(&a,0));
+    J *messages=get(get(request.get(),"body"),"messages");
+    CHECK(!strcmp(sget(at(messages,alen(messages)-1),"content"),"BRAVO_TWO_Y"));
+    app_cleanup(&a);
+}
+static void test_stream_usage_and_tail_utf8(){
+    // 1. display_utf8 holds an incomplete multi-byte suffix while streaming,
+    //    then flushes it as U+FFFD once the worker settles (final=true).
+    {
+        size_t used=0;
+        const std::string part1="前缀:\xE4\xB8";
+        CHECK(display_utf8(part1,used,false)=="前缀:");
+        CHECK(used==7);
+        const std::string rest=part1.substr(used)+"\xAD!";
+        size_t used2=0;
+        CHECK(display_utf8(rest,used2,false)=="中!");
+        CHECK(used2==rest.size());
+        size_t used_final=0;
+        CHECK(display_utf8(part1,used_final,true)=="前缀:\xEF\xBF\xBD");
+        CHECK(used_final==part1.size());
+        // Overlong / surrogate prefixes are rejected immediately even before final.
+        size_t used_bad=0;
+        CHECK(display_utf8(std::string_view("\xED\xA0",2),used_bad,false)=="\xEF\xBF\xBD\xEF\xBF\xBD");
+        CHECK(used_bad==2);
+    }
+    // 2. Rejecting stream_options on one provider/model must not disable token
+    //    accounting for other providers or other models in the same process.
+    auto start_usage_server=[](bool reject_usage,int expected_requests,std::string &url){
+        int fd=socket(AF_INET,SOCK_STREAM,0);
+        CHECK(fd>=0);
+        sockaddr_in addr{};
+        addr.sin_family=AF_INET;
+        addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(!bind(fd,reinterpret_cast<sockaddr *>(&addr),sizeof addr));
+        socklen_t len=sizeof addr;
+        CHECK(!getsockname(fd,reinterpret_cast<sockaddr *>(&addr),&len));
+        CHECK(!listen(fd,4));
+        char buf[128];
+        snprintf(buf,sizeof buf,"http://127.0.0.1:%d/v1",ntohs(addr.sin_port));
+        url=buf;
+        pid_t pid=fork();
+        CHECK(pid>=0);
+        if(!pid){
+            alarm(12);
+            for(int i=0;i<expected_requests;i++){
+                int client=accept(fd,nullptr,nullptr);
+                if(client<0)_exit(2);
+                FILE *s=fdopen(client,"r+");
+                if(!s)_exit(2);
+                char *line=nullptr;size_t cap=0;long clen=0;
+                while(getline(&line,&cap,s)>0){
+                    if(!strncasecmp(line,"Content-Length:",15))clen=strtol(line+15,nullptr,10);
+                    if(!strcmp(line,"\r\n")||!strcmp(line,"\n"))break;
+                }
+                free(line);
+                std::string body(static_cast<size_t>(std::max(0L,clen)),'\0');
+                if(clen>0&&fread(body.data(),1,body.size(),s)!=body.size())_exit(2);
+                const bool has_opt=body.find("\"stream_options\"")!=std::string::npos;
+                if(reject_usage&&has_opt){
+                    const char *err_body="{\"error\":{\"message\":\"unknown field stream_options\"}}";
+                    fprintf(s,"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                            strlen(err_body),err_body);
+                }else if(!reject_usage&&!has_opt){
+                    const char *err_body="{\"error\":{\"message\":\"expected stream_options\"}}";
+                    fprintf(s,"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                            strlen(err_body),err_body);
+                }else{
+                    const char *sse=
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK_USAGE\"}}]}\n\n"
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":17,\"total_tokens\":42}}\n\n"
+                        "data: [DONE]\n\n";
+                    fprintf(s,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                            strlen(sse),sse);
+                }
+                fflush(s);
+                fclose(s);
+            }
+            close(fd);
+            _exit(0);
+        }
+        close(fd);
+        return pid;
+    };
+    App a=fresh();
+    J *user=obj();put(user,"role",str("user"));put(user,"content",str("hi"));add(a.messages,user);
+    std::string url_strict,url_full;
+    // Provider A: 1st call sends stream_options (400) + retries without (200);
+    // 2nd call remembers and skips stream_options directly (1 request = 3 total).
+    pid_t srv_strict=start_usage_server(true,3,url_strict);
+    // Provider B (and a second model): must still send stream_options (2 requests).
+    pid_t srv_full=start_usage_server(false,2,url_full);
+
+    JsonPtr prof_a(config("prov-a","openai"));
+    put(prof_a.get(),"base_url",str(url_strict.c_str()));
+    put(prof_a.get(),"model",str("strict-model"));
+    a.task_tokens=0;
+    JsonPtr r1(api_complete(&a,prof_a.get(),a.messages,nullptr));
+    CHECK(r1&&!strcmp(sget(r1.get(),"content"),"OK_USAGE"));
+    JsonPtr r2(api_complete(&a,prof_a.get(),a.messages,nullptr));
+    CHECK(r2&&!strcmp(sget(r2.get(),"content"),"OK_USAGE"));
+
+    JsonPtr prof_b(config("prov-b","openai"));
+    put(prof_b.get(),"base_url",str(url_full.c_str()));
+    put(prof_b.get(),"model",str("strict-model"));
+    a.task_tokens=0;
+    JsonPtr r3(api_complete(&a,prof_b.get(),a.messages,nullptr));
+    CHECK(r3&&!strcmp(sget(r3.get(),"content"),"OK_USAGE"));
+    CHECK(a.task_tokens==42);
+
+    JsonPtr prof_b2(config("prov-a","openai"));
+    put(prof_b2.get(),"base_url",str(url_full.c_str()));
+    put(prof_b2.get(),"model",str("other-model"));
+    a.task_tokens=0;
+    JsonPtr r4(api_complete(&a,prof_b2.get(),a.messages,nullptr));
+    CHECK(r4&&!strcmp(sget(r4.get(),"content"),"OK_USAGE"));
+    CHECK(a.task_tokens==42);
+
+    JsonPtr usage(load_tokens(a));
+    CHECK(model_tokens(usage.get(),prof_b.get())==42);
+    server_done(srv_strict);
+    server_done(srv_full);
     app_cleanup(&a);
 }
 static void test_chat_actions_layout(){
@@ -2445,6 +2649,31 @@ static void test_layout_and_markdown(){
     CHECK(whole.find("│ ")!=std::string::npos&&whole.find("int x=1;")!=std::string::npos);
     CHECK(whole.find("▎")!=std::string::npos);
     CHECK(whole.find("────")!=std::string::npos);
+    // Inside `code` stars are literal; bold must not swallow them.
+    {
+        MarkdownStream md(true,0);
+        std::string out=md.feed("use `**kwargs` and `2**10` here\n");out+=md.finish();
+        CHECK(out.find("**kwargs")!=std::string::npos&&out.find("2**10")!=std::string::npos);
+        CHECK(out.find("\033[1m")==std::string::npos);
+    }
+    // A ```python line inside a ````markdown block is content, not a close.
+    {
+        MarkdownStream md(true,0);
+        std::string raw=md.feed("````markdown\n```python\n# not a heading\n```\n````\nafter\n");raw+=md.finish();
+        std::string out;
+        for(size_t i=0;i<raw.size();i++){
+            if(raw[i]=='\033'){while(i<raw.size()&&raw[i]!='m')i++;continue;}
+            out+=raw[i];
+        }
+        CHECK(out.find("┌─ markdown")!=std::string::npos);
+        CHECK(out.find("│ ```python")!=std::string::npos);
+        CHECK(out.find("│ # not a heading")!=std::string::npos);
+        CHECK(out.find("│ ```\n")!=std::string::npos);
+        CHECK(out.find("└─\nafter")!=std::string::npos);
+    }
+    // Emoji drawn two cells wide count as two; interface glyphs stay one.
+    CHECK(ui_width("✅")==2&&ui_width("❌")==2&&ui_width("🚀")==2&&ui_width("⭐")==2);
+    CHECK(ui_width("⏺")==1&&ui_width("⎿")==1&&ui_width("❯")==1&&ui_width("✓")==1);
     // Plain lines stay byte-identical, so ordinary replies look as before.
     {MarkdownStream md(true,2);std::string out=md.feed("PLAIN_REPLY\nnext");out+=md.finish();CHECK(out=="PLAIN_REPLY\n  next");}
 }
@@ -2679,6 +2908,8 @@ int main(int argc,char **argv){
     test_exit_during_work();
     test_compact_approval();
     test_chat_history_scroll();
+    test_prompt_recall_and_context();
+    test_stream_usage_and_tail_utf8();
     test_chat_actions_layout();
     test_menu_navigation_and_resize();
     test_persistent_conversations();

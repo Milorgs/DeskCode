@@ -19,7 +19,7 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.11.4"
+#define VERSION "1.11.5"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -99,6 +99,7 @@ std::uint64_t model_tokens(J *usage,J *config);
 bool record_tokens(App &app,J *config,std::uint64_t amount);
 int reorder_models(App *app,const std::vector<std::string> &order);
 bool valid_utf8(std::string_view text) noexcept;
+std::string display_utf8(std::string_view text,size_t &used,bool final=false);
 void put(J *j,const char *key,J *value);
 void add(J *j,J *value);
 J *err(const char *message);
@@ -123,10 +124,15 @@ struct ChatDraft {
     int cursor=0;
     bool paused=false;
     std::function<bool()> approval_pending;
+    // Earlier requests of this conversation, oldest first. Ctrl+P/Ctrl+N and
+    // Alt+Up/Alt+Down recall them; Up/Down keep scrolling the transcript.
+    const std::vector<std::string> *history=nullptr;
 };
 char *editable_input(const char *prompt,const char *fallback,bool secret,const std::function<void()> &idle,ChatDraft *draft=nullptr);
 // first_row is where the transcript starts filling; 0 disables the composer.
-void set_composer_layout(int input_row,int transcript_row,int first_row=1);
+// keep_transcript records messages while the composer is off (a window too
+// small for it) so they reappear once the frame returns.
+void set_composer_layout(int input_row,int transcript_row,int first_row=1,bool keep_transcript=false);
 #ifndef _WIN32
 void reset_transcript();
 void scroll_transcript(int rows);

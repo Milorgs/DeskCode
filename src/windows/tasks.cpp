@@ -4,14 +4,14 @@
 #include <cstring>
 namespace {
 struct Job {
-    int id=0;bool active=true,alive=true,cancelled=false,truncated=false;
+    int id=0;bool active=true,alive=true,cancelled=false,truncated=false;std::uint64_t dropped=0;
     bool retired=false;double retired_at=0;
     std::string title,workspace,state="执行中",text;
     WinHandle process,group,feed,approval,logs,events,cancellation;
     std::mutex mutex;std::jthread reader;
 };
 void bounded_output(Job &job,const char *bytes,size_t count){
-    job.text.append(bytes,count);if(job.text.size()>65536){size_t cut=job.text.size()-65536;while(cut<job.text.size()&&(static_cast<unsigned char>(job.text[cut])&0xc0)==0x80)cut++;job.text.erase(0,cut);job.truncated=true;}
+    job.text.append(bytes,count);if(job.text.size()>65536){size_t cut=job.text.size()-65536;while(cut<job.text.size()&&(static_cast<unsigned char>(job.text[cut])&0xc0)==0x80)cut++;job.text.erase(0,cut);job.truncated=true;job.dropped+=cut;}
 }
 void pump(Job &job){
     auto drain=[&](HANDLE handle,bool events){for(int i=0;i<16;i++){
@@ -47,6 +47,7 @@ void task_event(App &app,char event){if(app.task_events>=0){DWORD count=0;WriteF
 // The Windows controller does not show live token counts yet; keep the hook so
 // the shared API code links on both platforms.
 void task_tokens(App &app){(void)app;}
+void task_context(App &app,int percent){(void)app;(void)percent;}
 ResourceLock::ResourceLock(App &app,bool desktop){
     std::string directory=desktop?app.config_dir:std::string(app.root)+"/.desk-agent";
     if(mkdirs(directory.c_str(),0700))return;
@@ -138,7 +139,7 @@ bool Tasks::resume(int id,const std::string &task,J *settings){
     if(bytes.size()>250000)return false;ResetEvent(job->cancellation.get());
     if(!win_write(job->feed.get(),bytes))return false;job->active=true;job->cancelled=false;job->state="执行中";job->title=task;return true;
 }
-std::string Tasks::output(int id,bool *truncated){Job *job=impl->find(id);if(!job)return {};std::lock_guard lock(job->mutex);if(truncated)*truncated=job->truncated;return job->text;}
+std::string Tasks::output(int id,bool *truncated,std::uint64_t *dropped){if(dropped)*dropped=0;Job *job=impl->find(id);if(!job)return {};std::lock_guard lock(job->mutex);if(truncated)*truncated=job->truncated;if(dropped)*dropped=job->dropped;return job->text;}
 bool Tasks::decide(int id,bool allow){Job *job=impl->find(id);if(!job)return false;std::lock_guard lock(job->mutex);return job->active&&job->state=="等待确认"&&win_write(job->approval.get(),allow?"1\n":"2\n");}
 char *Tasks::readline(const char *prompt){refresh();if(on_idle)on_idle();return input(prompt,nullptr,false);}
 bool Tasks::respond(int id,int answer){

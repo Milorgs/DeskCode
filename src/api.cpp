@@ -1,4 +1,5 @@
 #include "desk.hpp"
+#include <set>
 #include "tasks.hpp"
 #include <curl/curl.h>
 #include <stdlib.h>
@@ -26,6 +27,15 @@ struct StreamState {
     bool native=false, events=false, complete=false, invalid=false, oversized=false;
     std::function<void(const std::string &)> delta;
 };
+// Anthropic sends input tokens in message_start and output tokens in
+// message_delta; keep both instead of letting the later event replace the first.
+static void merge_usage(StreamState *st,J *usage){
+    if(!json_object_is_type(usage,json_type_object))return;
+    JsonPtr merged(st->usage.empty()?nullptr:json_tokener_parse(st->usage.c_str()));
+    if(!json_object_is_type(merged.get(),json_type_object))merged.reset(obj());
+    json_object_object_foreach(usage,key,value)put(merged.get(),key,copy(value));
+    st->usage=json_object_to_json_string_ext(merged.get(),JSON_C_TO_STRING_PLAIN);
+}
 static void stream_event(StreamState *st,const char *json){
     st->events=true;
     if(st->complete){st->invalid=true;return;}
@@ -54,11 +64,9 @@ static void stream_event(StreamState *st,const char *json){
     }else if(!strcmp(type,"message_delta")){
         const char *stop=sget(get(o,"delta"),"stop_reason");
         if(*stop)st->stop_reason=stop;
-        J *usage=get(o,"usage");
-        if(json_object_is_type(usage,json_type_object))st->usage=json_object_to_json_string_ext(usage,JSON_C_TO_STRING_PLAIN);
+        merge_usage(st,get(o,"usage"));
     }else if(!strcmp(type,"message_start")){
-        J *usage=get(get(o,"message"),"usage");
-        if(json_object_is_type(usage,json_type_object))st->usage=json_object_to_json_string_ext(usage,JSON_C_TO_STRING_PLAIN);
+        merge_usage(st,get(get(o,"message"),"usage"));
     }else{
         J *choice=at(get(o,"choices"),0);
         J *d=get(choice,"delta");
@@ -422,7 +430,33 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
         if(a->stream_text)a->stream_text(part);
     };
     put(body,"stream",json_object_new_boolean(1));
+    // OpenAI only reports usage on a stream when asked. An endpoint and model
+    // that reject the option get one plain retry and are not asked again in
+    // this process; other providers and models keep requesting usage.
+    static std::set<std::string> usage_option_rejected;
+    const std::string usage_key=std::string(sget(c,"profile"))+'\n'+sget(c,"base_url")+'\n'+sget(c,"model");
+    const bool ask_usage=!native&&!usage_option_rejected.contains(usage_key);
+    if(ask_usage){
+        J *options=obj();
+        put(options,"include_usage",json_object_new_boolean(1));
+        put(body,"stream_options",options);
+    }
     J *data=api_request(a,c,native?"/messages":"/chat/completions",body,&stream);
+    if(!data&&ask_usage&&!interrupted&&!strncmp(a->error,"API HTTP 400",12)&&!stream.events){
+        // Retry once without the option; only a success proves the option was
+        // the problem. Otherwise the first, more specific error stands.
+        const std::string first_error=a->error;
+        json_object_object_del(body,"stream_options");
+        stream=StreamState{};
+        stream.native=native;
+        stream.delta=[a](const std::string &part){
+            if(a->stream_text)a->stream_text(part);
+        };
+        a->error[0]=0;
+        data=api_request(a,c,"/chat/completions",body,&stream);
+        if(data)usage_option_rejected.insert(usage_key);
+        else if(!interrupted)snprintf(a->error,sizeof a->error,"%s",first_error.c_str());
+    }
     json_object_put(body);
     if(!data)return NULL;
     if(stream.events){

@@ -15,7 +15,9 @@ public:
     bool remove(int id);
     bool resume(int id,const std::string &task,J *settings=nullptr);
     bool respond(int id,int answer);
-    std::string output(int id,bool *truncated=nullptr);
+    // dropped receives how many bytes were cut from the front, so callers
+    // can keep an absolute position across truncation.
+    std::string output(int id,bool *truncated=nullptr,std::uint64_t *dropped=nullptr);
     bool decide(int id,bool allow);
     char *readline(const char *prompt="\n› ");
 };
@@ -32,6 +34,8 @@ public:
 void task_event(App &app,char state);
 // Report the running task's token count to the controller.
 void task_tokens(App &app);
+// Report how much of the context budget the latest request used (0..100).
+void task_context(App &app,int percent);
 int task_worker(std::intptr_t fd);
 J *conversation_settings(const App &app,bool reset);
 void apply_conversation_settings(App &app,J *settings);

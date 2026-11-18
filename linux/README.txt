@@ -6,7 +6,7 @@ See DEPENDENCIES.txt for the build machine's library list. Other distributions
 can use the source-build instructions in the repository README.
 
 One-line installation for the latest release:
-  curl -fsSL https://raw.githubusercontent.com/Milorgs/desk-agent/main/install-linux.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-linux.sh | sh
 
 Manual package use:
   ./desk

@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$repo = 'Milorgs/desk-agent'
+$repo = 'Milorgs/DeskCode'
 $asset = "https://github.com/$repo/releases/latest/download/desk-agent-windows-x64.zip"
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('desk-agent-install-' + [Guid]::NewGuid().ToString('N'))
 $zip = Join-Path $temp 'desk-agent.zip'

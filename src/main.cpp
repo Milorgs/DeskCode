@@ -92,11 +92,23 @@ public:
     InterfaceScreen(){
         interface_active=terminal_supports_ansi();
         if(interface_active){fputs("\033[?1049h\033[r\033[2J\033[H",stdout);fflush(stdout);}
+#ifndef _WIN32
+        // Ctrl+Z would stop the process with the alternate screen, scroll
+        // region and mouse reporting still active in the parent shell.
+        previous_stop=signal(SIGTSTP,SIG_IGN);
+#endif
     }
     ~InterfaceScreen(){
+#ifndef _WIN32
+        signal(SIGTSTP,previous_stop==SIG_ERR?SIG_DFL:previous_stop);
+#endif
         if(interface_active){fputs("\033[r\033[0m\033[?1049l",stdout);fflush(stdout);}
         interface_active=false;content_top=1;
     }
+private:
+#ifndef _WIN32
+    void (*previous_stop)(int)=SIG_DFL;
+#endif
 };
 static void status(App *a){
     const int width=terminal_columns()>0?std::max(24,std::min(terminal_columns()-4,88)):0;
@@ -504,11 +516,17 @@ struct Conversation {
     std::string draft{};
     int draft_cursor=0;
 #endif
-    std::string displayed{};
+    // Absolute byte position in the worker output already shown, and where
+    // the latest turn began; both survive truncation of the output buffer.
+    std::uint64_t displayed=0,turn_offset=0;
     struct Request {std::string text;JsonPtr settings;};
     std::vector<Request> queue{};
     std::string id{};
     bool yes=false,auto_edit=false;
+    // Requests sent in this conversation, oldest first, for recall in the
+    // composer. Loaded from the saved transcript the first time it opens.
+    std::vector<std::string> prompts{};
+    bool prompts_loaded=false;
 };
 static bool persist_conversation(App &app,Conversation &item){
     if(item.id.empty()){char id[33];id_string(id);item.id=id;}
@@ -608,6 +626,12 @@ static void sync_conversation_models(App &app,std::vector<Conversation> &items){
 }
 
 #ifndef _WIN32
+// Absolute end of a worker's output so far; a turn starting now begins here.
+static std::uint64_t output_end(Tasks &jobs,int job){
+    std::uint64_t dropped=0;
+    const auto text=jobs.output(job,nullptr,&dropped);
+    return dropped+text.size();
+}
 static void advance_conversations(Tasks &jobs,std::vector<Conversation> &items){
     if(std::none_of(items.begin(),items.end(),[](const auto &item){return !item.queue.empty();}))return;
     JsonPtr states(jobs.snapshot());
@@ -622,7 +646,9 @@ static void advance_conversations(Tasks &jobs,std::vector<Conversation> &items){
         }
         if(!state||bget(state,"active")||active>=4)continue;
         auto &next=item.queue.front();
+        const auto offset=output_end(jobs,item.job);
         if(jobs.resume(item.job,next.text,next.settings.get())){
+            item.turn_offset=offset;
             item.queue.erase(item.queue.begin());active++;
         }else{
             item.queue.clear();
@@ -639,6 +665,7 @@ class ConversationScreen {
     int rows=0,columns=0;
     std::string last_header,last_composer,top_frame,frame;
     bool composer=false,overlay=false;
+    int context_percent=-1;
     double checked=0;
     static std::string clipped(std::string_view text,int width){
         return ui_clip(text,width);
@@ -657,7 +684,7 @@ public:
         // bottom rule, then the status. The transcript scrolls above them.
         const int bottom=composer?rows-4:rows;
         printf("\033[r\033[2J\033[%d;%dr\033[%d;1H",content_top,bottom,content_top);
-        set_composer_layout(composer?rows-2:0,composer?rows-4:0,content_top);
+        set_composer_layout(composer?rows-2:0,composer?rows-4:0,content_top,current!=nullptr);
         top_frame.clear();
         frame.clear();
         last_composer.clear();
@@ -719,14 +746,24 @@ public:
             }
             if(&item==current)current_state=state;
             if(&item==current&&item.job&&!controls_open){
-                auto output=jobs.output(item.job);
-                if(!output.starts_with(item.displayed))item.displayed.clear();
+                std::uint64_t dropped=0;
+                auto output=jobs.output(item.job,nullptr,&dropped);
+                const std::uint64_t produced=dropped+output.size();
+                if(item.displayed>produced)item.displayed=produced;
+                if(item.displayed<dropped){
+                    terminal_message(ui_paint(Tone::Dim,std::string("  ")+tr("…较早的输出已省略"))+"\n");
+                    item.displayed=dropped;
+                }
+                const size_t start=static_cast<size_t>(item.displayed-dropped);
                 auto end=output.rfind('\n');
                 size_t length=end==std::string::npos?0:end+1;
-                if(state&&(!bget(state,"active")||!strcmp(sget(state,"state"),tr("等待确认"))))length=output.size();
-                if(length>item.displayed.size()&&valid_utf8(std::string_view(output).substr(item.displayed.size(),length-item.displayed.size()))){
-                    terminal_message(output.substr(item.displayed.size(),length-item.displayed.size()));
-                    item.displayed=output.substr(0,length);
+                const bool settled=!state||!bget(state,"active")||bget(state,"awaiting_approval");
+                if(settled||!strcmp(sget(state,"state"),tr("等待确认")))length=output.size();
+                if(length>start){
+                    size_t used=0;
+                    auto text=display_utf8(std::string_view(output).substr(start,length-start),used,settled);
+                    if(!text.empty())terminal_message(text);
+                    item.displayed+=used;
                 }
                 if(!has_composer()&&state&&bget(state,"thinking")){
                     terminal_activity(std::string(tr("正在思考…"))+" "+elapsed_label(json_object_get_double(get(state,"thinking_seconds"))));
@@ -736,6 +773,7 @@ public:
             }
         }
         if(has_composer()&&!controls_open)draw_chat_activity(current_state);
+        context_percent=current_state?iget(current_state,"context_percent",-1):-1;
         draw_composer();
         if(current)return;
         // Approval requests remain visible even when several other chats run.
@@ -807,7 +845,18 @@ public:
         std::string_view permission=permission_name(app);
         snprintf(status,sizeof status,tr("思考强度：%s · 批准：%s · %s"),
                  *effort?reasoning_name(effort):tr("默认"),permission.data(),sget(app.config,"model"));
-        auto text=ui_clip(status,columns-4);
+        // Context fill sits at the end, kept whole: a long model name is
+        // clipped first so the number never disappears.
+        std::string context;
+        if(context_percent>=0&&current&&!current->reset_context){
+            char label[64];
+            snprintf(label,sizeof label,tr(" · 上下文约 %d%%（估算）"),context_percent);
+            context=label;
+        }
+        const int context_cells=ui_width(context);
+        if(context_cells>columns-28)context.clear();
+        auto text=ui_clip(status,columns-4-(context.empty()?0:context_cells));
+        const std::string composer_key=text+context;
         const int rule_width=std::min(columns-4,100);
         std::string rule="  ";
         for(int i=0;i<rule_width;i++)rule+="─";
@@ -827,8 +876,8 @@ public:
         }else{
             top_rule=ui_paint(Tone::Rule,rule);
         }
-        if(text==last_composer&&top_rule==top_frame&&rule==frame)return;
-        last_composer=text;top_frame=top_rule;frame=rule;
+        if(composer_key==last_composer&&top_rule==top_frame&&rule==frame)return;
+        last_composer=composer_key;top_frame=top_rule;frame=rule;
         fputs("\0337",stdout);
         printf("\033[%d;1H\033[2K",rows-3);
         fputs(top_rule.c_str(),stdout);
@@ -846,6 +895,8 @@ public:
             footer.remove_prefix(highlight+permission.size());
         }
         fputs(ui_paint(footer_tone,footer,contrast).c_str(),stdout);
+        if(!context.empty())
+            fputs(ui_paint(context_percent>=80?Tone::Warning:footer_tone,context,contrast).c_str(),stdout);
         fputs("\0338",stdout);
         fflush(stdout);
     }
@@ -886,6 +937,28 @@ public:
         for(size_t i=0;i<alen(states.get());i++)if(iget(at(states.get(),i),"id",0)==item.job)return bget(at(states.get(),i),"active");
         return false;
     }
+    // With the pinned composer a plain print would land on the frame; route
+    // short notices into the transcript instead.
+    void note(const char *text){
+        if(has_composer())terminal_message(ui_paint(Tone::Dim,std::string("  ")+text)+"\n");
+        else menu_text(text);
+    }
+    void report_error(){
+        if(!app.error[0])return;
+        if(has_composer())terminal_message(ui_paint(Tone::Error,std::string("  ")+app.error)+"\n");
+        else fprintf(stderr,"%s\n",app.error);
+    }
+    // Where to resume showing worker output when a chat is reopened: history
+    // already holds finished turns; a running or failed turn replays its own
+    // output so progress, approvals and errors stay visible.
+    void reopen(Conversation &item){
+        if(!item.job){item.displayed=0;return;}
+        JsonPtr states(jobs.snapshot());
+        J *state=nullptr;
+        for(size_t i=0;i<alen(states.get());i++)if(iget(at(states.get(),i),"id",0)==item.job)state=at(states.get(),i);
+        const bool finished=state&&!bget(state,"active")&&!strcmp(sget(state,"state"),tr("已完成"));
+        item.displayed=finished||!state?output_end(jobs,item.job):item.turn_offset;
+    }
     bool submit(Conversation &item,const std::string &task){
         app.error[0]=0;
         scroll_transcript_bottom();
@@ -901,11 +974,16 @@ public:
             app.guided_approval=false;
             app.conversation_worker=false;
             if(item.job<0){item.job=0;return false;}
+            item.displayed=item.turn_offset=0;
         }else if(active(item)||!item.queue.empty()){
-            if(item.queue.size()>=4){menu_text(tr("当前对话的待执行需求已满。"));return false;}
+            if(item.queue.size()>=4){note(tr("当前对话的待执行需求已满。"));return false;}
             item.queue.push_back({task,std::move(settings)});
-            menu_text(tr("已排队，当前操作结束后继续。"));
-        }else if(!jobs.resume(item.job,task,settings.get())){menu_text(tr("无法继续此对话，请新建对话。"));return false;}
+            note(tr("已排队，当前操作结束后继续。"));
+        }else{
+            const auto offset=output_end(jobs,item.job);
+            if(!jobs.resume(item.job,task,settings.get())){note(tr("无法继续此对话，请新建对话。"));return false;}
+            item.turn_offset=offset;
+        }
         item.reset_context=false;
         checked=0;tick();return true;
     }
@@ -1081,7 +1159,7 @@ static void show_inline_status(const App &app){
 }
 static void show_inline_help(){
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-4,36),92):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 选择模型 · F3 思考强度\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 选择模型 · F3 思考强度\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1127,6 +1205,30 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
     if(conversation&&!show_conversation_history(*a,*conversation))show_welcome();
     const bool guided=terminal_supports_ansi()&&!env_value("DESK_NO_ARROW");
     ChatDraft draft;
+    std::vector<std::string> session_prompts;
+    std::vector<std::string> *prompts=&session_prompts;
+    if(conversation){
+        if(!conversation->prompts_loaded){
+            conversation->prompts_loaded=true;
+            JsonPtr record(history_read(*a,conversation->id));
+            J *messages=get(record.get(),"transcript");
+            for(size_t i=0;i<alen(messages);i++){
+                J *message=at(messages,i);
+                J *content=get(message,"content");
+                if(strcmp(sget(message,"role"),"user")||!json_object_is_type(content,json_type_string))continue;
+                std::string text=json_object_get_string(content);
+                if(!text.empty()&&(conversation->prompts.empty()||conversation->prompts.back()!=text))
+                    conversation->prompts.push_back(std::move(text));
+            }
+        }
+        prompts=&conversation->prompts;
+    }
+    draft.history=prompts;
+    auto remember=[&](const std::string &text){
+        if(!prompts->empty()&&prompts->back()==text)return;
+        prompts->push_back(text);
+        if(prompts->size()>200)prompts->erase(prompts->begin());
+    };
 #ifndef _WIN32
     if(conversation){
         draft.text=std::move(conversation->draft);
@@ -1298,11 +1400,15 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
         }
 #ifndef _WIN32
         if(screen&&conversation){
-            if(task.size()==1&&task[0]>='0'&&task[0]<='3'&&jobs.respond(conversation->job,task[0]-'0'))continue;
-            if(!screen->submit(*conversation,task)&&a->error[0])fprintf(stderr,"%s\n",a->error);
+            // Guided approvals have their own choice row; there a lone digit
+            // is an ordinary request and never answers a pending approval.
+            if(!guided&&task.size()==1&&task[0]>='0'&&task[0]<='3'&&jobs.respond(conversation->job,task[0]-'0'))continue;
+            remember(task);
+            if(!screen->submit(*conversation,task))screen->report_error();
             continue;
         }
 #endif
+        remember(task);
         if(run_task(a,task.c_str())&&!input_closed)fprintf(stderr,"%s\n",a->error);
     }
 }
@@ -1418,7 +1524,7 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         json_object_put(a->config);a->config=copy(item.config.get());
         a->state="等待任务";
         #ifndef _WIN32
-        item.displayed.clear();
+        screen.reopen(item);
         new_chat=chat(a,jobs,&item,&screen);
         screen.select(nullptr);
 #else
