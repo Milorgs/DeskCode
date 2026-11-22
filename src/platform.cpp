@@ -16,6 +16,16 @@
 #include <termios.h>
 #include <unistd.h>
 #endif
+#ifdef _WIN32
+namespace {
+int fallback_terminal_columns=0;
+bool fallback_terminal_ansi=false;
+}
+void set_worker_terminal(int columns,bool ansi){
+    fallback_terminal_columns=columns;
+    fallback_terminal_ansi=ansi;
+}
+#endif
 int terminal_rows(){
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO info{};
@@ -29,8 +39,8 @@ int terminal_rows(){
 int terminal_columns(){
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO info{};
-    if(!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE),&info))return 0;
-    return info.srWindow.Right-info.srWindow.Left+1;
+    if(!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE),&info))return fallback_terminal_columns;
+    return info.srWindow.Bottom>=info.srWindow.Top?info.srWindow.Right-info.srWindow.Left+1:fallback_terminal_columns;
 #else
     struct winsize size{};
     return ioctl(STDOUT_FILENO,TIOCGWINSZ,&size)==0?size.ws_col:0;
@@ -40,7 +50,7 @@ bool terminal_supports_ansi(){
 #ifdef _WIN32
     HANDLE output=GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode=0;
-    if(!GetConsoleMode(output,&mode))return false;
+    if(!GetConsoleMode(output,&mode))return fallback_terminal_ansi;
     constexpr DWORD vt=ENABLE_PROCESSED_OUTPUT|ENABLE_VIRTUAL_TERMINAL_PROCESSING;
     return (mode&vt)==vt||SetConsoleMode(output,mode|vt);
 #else
@@ -135,16 +145,263 @@ void platform_initialize(){}
 const char *env_value(const char *name){return std::getenv(name);}
 #endif
 
-std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,const std::function<void()> &on_idle,bool transient,bool inline_row,bool allow_escape){
+namespace {
+struct TranscriptViewport {
+    int first=1,last=0,columns=0;
+    std::string transcript,activity;
+    std::vector<std::string> lines;
+    size_t top=0;
+    bool following=true;
+    bool recording=false;
+    bool dragging=false;
+    int drag_offset=0;
+    size_t drag_start_top=0;
+    int drag_start_row=0;
+
+    int text_columns() const {
+        return columns>=24?columns-3:std::max(1,columns);
+    }
+    size_t height() const {
+        return last>=first?static_cast<size_t>(last-first+1):0;
+    }
+    size_t total() const {
+        return lines.size()+!activity.empty();
+    }
+    size_t tail() const {
+        const size_t h=height(),count=total();
+        return count>h?count-h:0;
+    }
+    bool has_scrollbar() const {
+        return last>=first&&columns>=24&&tail()>0;
+    }
+    std::pair<size_t,size_t> scrollbar_thumb() const {
+        const size_t h=height(),count=total(),max_top=tail();
+        if(!h||!max_top)return {0,h};
+        const size_t len=std::clamp((h*h+count/2)/count,size_t{1},h>1?h-1:size_t{1});
+        const size_t travel=h-len;
+        if(!travel||!top)return {0,len};
+        if(top>=max_top)return {travel,len};
+        size_t pos=(top*travel+max_top/2)/max_top;
+        if(travel>=3)pos=std::clamp(pos,size_t{1},travel-1);
+        return {pos,len};
+    }
+    void append_rows(std::string_view text){
+        const int limit=text_columns();
+        std::string row,style;
+        int cells=0,indent=0;
+        bool leading=true;
+        for(size_t i=0;i<text.size();){
+            auto c=static_cast<unsigned char>(text[i]);
+            if(c==0x1b&&i+1<text.size()&&text[i+1]=='['){
+                const size_t start=i;
+                i+=2;
+                while(i<text.size()&&!(text[i]>='@'&&text[i]<='~'))i++;
+                if(i<text.size()&&text[i++]=='m'){
+                    auto sgr=text.substr(start,i-start);
+                    row+=sgr;
+                    if(sgr=="\033[0m"||sgr=="\033[m")style.clear();
+                    else style+=sgr;
+                }
+                continue;
+            }
+            if(c=='\n'){
+                lines.push_back(std::move(row));
+                row=style;
+                cells=0;
+                indent=0;
+                leading=true;
+                i++;
+                continue;
+            }
+            if(c=='\t'){
+                leading=false;
+                int count=std::min(8-cells%8,limit-cells);
+                row.append(static_cast<size_t>(count),' ');
+                cells+=count;
+                i++;
+                continue;
+            }
+            if(c<32||c==127){i++;continue;}
+            if(leading&&c==' '&&indent<4&&indent+8<limit)indent++;
+            else leading=false;
+            size_t size=c<0x80?1:c<0xe0?2:c<0xf0?3:c<0xf8?4:1;
+            size=std::min(size,text.size()-i);
+            auto glyph=text.substr(i,size);
+            int width=ui_width(glyph);
+            if(cells+width>limit){
+                lines.push_back(std::move(row));
+                row=style;
+                cells=0;
+                if(indent>0&&indent+width<limit){
+                    row.append(static_cast<size_t>(indent),' ');
+                    cells=indent;
+                }
+            }
+            row+=glyph;
+            cells+=width;
+            i+=glyph.size();
+        }
+    }
+    void draw_scrollbar_cell(int row,std::pair<size_t,size_t> thumb) const {
+        const size_t slot=static_cast<size_t>(row-first);
+        const bool in_thumb=slot>=thumb.first&&slot<thumb.first+thumb.second;
+        printf("\033[%d;%dH",row,columns-1);
+        if(in_thumb)fputs(ui_paint(following?Tone::Dim:Tone::Accent,"┃").c_str(),stdout);
+        else fputs(ui_paint(Tone::Rule,"│").c_str(),stdout);
+    }
+    void draw_scrollbar() const {
+        if(!has_scrollbar())return;
+        const auto thumb=scrollbar_thumb();
+        fputs("\0337",stdout);
+        for(int row=first;row<=last;row++)draw_scrollbar_cell(row,thumb);
+        fputs("\0338",stdout);
+        fflush(stdout);
+    }
+    void draw_row(int row,bool bar,std::pair<size_t,size_t> thumb) const {
+        printf("\033[%d;1H\033[2K",row);
+        size_t i=top+static_cast<size_t>(row-first);
+        if(i<lines.size())fputs(lines[i].c_str(),stdout);
+        else if(i==lines.size()&&!activity.empty())
+            fputs(ui_paint(Tone::Accent,ui_clip("  "+activity,text_columns())).c_str(),stdout);
+        fputs("\033[0m",stdout);
+        if(bar)draw_scrollbar_cell(row,thumb);
+    }
+    void draw() const {
+        if(last==0)return;
+        const bool bar=has_scrollbar();
+        const auto thumb=bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0};
+        fputs("\0337\033[?7l",stdout);
+        for(int row=first;row<=last;row++)draw_row(row,bar,thumb);
+        fputs("\033[?7h\0338",stdout);
+        fflush(stdout);
+    }
+    void set_activity(const std::string &text){
+        if(activity==text)return;
+        const bool height_changed=activity.empty()!=text.empty();
+        activity=text;
+        if(height_changed){
+            top=following?tail():std::min(top,tail());
+            draw();
+            return;
+        }
+        const size_t offset=lines.size()-top;
+        if(offset>static_cast<size_t>(last-first))return;
+        const bool bar=has_scrollbar();
+        fputs("\0337\033[?7l",stdout);
+        draw_row(first+static_cast<int>(offset),bar,bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0});
+        fputs("\033[?7h\0338",stdout);
+        fflush(stdout);
+    }
+    void scroll(int rows){
+        if(!last)return;
+        size_t next=rows<0?top-std::min(top,static_cast<size_t>(-rows))
+                          :std::min(tail(),top+static_cast<size_t>(rows));
+        following=next==tail();
+        if(next!=top){top=next;draw();}
+    }
+    bool scroll_mouse_at(int row,int col,int button,bool release){
+        if(release){bool handled=dragging;dragging=false;return handled;}
+        if(!has_scrollbar()){dragging=false;return false;}
+        const auto [position,length]=scrollbar_thumb();
+        if(button==0){
+            if(col<columns-2||col>columns||row<first||row>last)return false;
+            dragging=true;
+            const int slot=row-first;
+            if(slot>=static_cast<int>(position)&&slot<static_cast<int>(position+length)){
+                drag_offset=slot-static_cast<int>(position);
+                drag_start_top=top;
+                drag_start_row=row;
+                return true;
+            }
+            drag_offset=static_cast<int>(length/2);
+        }else if(button!=32||!dragging)return false;
+        const size_t travel=height()-length;
+        if(!travel)return true;
+        const int slot=std::clamp(row-first-drag_offset,0,static_cast<int>(travel));
+        size_t next=static_cast<size_t>(slot)*tail()/travel;
+        if(button==32&&row==drag_start_row)next=std::min(drag_start_top,tail());
+        following=next==tail();
+        if(next!=top){top=next;draw();}
+        if(button==0){drag_start_top=top;drag_start_row=row;}
+        return true;
+    }
+};
+TranscriptViewport transcript_view;
+}
+void reset_transcript(){transcript_view={};}
+void scroll_transcript(int rows){transcript_view.scroll(rows);}
+void scroll_transcript_page(int direction){
+    transcript_view.scroll(direction*std::max(1,transcript_view.last-transcript_view.first));
+}
+bool scroll_transcript_mouse(int row,int col,int button,bool release){
+    return transcript_view.scroll_mouse_at(row,col,button,release);
+}
+void scroll_transcript_bottom(){transcript_view.scroll(1000000);}
+bool transcript_scrollable(){return transcript_view.last!=0;}
+size_t transcript_hidden_lines(){
+    if(!transcript_view.last||transcript_view.following)return 0;
+    const size_t bottom=transcript_view.tail();
+    return bottom>transcript_view.top?bottom-transcript_view.top:0;
+}
+void set_composer_layout(int input_row,int transcript_row,int first_row,bool keep_transcript){
+    auto &view=transcript_view;
+    view.dragging=false;
+    view.first=first_row;
+    view.last=input_row?transcript_row:0;
+    view.recording=!view.last&&keep_transcript;
+    if(!view.last)return;
+    int columns=std::max(1,terminal_columns());
+    if(columns!=view.columns){
+        view.columns=columns;
+        view.lines.clear();
+        view.append_rows(view.transcript);
+    }
+    view.top=view.following?view.tail():std::min(view.top,view.tail());
+    view.draw();
+    printf("\033[%d;1H",input_row);
+}
+bool transcript_append(const std::string &text){
+    auto &view=transcript_view;
+    if(view.last){
+        std::string body=text;
+        if(body.back()!='\n')body+='\n';
+        view.transcript+=body;
+        view.append_rows(body);
+        if(view.following){view.top=view.tail();view.draw();}
+        else view.draw_scrollbar();
+        return true;
+    }
+    if(view.recording){
+        view.transcript+=text;
+        if(text.back()!='\n')view.transcript+='\n';
+        view.columns=0;
+    }
+    return false;
+}
+bool transcript_set_activity(const std::string &text){
+    if(!transcript_view.last)return false;
+    transcript_view.set_activity(text);
+    return true;
+}
+
+std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,const std::function<void()> &on_idle,bool transient,bool inline_row,bool allow_escape,const std::function<void()> &on_resize){
     if(items.empty())return 0;
     if(input_closed||interrupted==SIGTERM)return -1;
     if(!isatty(STDIN_FILENO)||!terminal_supports_ansi()||env_value("DESK_NO_ARROW"))return std::nullopt;
     interrupted=0;
     enum {idle=-1,end_input=-2,ignored=-3,up=256,down=257,home=258,end=259,page_up=260,page_down=261};
+    const bool inline_scroll=inline_row&&transcript_scrollable();
 #ifdef _WIN32
     HANDLE console=GetStdHandle(STD_INPUT_HANDLE);
     DWORD original=0;
     if(!GetConsoleMode(console,&original))return std::nullopt;
+    struct RestoreConsoleMode {
+        HANDLE handle;DWORD mode;bool changed=false;
+        RestoreConsoleMode(HANDLE h,DWORD m,bool mouse):handle(h),mode(m){
+            if(mouse)changed=SetConsoleMode(handle,(mode|ENABLE_MOUSE_INPUT|ENABLE_EXTENDED_FLAGS)&~static_cast<DWORD>(ENABLE_QUICK_EDIT_MODE))!=FALSE;
+        }
+        ~RestoreConsoleMode(){if(changed)SetConsoleMode(handle,mode);}
+    } restore_console(console,original,inline_scroll);
     auto read_key=[&]() -> int {
         auto ready=WaitForSingleObject(console,50);
         if(ready==WAIT_TIMEOUT)return idle;
@@ -152,8 +409,26 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
         INPUT_RECORD event{};
         DWORD count=0;
         if(!ReadConsoleInputW(console,&event,1,&count)||!count)return end_input;
+        if(inline_scroll&&event.EventType==MOUSE_EVENT){
+            const auto &mouse=event.Event.MouseEvent;
+            if(mouse.dwEventFlags==MOUSE_WHEELED){
+                short delta=static_cast<short>(HIWORD(mouse.dwButtonState));
+                scroll_transcript(delta>0?-1:1);
+            }else{
+                bool pressed=(mouse.dwButtonState&FROM_LEFT_1ST_BUTTON_PRESSED)!=0;
+                bool moved=(mouse.dwEventFlags&MOUSE_MOVED)!=0;
+                scroll_transcript_mouse(mouse.dwMousePosition.Y+1,mouse.dwMousePosition.X+1,moved?32:0,!pressed);
+            }
+            return ignored;
+        }
         if(event.EventType!=KEY_EVENT||!event.Event.KeyEvent.bKeyDown)return ignored;
         const auto &key=event.Event.KeyEvent;
+        if(inline_scroll){
+            if(key.wVirtualKeyCode==VK_UP){scroll_transcript(-1);return ignored;}
+            if(key.wVirtualKeyCode==VK_DOWN){scroll_transcript(1);return ignored;}
+            if(key.wVirtualKeyCode==VK_PRIOR){scroll_transcript_page(-1);return ignored;}
+            if(key.wVirtualKeyCode==VK_NEXT){scroll_transcript_page(1);return ignored;}
+        }
         if(key.wVirtualKeyCode==VK_UP||(inline_row&&key.wVirtualKeyCode==VK_LEFT))return up;
         if(key.wVirtualKeyCode==VK_DOWN||(inline_row&&key.wVirtualKeyCode==VK_RIGHT))return down;
         if(key.wVirtualKeyCode==VK_HOME)return home;
@@ -190,7 +465,6 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
         ~MenuCursor(){if(hidden){fputs("\033[?25h",stdout);fflush(stdout);}}
     } menu_cursor;
 #ifndef _WIN32
-    const bool inline_scroll=inline_row&&transcript_scrollable();
     const bool native_selection=env_value("DESK_NATIVE_MOUSE_SELECTION")!=nullptr;
     struct InlineScrollModes {
         bool mouse=false;
@@ -275,11 +549,18 @@ std::optional<int> terminal_choice(const std::vector<std::string> &items,int ini
         int height=terminal_rows(),width=terminal_columns();
         if(inline_row&&(height!=rows||width!=columns)){rows=height;columns=width;draw();}
         else if(height!=rows||width!=columns){
-            size_t rewind=std::min(visible,capacity(height));
-            printf("\033[%zuA\r\033[J",rewind);
-            rows=height;columns=width;visible=capacity(rows);
-            first=std::min(first,items.size()-visible);
-            draw();
+            if(on_resize){
+                rows=height;columns=width;visible=capacity(rows);
+                first=std::min(first,items.size()-visible);
+                on_resize();
+                draw();
+            }else{
+                size_t rewind=std::min(visible,capacity(height));
+                printf("\033[%zuA\r\033[J",rewind);
+                rows=height;columns=width;visible=capacity(rows);
+                first=std::min(first,items.size()-visible);
+                draw();
+            }
         }
         int key=read_key();
         if(key==end_input){input_closed=true;break;}

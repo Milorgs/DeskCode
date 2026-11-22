@@ -218,7 +218,7 @@ int approve(App *a,const char *description,Operation operation,const char *title
             if(cut<body.size()){body.resize(cut);body+="…";}
         }
         const int columns=terminal_columns();
-        const int width=columns>0?std::min(std::max(columns-4,36),100):0;
+        const int width=columns>0?std::min(std::max(columns-6,36),94):0;
         std::string heading=title&&*title?title:tr("需要批准");
         putchar('\n');
         if(width>=36){

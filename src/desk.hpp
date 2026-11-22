@@ -19,7 +19,7 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.11.5"
+#define VERSION "1.12.0"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -66,6 +66,8 @@ struct App {
     J *trace=nullptr;
     // Set when an approval was needed but no interactive terminal could answer.
     bool approval_unavailable=false;
+    // True inside delegate_research so only read-only tools are exposed.
+    bool subagent=false;
 };
 extern std::atomic<int> interrupted;
 extern std::atomic<bool> input_closed;
@@ -112,17 +114,24 @@ int atomic_file(const char *path,const void *data,size_t len,unsigned int mode);
 // can sit in a single input row, such as the approval answer under its panel.
 std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,
                                    const std::function<void()> &idle={},bool transient=false,bool inline_row=false,
-                                   bool allow_escape=false);
+                                   bool allow_escape=false,const std::function<void()> &on_resize={});
 std::vector<std::string> approval_choices(bool preview);
 char *input(const char *prompt,const char *fallback,bool secret);
 void terminal_message(const std::string &text);
-#ifndef _WIN32
 void terminal_activity(const std::string &text);
-#endif
+struct PastedChunk {
+    std::string marker;
+    std::string content;
+};
 struct ChatDraft {
     std::string text;
     int cursor=0;
     bool paused=false;
+    bool complete_file=false;
+    bool paste_image=false;
+    bool newline_inserted=false;
+    int next_paste=1;
+    std::vector<PastedChunk> pastes;
     std::function<bool()> approval_pending;
     // Earlier requests of this conversation, oldest first. Ctrl+P/Ctrl+N and
     // Alt+Up/Alt+Down recall them; Up/Down keep scrolling the transcript.
@@ -133,7 +142,6 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
 // keep_transcript records messages while the composer is off (a window too
 // small for it) so they reappear once the frame returns.
 void set_composer_layout(int input_row,int transcript_row,int first_row=1,bool keep_transcript=false);
-#ifndef _WIN32
 void reset_transcript();
 void scroll_transcript(int rows);
 void scroll_transcript_page(int direction);
@@ -141,7 +149,15 @@ bool scroll_transcript_mouse(int row,int col,int button=0,bool release=false);
 void scroll_transcript_bottom();
 bool transcript_scrollable();
 size_t transcript_hidden_lines();
-#endif
+void expand_draft_input(std::string &text,ChatDraft &draft);
+bool find_at_mention(std::string_view text,size_t cursor,size_t &at_pos,std::string &query);
+std::vector<std::string> workspace_complete_files(const App &app,std::string_view query,size_t limit=10);
+std::string capture_clipboard_image(App &app);
+J *prepare_user_message(App *app,const char *task);
+std::string user_message_text(J *message);
+std::string load_project_guide(const App &app);
+J *tool_code_outline(App *app,J *args);
+J *tool_delegate_research(App *app,J *args);
 enum class Operation { Other, FileEdit };
 bool approval_required(const App &app,Operation operation=Operation::Other);
 const char *permission_name(const App &app);
