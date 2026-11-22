@@ -55,18 +55,22 @@ API keys stay in the local user configuration directory where I run `desk`. They
 ## 我能做什么 / What I can do
 
 - 用自然语言读取、搜索、编辑工作目录内的文件；改动前在审批面板里看到带颜色的 diff。
+- 用 `code_outline` 提取源码符号与行号大纲，用 `delegate_research` 发起只读子任务调研，自动加载项目根目录的 `AGENTS.md` / `CLAUDE.md` 约定。
+- 输入 `@关键词` 按 `Tab` 模糊补全文件，发送 `@文件` 或 `@文件:起-止` 直接附带文件/图片内容；用 `/paste` 附带剪贴板图片，多行粘贴自动折叠不误提交。
 - 执行终端命令，并在需要时请求批准。
 - 通过 Linux AT-SPI 或 Windows UI Automation 操作支持标准控件的桌面应用。
 - 使用多个模型配置，选择后会成为下次启动的默认模型。
-- 在对话列表中切换对话；Linux 下按 `Ctrl+D` 返回列表，任务会继续在后台运行。`desk -c` 直接继续最近的对话。
+- 在对话列表中切换对话；按 `Ctrl+D` 返回列表，任务会继续在后台运行。`desk -c` 直接继续最近的对话。
 - 导入本地 stdio 或远程 Streamable HTTP MCP 服务。
 - 回复按 Markdown 排版，代码块、列表和标题在终端里清晰可读。
 
 - Read, search, and edit files inside the workspace with natural language, and review a coloured diff before each change.
+- Map source symbols and line numbers with `code_outline`, delegate multi-file investigation with read-only `delegate_research`, and load workspace `AGENTS.md` / `CLAUDE.md` automatically.
+- Type `@query` + `Tab` to fuzzy-complete workspace files, attach `@file` or `@file:start-end` slices and images inline, run `/paste` to attach clipboard images, and paste multiline snippets safely without premature submission.
 - Run terminal commands and ask for approval when needed.
 - Control desktop applications through Linux AT-SPI or Windows UI Automation.
 - Keep multiple model profiles; the selected profile becomes the default on the next launch.
-- Switch conversations; on Linux, `Ctrl+D` returns to the list while the task keeps running. `desk -c` resumes the latest one.
+- Switch conversations; `Ctrl+D` returns to the list while tasks keep running in the background. `desk -c` resumes the latest one.
 - Import local stdio or remote Streamable HTTP MCP servers.
 - Replies render as Markdown, so code blocks, lists and headings stay readable in the terminal.
 
@@ -116,9 +120,9 @@ In a chat, press `/` for the command palette (model, reasoning, approval, new ch
 
 ## 安装包和源码 / Packages and source
 
-最新版本：**1.11.5**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64。
+最新版本：**1.12.0**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64。
 
-Latest version: **1.11.5**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries. The Windows package targets Windows 10/11 x64.
+Latest version: **1.12.0**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries. The Windows package targets Windows 10/11 x64.
 
 也可以直接进入对话或执行一次请求：
 

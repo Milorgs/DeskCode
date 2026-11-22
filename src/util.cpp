@@ -106,205 +106,8 @@ bool terminal_eof(){
     return read(STDIN_FILENO,&marker,1)==0;
 }
 struct EditorState {char *line=nullptr;bool done=false,installed=false;std::string action;};
-struct TranscriptViewport {
-    int first=1,last=0,columns=0;
-    std::string transcript,activity;
-    std::vector<std::string> lines;
-    size_t top=0;
-    bool following=true;
-    // The chat is open but the frame is suspended; keep collecting lines.
-    bool recording=false;
-    bool dragging=false;
-    int drag_offset=0;
-    size_t drag_start_top=0;
-    int drag_start_row=0;
-
-    int text_columns() const {
-        return columns>=24?columns-3:std::max(1,columns);
-    }
-
-    size_t height() const {
-        return last>=first?static_cast<size_t>(last-first+1):0;
-    }
-
-    size_t total() const {
-        return lines.size()+!activity.empty();
-    }
-
-    size_t tail() const {
-        const size_t h=height(),count=total();
-        return count>h?count-h:0;
-    }
-
-    bool has_scrollbar() const {
-        return last>=first&&columns>=24&&tail()>0;
-    }
-
-    // Proportional thumb {offset, length} within 0..height()-1. When scrolled
-    // strictly between top and bottom on a tall enough track, keep a one-cell
-    // gap at each end so the user can always tell they are not at an extreme.
-    std::pair<size_t,size_t> scrollbar_thumb() const {
-        const size_t h=height(),count=total(),max_top=tail();
-        if(!h||!max_top)return {0,h};
-        const size_t len=std::clamp((h*h+count/2)/count,size_t{1},h>1?h-1:size_t{1});
-        const size_t travel=h-len;
-        if(!travel||!top)return {0,len};
-        if(top>=max_top)return {travel,len};
-        size_t pos=(top*travel+max_top/2)/max_top;
-        if(travel>=3)pos=std::clamp(pos,size_t{1},travel-1);
-        return {pos,len};
-    }
-
-    void append_rows(std::string_view text){
-        const int limit=text_columns();
-        std::string row,style;
-        int cells=0,indent=0;
-        bool leading=true;
-        for(size_t i=0;i<text.size();){
-            auto c=static_cast<unsigned char>(text[i]);
-            if(c==0x1b&&i+1<text.size()&&text[i+1]=='['){
-                const size_t start=i;
-                i+=2;
-                while(i<text.size()&&!(text[i]>='@'&&text[i]<='~'))i++;
-                if(i<text.size()&&text[i++]=='m'){
-                    auto sgr=text.substr(start,i-start);
-                    row+=sgr;
-                    if(sgr=="\033[0m"||sgr=="\033[m")style.clear();
-                    else style+=sgr;
-                }
-                continue;
-            }
-            if(c=='\n'){
-                lines.push_back(std::move(row));
-                row=style;
-                cells=0;
-                indent=0;
-                leading=true;
-                i++;
-                continue;
-            }
-            if(c=='\t'){
-                leading=false;
-                int count=std::min(8-cells%8,limit-cells);
-                row.append(count,' ');
-                cells+=count;
-                i++;
-                continue;
-            }
-            if(c<32||c==127){i++;continue;}
-            if(leading&&c==' '&&indent<4&&indent+8<limit)indent++;
-            else leading=false;
-            size_t size=c<0x80?1:c<0xe0?2:c<0xf0?3:c<0xf8?4:1;
-            size=std::min(size,text.size()-i);
-            auto glyph=text.substr(i,size);
-            int width=ui_width(glyph);
-            if(cells+width>limit){
-                lines.push_back(std::move(row));
-                row=style;
-                cells=0;
-                if(indent>0&&indent+width<limit){
-                    row.append(static_cast<size_t>(indent),' ');
-                    cells=indent;
-                }
-            }
-            row+=glyph;
-            cells+=width;
-            i+=glyph.size();
-        }
-    }
-
-    void draw_scrollbar_cell(int row,std::pair<size_t,size_t> thumb) const {
-        const size_t slot=static_cast<size_t>(row-first);
-        const bool in_thumb=slot>=thumb.first&&slot<thumb.first+thumb.second;
-        printf("\033[%d;%dH",row,columns-1);
-        if(in_thumb)fputs(ui_paint(following?Tone::Dim:Tone::Accent,"┃").c_str(),stdout);
-        else fputs(ui_paint(Tone::Rule,"│").c_str(),stdout);
-    }
-
-    void draw_scrollbar() const {
-        if(!has_scrollbar())return;
-        const auto thumb=scrollbar_thumb();
-        fputs("\0337",stdout);
-        for(int row=first;row<=last;row++)draw_scrollbar_cell(row,thumb);
-        fputs("\0338",stdout);
-        fflush(stdout);
-    }
-
-    void draw_row(int row,bool bar,std::pair<size_t,size_t> thumb) const {
-        printf("\033[%d;1H\033[2K",row);
-        size_t i=top+static_cast<size_t>(row-first);
-        if(i<lines.size())fputs(lines[i].c_str(),stdout);
-        else if(i==lines.size()&&!activity.empty())
-            fputs(ui_paint(Tone::Accent,ui_clip("  "+activity,text_columns())).c_str(),stdout);
-        fputs("\033[0m",stdout);
-        if(bar)draw_scrollbar_cell(row,thumb);
-    }
-
-    void draw() const {
-        if(last==0)return;
-        const bool bar=has_scrollbar();
-        const auto thumb=bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0};
-        fputs("\0337\033[?7l",stdout);
-        for(int row=first;row<=last;row++)draw_row(row,bar,thumb);
-        fputs("\033[?7h\0338",stdout);
-        fflush(stdout);
-    }
-
-    void set_activity(const std::string &text){
-        if(activity==text)return;
-        const bool height_changed=activity.empty()!=text.empty();
-        activity=text;
-        if(height_changed){
-            top=following?tail():std::min(top,tail());
-            draw();
-            return;
-        }
-        const size_t offset=lines.size()-top;
-        if(offset>static_cast<size_t>(last-first))return;
-        const bool bar=has_scrollbar();
-        fputs("\0337\033[?7l",stdout);
-        draw_row(first+static_cast<int>(offset),bar,bar?scrollbar_thumb():std::pair<size_t,size_t>{0,0});
-        fputs("\033[?7h\0338",stdout);
-        fflush(stdout);
-    }
-
-    void scroll(int rows){
-        if(!last)return;
-        size_t next=rows<0?top-std::min(top,static_cast<size_t>(-rows))
-                          :std::min(tail(),top+static_cast<size_t>(rows));
-        following=next==tail();
-        if(next!=top){top=next;draw();}
-    }
-
-    bool scroll_mouse_at(int row,int col,int button,bool release){
-        if(release){bool handled=dragging;dragging=false;return handled;}
-        if(!has_scrollbar()){dragging=false;return false;}
-        const auto [position,length]=scrollbar_thumb();
-        if(button==0){
-            if(col<columns-2||col>columns||row<first||row>last)return false;
-            dragging=true;
-            const int slot=row-first;
-            if(slot>=static_cast<int>(position)&&slot<static_cast<int>(position+length)){
-                drag_offset=slot-static_cast<int>(position);
-                drag_start_top=top;
-                drag_start_row=row;
-                return true;
-            }
-            drag_offset=static_cast<int>(length/2);
-        }else if(button!=32||!dragging)return false;
-        const size_t travel=height()-length;
-        if(!travel)return true;
-        const int slot=std::clamp(row-first-drag_offset,0,static_cast<int>(travel));
-        size_t next=static_cast<size_t>(slot)*tail()/travel;
-        if(button==32&&row==drag_start_row)next=std::min(drag_start_top,tail());
-        following=next==tail();
-        if(next!=top){top=next;draw();}
-        if(button==0){drag_start_top=top;drag_start_row=row;}
-        return true;
-    }
-};
-static TranscriptViewport transcript_view;
 EditorState *editor=nullptr;
+ChatDraft *active_draft=nullptr;
 bool activity_visible=false;
 std::string last_activity;
 void accepted_line(char *line){
@@ -321,16 +124,90 @@ int choose_chat_reasoning(int,int){
     return 0;
 }
 int unbound_scroll_key(int,int){return rl_ding();}
-int scroll_up(int,int){transcript_view.scroll(-std::max(1,transcript_view.last-transcript_view.first));return 0;}
-int scroll_down(int,int){transcript_view.scroll(std::max(1,transcript_view.last-transcript_view.first));return 0;}
-int scroll_line_up(int,int){transcript_view.scroll(-1);return 0;}
-int scroll_line_down(int,int){transcript_view.scroll(1);return 0;}
+int scroll_up(int,int){scroll_transcript_page(-1);return 0;}
+int scroll_down(int,int){scroll_transcript_page(1);return 0;}
+int scroll_line_up(int,int){scroll_transcript(-1);return 0;}
+int scroll_line_down(int,int){scroll_transcript(1);return 0;}
 // In alternate-scroll mode the terminal turns each wheel step into one Up or
 // Down key, so a single line per key matches the wheel's own step size.
-int scroll_wheel_up(int,int){transcript_view.scroll(-1);return 0;}
-int scroll_wheel_down(int,int){transcript_view.scroll(1);return 0;}
-int scroll_top(int,int){transcript_view.scroll(-1000000);return 0;}
-int scroll_bottom(int,int){transcript_view.scroll(1000000);return 0;}
+int scroll_wheel_up(int,int){scroll_transcript(-1);return 0;}
+int scroll_wheel_down(int,int){scroll_transcript(1);return 0;}
+int scroll_top(int,int){scroll_transcript(-1000000);return 0;}
+int scroll_bottom(int,int){scroll_transcript_bottom();return 0;}
+int complete_chat_tab(int,int){
+    if(!active_draft||!editor)return rl_ding();
+    size_t at_pos=0;
+    std::string query;
+    std::string_view buffer(rl_line_buffer,static_cast<size_t>(rl_end));
+    if(!find_at_mention(buffer,static_cast<size_t>(rl_point),at_pos,query))return rl_ding();
+    active_draft->complete_file=true;
+    editor->action="@";
+    return 0;
+}
+int paste_clipboard_hotkey(int,int){
+    if(!active_draft||!editor)return rl_ding();
+    active_draft->paste_image=true;
+    editor->action="/paste";
+    return 0;
+}
+int insert_newline_glyph(int,int){
+    if(!active_draft)return rl_ding();
+    active_draft->newline_inserted=true;
+    rl_insert_text("\xE2\x86\xB5");
+    rl_redisplay();
+    return 0;
+}
+int paste_bracketed(int,int){
+    static constexpr std::string_view end_marker="\033[201~";
+    std::string raw,tail;
+    bool oversized=false;
+    while(!interrupted){
+        int key=rl_read_key();
+        if(key<0)break;
+        char ch=static_cast<char>(key);
+        tail+=ch;
+        if(tail.size()>end_marker.size())tail.erase(0,tail.size()-end_marker.size());
+        if(raw.size()<65536+end_marker.size())raw+=ch;
+        else oversized=true;
+        if(tail==end_marker)break;
+    }
+    if(raw.ends_with(end_marker))raw.resize(raw.size()-end_marker.size());
+    if(oversized){
+        terminal_message(std::string("  ")+tr("输入超过 64 KB，请缩短后重试。")+"\n");
+        return 0;
+    }
+    std::string normalized;
+    normalized.reserve(raw.size());
+    for(size_t i=0;i<raw.size();i++){
+        char c=raw[i];
+        if(c=='\r'){
+            normalized+='\n';
+            if(i+1<raw.size()&&raw[i+1]=='\n')i++;
+            continue;
+        }
+        auto u=static_cast<unsigned char>(c);
+        if((u<32&&c!='\n'&&c!='\t')||u==127)continue;
+        normalized+=c;
+    }
+    size_t used=0;
+    std::string clean=display_utf8(normalized,used,true);
+    while(!clean.empty()&&clean.back()=='\n')clean.pop_back();
+    if(clean.empty())return 0;
+    if(clean.find('\n')==std::string::npos||!active_draft){
+        for(char &c:clean)if(c=='\t')c=' ';
+        rl_insert_text(clean.c_str());
+        rl_redisplay();
+        return 0;
+    }
+    size_t lines=1;
+    for(char c:clean)if(c=='\n')lines++;
+    char label[96];
+    snprintf(label,sizeof label,tr("[粘贴 #%d · %zu 行]"),active_draft->next_paste++,lines);
+    active_draft->pastes.push_back({label,std::move(clean)});
+    rl_insert_text(label);
+    rl_redisplay();
+    return 0;
+}
 // Recall of earlier requests. The draft typed before the first recall is kept
 // and comes back after stepping past the newest entry.
 const std::vector<std::string> *recall_history=nullptr;
@@ -371,9 +248,9 @@ int scroll_mouse(int,int){
             int button=0,column=0,row=0;
             if(sscanf(report,"%d;%d;%d",&button,&column,&row)==3){
                 const int code=button&~28;
-                if(key=='M'&&code==64)transcript_view.scroll(-1);
-                else if(key=='M'&&code==65)transcript_view.scroll(1);
-                else transcript_view.scroll_mouse_at(row,column,code,key=='m');
+                if(key=='M'&&code==64)scroll_transcript(-1);
+                else if(key=='M'&&code==65)scroll_transcript(1);
+                else scroll_transcript_mouse(row,column,code,key=='m');
             }
             break;
         }
@@ -387,6 +264,7 @@ struct EditorSession {
     Keymap scroll_keymap=nullptr;
     std::vector<std::pair<const char *,rl_command_func_t *>> previous_scroll_bindings;
     bool mouse_reporting=false;
+    bool bracketed_paste=false;
     explicit EditorSession(const char *prompt){
         editor=&state;
         rl_readline_name="desk";
@@ -407,6 +285,19 @@ struct EditorSession {
         previous_scroll_bindings.emplace_back(sequence,previous);
         return true;
     }
+    void enable_chat_editing(ChatDraft *draft){
+        active_draft=draft;
+        rl_bind_key('\t',complete_chat_tab);
+        bind("\026",paste_clipboard_hotkey);
+        bind("\033\r",insert_newline_glyph);
+        bind("\033\n",insert_newline_glyph);
+        rl_variable_bind("enable-bracketed-paste","off");
+        if(bind("\033[200~",paste_bracketed)){
+            bracketed_paste=true;
+            fputs("\033[?2004h",stdout);
+            fflush(stdout);
+        }
+    }
     void enable_history(const std::vector<std::string> *history){
         recall_history=history;
         recalling=false;
@@ -418,7 +309,7 @@ struct EditorSession {
         bind("\033[1;3B",recall_next);
     }
     void enable_scrolling(){
-        if(!transcript_view.last)return;
+        if(!transcript_scrollable())return;
         bind("\033[5~",scroll_up);
         bind("\033[5;2~",scroll_up);
         bind("\033[6~",scroll_down);
@@ -448,14 +339,21 @@ struct EditorSession {
         }
     }
     ~EditorSession(){
-        transcript_view.dragging=false;
+        scroll_transcript_mouse(0,0,0,true);
+        active_draft=nullptr;
         recall_history=nullptr;
         recalling=false;
         recall_stash.clear();
+        if(bracketed_paste){
+            fputs("\033[?2004l",stdout);
+            fflush(stdout);
+            rl_variable_bind("enable-bracketed-paste","on");
+        }
         if(mouse_reporting){
             fputs("\033[?1006l\033[?1002l\033[?1000l",stdout);
             fflush(stdout);
         }
+        rl_bind_key('\t',rl_insert);
         // Keep Readline's existing bindings. Use its usual bell for formerly
         // unbound keys so removing a sequence cannot leak a keymap node.
         for(const auto &[sequence,previous]:previous_scroll_bindings)
@@ -467,55 +365,10 @@ struct EditorSession {
     }
 };
 }
-void reset_transcript(){transcript_view={};}
-void scroll_transcript(int rows){transcript_view.scroll(rows);}
-void scroll_transcript_page(int direction){
-    transcript_view.scroll(direction*std::max(1,transcript_view.last-transcript_view.first));
-}
-bool scroll_transcript_mouse(int row,int col,int button,bool release){return transcript_view.scroll_mouse_at(row,col,button,release);}
-void scroll_transcript_bottom(){transcript_view.scroll(INT_MAX);}
-bool transcript_scrollable(){return transcript_view.last!=0;}
-size_t transcript_hidden_lines(){
-    if(!transcript_view.last||transcript_view.following)return 0;
-    const size_t bottom=transcript_view.tail();
-    return bottom>transcript_view.top?bottom-transcript_view.top:0;
-}
-void set_composer_layout(int input_row,int transcript_row,int first_row,bool keep_transcript){
-    auto &view=transcript_view;
-    view.first=first_row;
-    view.last=input_row?transcript_row:0;
-    view.recording=!view.last&&keep_transcript;
-    if(!view.last)return;
-    int columns=std::max(1,terminal_columns());
-    if(columns!=view.columns){
-        view.columns=columns;
-        view.lines.clear();
-        view.append_rows(view.transcript);
-    }
-    view.top=view.following?view.tail():std::min(view.top,view.tail());
-    view.draw();
-    // The input row hosts readline or the inline approval choices; either way
-    // the cursor belongs there after a relayout.
-    printf("\033[%d;1H",input_row);
-}
 void terminal_message(const std::string &text){
     if(text.empty())return;
     activity_visible=false;
-    auto &view=transcript_view;
-    if(view.last){
-        std::string body=text;
-        if(body.back()!='\n')body+='\n';
-        view.transcript+=body;
-        view.append_rows(body);
-        if(view.following){view.top=view.tail();view.draw();}
-        else view.draw_scrollbar();
-        return;
-    }
-    if(view.recording){
-        view.transcript+=text;
-        if(text.back()!='\n')view.transcript+='\n';
-        view.columns=0;
-    }
+    if(transcript_append(text))return;
     if(!editor||!editor->installed){fwrite(text.data(),1,text.size(),stdout);fflush(stdout);return;}
     std::string line=rl_line_buffer;
     int point=rl_point;
@@ -527,7 +380,7 @@ void terminal_message(const std::string &text){
     rl_on_new_line();rl_redisplay();fflush(stdout);
 }
 void terminal_activity(const std::string &text){
-    if(transcript_view.last){transcript_view.set_activity(text);return;}
+    if(transcript_set_activity(text))return;
     if(!editor||!editor->installed){
         activity_visible=false;
         return;
@@ -554,6 +407,9 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
         EditorSession session(prompt);
         if(draft){
             draft->paused=false;
+            draft->complete_file=false;
+            draft->paste_image=false;
+            session.enable_chat_editing(draft);
             session.enable_scrolling();
             session.enable_history(draft->history);
             rl_bind_keyseq("\033OQ",choose_chat_model);
@@ -562,15 +418,25 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
             rl_bind_keyseq("\033[13~",choose_chat_reasoning);
             if(!draft->text.empty()){
                 rl_replace_line(draft->text.c_str(),0);
-                rl_point=draft->cursor;
+                rl_point=std::clamp(draft->cursor,0,rl_end);
                 rl_redisplay();
             }
         }
         struct winsize previous{};ioctl(STDOUT_FILENO,TIOCGWINSZ,&previous);
+        double slash_started=0;
         while(!session.state.done&&!interrupted){
             if(idle)idle();
+            if(draft&&!session.state.done&&slash_started>0){
+                if(rl_end==1&&rl_line_buffer[0]=='/'){
+                    if(monotime()-slash_started>=0.25){
+                        draft->text.clear();draft->cursor=0;
+                        fputs("\r\033[2K",stdout);
+                        return strdup("/");
+                    }
+                }else slash_started=0;
+            }
             if(draft&&draft->approval_pending&&draft->approval_pending()){
-                transcript_view.scroll(INT_MAX);
+                scroll_transcript_bottom();
                 draft->text.assign(rl_line_buffer,static_cast<size_t>(rl_end));
                 draft->cursor=rl_point;
                 draft->paused=true;
@@ -585,7 +451,7 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
                 previous=current;
                 fputs("\r\033[2K",stdout);
                 if(idle)idle();
-                if(transcript_view.last&&current.ws_row>=8)printf("\033[%d;1H\033[2K",current.ws_row-2);
+                if(transcript_scrollable()&&current.ws_row>=8)printf("\033[%d;1H\033[2K",current.ws_row-2);
                 rl_on_new_line();
                 rl_set_screen_size(current.ws_row,current.ws_col);
                 rl_forced_update_display();
@@ -598,22 +464,33 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
                 return strdup(session.state.action.c_str());
             }
             if(draft&&!session.state.done&&rl_last_func==rl_insert&&rl_end==1&&rl_line_buffer[0]=='/'){
-                draft->text.clear();draft->cursor=0;
-                fputs("\r\033[2K",stdout);
-                return strdup("/");
+                if(slash_started==0)slash_started=monotime();
+            }else if(rl_end!=1||rl_line_buffer[0]!='/'){
+                slash_started=0;
             }
             if(!session.state.done&&rl_end>65536){
                 rl_replace_line("",0);rl_crlf();puts(tr("输入超过 64 KB，请缩短后重试。"));rl_on_new_line();rl_redisplay();
             }
         }
-        if(draft){draft->text.clear();draft->cursor=0;}
-        if(interrupted){rl_replace_line("",0);rl_crlf();free(session.state.line);return nullptr;}
+        if(interrupted){
+            if(draft){draft->text.clear();draft->cursor=0;}
+            rl_replace_line("",0);rl_crlf();free(session.state.line);return nullptr;
+        }
         if(!session.state.done)return nullptr;
         char *line=session.state.line;
-        if(!line){input_closed=true;putchar('\n');return nullptr;}
-        if(strlen(line)>65536){free(line);puts(tr("输入超过 64 KB，请缩短后重试。"));return strdup("");}
-        if(!*line&&fallback){free(line);return strdup(fallback);}
-        return line;
+        if(!line){
+            if(draft){draft->text.clear();draft->cursor=0;}
+            input_closed=true;putchar('\n');return nullptr;
+        }
+        std::string resolved=line;
+        free(line);
+        if(draft){
+            draft->text.clear();draft->cursor=0;
+            expand_draft_input(resolved,*draft);
+        }
+        if(resolved.size()>65536){puts(tr("输入超过 64 KB，请缩短后重试。"));return strdup("");}
+        if(resolved.empty()&&fallback)return strdup(fallback);
+        return strdup(resolved.c_str());
     }
     printf("%s",prompt);fflush(stdout);
     struct termios old{};bool changed=false;

@@ -541,20 +541,24 @@ static void test_context_and_validation(void){
 }
 static void test_tool_configuration(){
     App a=fresh();a.shell=true;a.desktop=true;
-    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==9);
+    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==11);
     // Mutating one caller's schema must not change validation or other callers.
     json_object_object_del(get(get(get(at(enabled.get(),0),"function"),"parameters"),"properties"),"path");
     JsonPtr untouched(schemas(&a));
     CHECK(get(get(get(get(at(untouched.get(),0),"function"),"parameters"),"properties"),"path"));
     JsonPtr empty(obj()),result(tool_call(&a,"list_files",empty.get()));CHECK(tool_failed(result.get()));
     a.shell=false;a.desktop=false;
-    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==5);
+    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==7);
     JsonPtr shell_args(obj());put(shell_args.get(),"command",str("exit 0"));
     result.reset(tool_call(&a,"run_shell",shell_args.get()));CHECK(tool_failed(result.get()));
     JsonPtr desktop_args(obj());put(desktop_args.get(),"app",str(""));
     result.reset(tool_call(&a,"desktop_snapshot",desktop_args.get()));CHECK(tool_failed(result.get()));
-    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==6);
-    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==5);
+    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==8);
+    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==7);
+    a.subagent=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==4);
+    JsonPtr research_args(obj());put(research_args.get(),"question",str("nested?"));
+    result.reset(tool_call(&a,"delegate_research",research_args.get()));CHECK(tool_failed(result.get()));
+    a.subagent=false;
     app_cleanup(&a);
 }
 /* A local HTTP server; no external model or real credential. */ static pid_t fake_server(App *a,const char **responses,int count,int http_status=200,int delay_ms=0,bool keep_alive=false,bool truncate_response=false){
@@ -1251,6 +1255,8 @@ static void test_settings_redraw(){
     CHECK(first_notice==last_notice);
     // EOF from a settings submenu must terminate without redrawing forever.
     output.clear();CHECK(write(master,"2\n",2)==2);CHECK(terminal_until(master,output,"[1] Enable"));
+    // Wait for the input prompt before sending the EOF key.
+    CHECK(terminal_until(master,output,"Select a number:"));
     CHECK(write(master,"\x04",1)==1);
     int status=0;double until=monotime()+3;pid_t ended=0;
     while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(10000);
@@ -2607,7 +2613,7 @@ static void test_mcp(){
     child=restarted;
     JsonPtr failed(mcp_call(a,fail.c_str(),input.get()));CHECK(tool_failed(failed.get()));
     CHECK(!workflow(&a,{model_tool("external",echo.c_str(),copy(input.get())),model_reply(nullptr,"MCP model integration complete")}));
-    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==8);
+    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==10);
     JsonPtr follow(capture(&a,1));J *messages=get(get(follow.get(),"body"),"messages");CHECK(strstr(sget(at(messages,alen(messages)-1),"content"),"MCP_ECHO_OK"));
     mcp_close(a);CHECK(kill(child,0)<0&&errno==ESRCH);
     put(get(loaded.get(),"fixture"),"disabled",json_object_new_boolean(true));CHECK(mcp_save(a,loaded.get()));CHECK(mcp_prepare(a));tools.reset(mcp_tools(a));CHECK(alen(tools.get())==0);
@@ -2881,6 +2887,241 @@ static void test_provider_presets(){
     app_cleanup(&saved);
     app_cleanup(&a);
 }
+static void test_code_outline_and_project_guide(){
+    App a=fresh();
+    json_object_put(a.config);a.config=config("outline-test","openai");
+
+    auto write_rel=[&](const char *rel,const char *content){
+        std::string s=std::string(a.root)+"/"+rel;
+        auto slash=s.rfind('/');
+        if(slash!=std::string::npos)CHECK(!mkdirs(s.substr(0,slash).c_str(),0700));
+        CHECK(!atomic_file(s.c_str(),content,strlen(content),0600));
+    };
+    write_rel("src/engine.cpp",
+        "// void commented_out() {}\n"
+        "/*\nclass FakeBlockClass {\nvoid fake_method() {}\n};\n*/\n"
+        "namespace core {\n"
+        "struct Config {\n"
+        "    int run_step(const char *literal = \"void not_a_fn() {}\") {\n"
+        "        if (literal) { return 1; }\n"
+        "        return 0;\n"
+        "    }\n"
+        "};\n"
+        "int compute_total(int x,\n"
+        "                  int y)\n"
+        "{\n"
+        "    return x + y;\n"
+        "}\n"
+        "}\n");
+    write_rel("src/worker.py",
+        "# def ignored_comment(): pass\n"
+        "\"\"\"\n"
+        "def ignored_docstring():\n"
+        "    pass\n"
+        "\"\"\"\n"
+        "class TaskRunner:\n"
+        "    async def execute(self, item):\n"
+        "        return item\n"
+        "\n"
+        "def top_helper(flag=True):\n"
+        "    return flag\n");
+    write_rel("src/ui.ts",
+        "export interface ViewProps { width: number; }\n"
+        "export class PanelView {\n"
+        "    render(): string { return `function fake() {}`; }\n"
+        "}\n"
+        "export const formatBadge = (n: number) => `${n}`;\n");
+
+    JsonPtr one_args(args("src/engine.cpp"));
+    JsonPtr one(tool_call(&a,"code_outline",one_args.get()));
+    CHECK(!tool_failed(one.get()));
+    std::string one_json=json_object_to_json_string_ext(one.get(),JSON_C_TO_STRING_PLAIN);
+    CHECK(one_json.find("namespace core")!=std::string::npos);
+    CHECK(one_json.find("struct Config")!=std::string::npos);
+    CHECK(one_json.find("run_step")!=std::string::npos);
+    CHECK(one_json.find("compute_total")!=std::string::npos);
+    CHECK(one_json.find("commented_out")==std::string::npos);
+    CHECK(one_json.find("FakeBlockClass")==std::string::npos);
+    CHECK(one_json.find("not_a_fn")==std::string::npos);
+
+    JsonPtr all_args(args("."));
+    JsonPtr all(tool_call(&a,"code_outline",all_args.get()));
+    CHECK(!tool_failed(all.get()));
+    CHECK(iget(all.get(),"files_scanned",0)==3);
+    std::string all_json=json_object_to_json_string_ext(all.get(),JSON_C_TO_STRING_PLAIN);
+    CHECK(all_json.find("TaskRunner")!=std::string::npos);
+    CHECK(all_json.find("top_helper")!=std::string::npos);
+    CHECK(all_json.find("ignored_docstring")==std::string::npos);
+    CHECK(all_json.find("ViewProps")!=std::string::npos);
+    CHECK(all_json.find("formatBadge")!=std::string::npos);
+
+    // Project guide: absent -> no system message; present -> injected on OpenAI and Anthropic.
+    {
+        J *u=obj();put(u,"role",str("user"));put(u,"content",str("hello"));add(a.messages,u);
+        JsonPtr defs(schemas(&a));
+        JsonPtr ctx_empty(context(&a,defs.get()));
+        CHECK(alen(ctx_empty.get())==1);
+        CHECK(!strcmp(sget(at(ctx_empty.get(),0),"role"),"user"));
+
+        write_rel("AGENTS.md","Always run `make check-fast` before finishing.\n");
+        JsonPtr ctx_guided(context(&a,defs.get()));
+        CHECK(alen(ctx_guided.get())==2);
+        CHECK(!strcmp(sget(at(ctx_guided.get(),0),"role"),"system"));
+        CHECK(strstr(sget(at(ctx_guided.get(),0),"content"),"make check-fast")!=nullptr);
+
+        JsonPtr anth_cfg(config("anth","anthropic"));
+        JsonPtr native(native_payload(anth_cfg.get(),ctx_guided.get(),defs.get()));
+        CHECK(strstr(sget(native.get(),"system"),"make check-fast")!=nullptr);
+        CHECK(alen(get(native.get(),"messages"))==1);
+
+        setenv("DESK_NO_PROJECT_GUIDE","1",1);
+        JsonPtr ctx_off(context(&a,defs.get()));
+        unsetenv("DESK_NO_PROJECT_GUIDE");
+        CHECK(alen(ctx_off.get())==1);
+        reset_session(&a);
+    }
+
+    // delegate_research runs an isolated read-only subagent without polluting parent messages.
+    {
+        const char *sub_replies[]={
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"sub-1\",\"type\":\"function\",\"function\":{\"name\":\"code_outline\",\"arguments\":\"{\\\"path\\\":\\\"src/engine.cpp\\\"}\"}}]}}]}\n\n"
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"total_tokens\":19}}\n\n"
+            "data: [DONE]\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"compute_total is at src/engine.cpp:14.\"}}]}\n\n"
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":23}}\n\n"
+            "data: [DONE]\n\n"
+        };
+        pid_t srv=fake_server(&a,sub_replies,2);
+        JsonPtr r_args(obj());
+        put(r_args.get(),"question",str("Where is compute_total defined?"));
+        put(r_args.get(),"path",str("src"));
+        a.task_tokens=0;
+        JsonPtr r_res(tool_call(&a,"delegate_research",r_args.get()));
+        server_done(srv);
+        CHECK(!tool_failed(r_res.get()));
+        CHECK(strstr(sget(r_res.get(),"findings"),"src/engine.cpp:14")!=nullptr);
+        CHECK(iget(r_res.get(),"steps",0)==2);
+        CHECK(alen(get(r_res.get(),"inspected"))==1);
+        CHECK(alen(a.messages)==0);
+        CHECK(a.task_tokens==42);
+    }
+    app_cleanup(&a);
+}
+
+static void test_mentions_paste_and_multimodal(){
+    App a=fresh();
+    json_object_put(a.config);a.config=config("mention-test","openai");
+
+    {
+        size_t at_pos=99;std::string q;
+        CHECK(!find_at_mention("contact dev@example.com",23,at_pos,q));
+        CHECK(find_at_mention("check @src/ap",13,at_pos,q)&&at_pos==6&&q=="src/ap");
+        CHECK(find_at_mention("@",1,at_pos,q)&&at_pos==0&&q.empty());
+        CHECK(find_at_mention("open @\"my folder/fi",19,at_pos,q)&&at_pos==5&&q=="my folder/fi");
+    }
+
+    auto write_bin=[&](const char *rel,const void *data,size_t len){
+        std::string s=std::string(a.root)+"/"+rel;
+        auto slash=s.rfind('/');
+        if(slash!=std::string::npos)CHECK(!mkdirs(s.substr(0,slash).c_str(),0700));
+        CHECK(!atomic_file(s.c_str(),data,len,0600));
+    };
+    const char *notes="alpha_line_1\nbeta_line_2\ngamma_line_3\ndelta_line_4\n";
+    write_bin("docs/uniq_notes.txt",notes,strlen(notes));
+    write_bin(".env","SECRET=1\n",9);
+    static const unsigned char tiny_png[]={
+        0x89,'P','N','G',0x0d,0x0a,0x1a,0x0a,
+        0x00,0x00,0x00,0x0d,'I','H','D','R',0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
+        0x08,0x02,0x00,0x00,0x00,0x90,0x77,0x53,0xde,0x00,0x00,0x00,0x00,'I','E','N','D',0xae,0x42,0x60,0x82
+    };
+    write_bin("assets/pixel.png",tiny_png,sizeof tiny_png);
+
+    auto completed=workspace_complete_files(a,"uniq",8);
+    CHECK(completed.size()==1&&completed[0]=="docs/uniq_notes.txt");
+    auto env_try=workspace_complete_files(a,"env",8);
+    CHECK(env_try.empty());
+
+    {
+        JsonPtr msg(prepare_user_message(&a,"Compare @docs/uniq_notes.txt:2-3 with @assets/pixel.png, ignore @.env."));
+        CHECK(user_message_text(msg.get())=="Compare @docs/uniq_notes.txt:2-3 with @assets/pixel.png, ignore @.env.");
+        J *blocks=get(msg.get(),"content");
+        CHECK(json_object_is_type(blocks,json_type_array)&&alen(blocks)==2);
+        const char *text_part=sget(at(blocks,0),"text");
+        CHECK(strstr(text_part,"beta_line_2\ngamma_line_3")!=nullptr);
+        CHECK(strstr(text_part,"alpha_line_1")==nullptr);
+        CHECK(strstr(text_part,"SECRET")==nullptr);
+        CHECK(!strcmp(sget(at(blocks,1),"type"),"image_url"));
+
+        JsonPtr anth_cfg(config("anth-mm","anthropic"));
+        JsonPtr msgs(arr());add(msgs.get(),copy(msg.get()));
+        JsonPtr native(native_payload(anth_cfg.get(),msgs.get(),nullptr));
+        J *nblocks=get(at(get(native.get(),"messages"),0),"content");
+        CHECK(alen(nblocks)==2);
+        CHECK(!strcmp(sget(at(nblocks,1),"type"),"image"));
+        CHECK(!strcmp(sget(get(at(nblocks,1),"source"),"media_type"),"image/png"));
+    }
+
+    const char *pty_replies[]={
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ALL_MULTIMODAL_OK\"}}]}\n\n"
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":30}}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pid_t srv=fake_server(&a,pty_replies,1);
+    CHECK(!save_config(&a,a.config));
+    std::string clip_src=std::string(a.root)+"/assets/pixel.png";
+
+    int master=-1;
+    winsize window{24,90,0,0};
+    pid_t child=forkpty(&master,nullptr,nullptr,&window);
+    CHECK(child>=0);
+    if(!child){
+        setenv("TERM","xterm-256color",1);
+        setenv("NO_COLOR","1",1);
+        setenv("DESK_CLIPBOARD_IMAGE_FILE",clip_src.c_str(),1);
+        unsetenv("DESK_NO_ARROW");
+        unsetenv("DESK_NO_COMPOSER");
+        execl("./build/desk","desk","--lang","en","--workspace",a.root,"chat",static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    std::string output;
+    CHECK(terminal_until(master,output,"\033[?2004h"));
+    output.clear();
+    // Stage clipboard image via Ctrl+V hotkey.
+    type_terminal(master,output,"\x16");
+    CHECK(terminal_until(master,output,"Attached clipboard image"));
+    output.clear();
+    type_terminal(master,output,"@uniq\t");
+    CHECK(terminal_until(master,output,"@docs/uniq_notes.txt "));
+    output.clear();
+    type_terminal(master,output,"\033[200~PASTE_ROW_A\nPASTE_ROW_B\033[201~");
+    CHECK(terminal_until(master,output,"[Paste #1 · 2 lines]"));
+    output.clear();
+    type_terminal(master,output,"\r");
+    CHECK(terminal_until(master,output,"ALL_MULTIMODAL_OK"));
+
+    type_terminal(master,output,"\x04");
+    CHECK(terminal_until(master,output,"0. Main menu"));
+    type_terminal(master,output,"0\r");
+    CHECK(terminal_until(master,output,"0. Exit"));
+    type_terminal(master,output,"0\r");
+    int status=0;
+    CHECK(waitpid(child,&status,0)==child);
+    close(master);
+    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    server_done(srv);
+
+    JsonPtr cap(capture(&a,0));
+    J *sent_msg=at(get(get(cap.get(),"body"),"messages"),0);
+    CHECK(!get(sent_msg,"_display"));
+    J *sent_blocks=get(sent_msg,"content");
+    CHECK(json_object_is_type(sent_blocks,json_type_array)&&alen(sent_blocks)==2);
+    const char *sent_text=sget(at(sent_blocks,0),"text");
+    CHECK(strstr(sent_text,"PASTE_ROW_A\nPASTE_ROW_B")!=nullptr);
+    CHECK(strstr(sent_text,"alpha_line_1")!=nullptr);
+    CHECK(!strcmp(sget(at(sent_blocks,1),"type"),"image_url"));
+    app_cleanup(&a);
+}
+
 int main(int argc,char **argv){
     if(argc==2&&!strcmp(argv[1],"--mcp-fixture"))return mcp_fixture();
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -2910,6 +3151,8 @@ int main(int argc,char **argv){
     test_chat_history_scroll();
     test_prompt_recall_and_context();
     test_stream_usage_and_tail_utf8();
+    test_code_outline_and_project_guide();
+    test_mentions_paste_and_multimodal();
     test_chat_actions_layout();
     test_menu_navigation_and_resize();
     test_persistent_conversations();

@@ -292,7 +292,31 @@ J *native_payload(J *c,J *messages,J *tools){
             continue;
         }
         J *blocks=arr();
-        if(!strcmp(role,"user"))add(blocks,textblock(sget(m,"content")));
+        if(!strcmp(role,"user")){
+            J *content=get(m,"content");
+            if(json_object_is_type(content,json_type_array)){
+                for(size_t k=0;k<alen(content);k++){
+                    J *part=at(content,k);
+                    const char *ptype=sget(part,"type");
+                    if(!strcmp(ptype,"text"))add(blocks,textblock(sget(part,"text")));
+                    else if(!strcmp(ptype,"image_url")){
+                        std::string_view url=sget(get(part,"image_url"),"url");
+                        auto semi=url.find(";base64,");
+                        if(url.starts_with("data:")&&semi!=std::string_view::npos){
+                            std::string mime(url.substr(5,semi-5));
+                            std::string data(url.substr(semi+8));
+                            J *img=obj(),*src=obj();
+                            put(img,"type",str("image"));
+                            put(src,"type",str("base64"));
+                            put(src,"media_type",str(mime.c_str()));
+                            put(src,"data",str(data.c_str()));
+                            put(img,"source",src);
+                            add(blocks,img);
+                        }
+                    }else if(!strcmp(ptype,"image"))add(blocks,copy(part));
+                }
+            }else add(blocks,textblock(sget(m,"content")));
+        }
         else if(!strcmp(role,"tool")){
             J *b=obj();
             put(b,"type",str("tool_result"));
@@ -414,7 +438,18 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
     else{
         body=obj();
         put(body,"model",str(sget(c,"model")));
-        put(body,"messages",copy(messages));
+        J *wire=arr();
+        for(size_t i=0;i<alen(messages);i++){
+            J *clean=copy(at(messages,i));
+            std::vector<std::string> internal_keys;
+            json_object_object_foreach(clean,key,val){
+                (void)val;
+                if(key[0]=='_')internal_keys.emplace_back(key);
+            }
+            for(const auto &k:internal_keys)json_object_object_del(clean,k.c_str());
+            add(wire,clean);
+        }
+        put(body,"messages",wire);
         if(*sget(c,"reasoning_effort"))put(body,"reasoning_effort",str(sget(c,"reasoning_effort")));
         if(alen(tools)){
             put(body,"tools",copy(tools));

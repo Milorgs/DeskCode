@@ -555,6 +555,7 @@ static void definition(J *tools,const char *name,const char *description,const c
             "One noninteractive bash command. Runs independently in the workspace; cd and exported variables do not persist.":
 #endif
             !strcmp(fields[i],"app")?"Empty string lists applications; otherwise use an exact application name from the latest snapshot.":
+            !strcmp(fields[i],"question")?"Specific codebase question to investigate with read-only tools (1..4000 bytes).":
             !strcmp(fields[i],"ref")?"Fresh control reference from the latest snapshot; invalid after any desktop action.":
             !strcmp(fields[i],"action")?"Exact action name advertised by the referenced control.":"Complete replacement text for the editable control.";
         put(value,"description",str(description));
@@ -592,6 +593,9 @@ static J *builtin_tools(){
         }
         ,*text[]={
             "ref","text"
+        }
+        ,*research[]={
+            "question"
         };
         definition(tools,"list_files","List up to 200 workspace entries sorted with directories first and byte sizes on files. Set optional max_depth (1..4) to inspect directory trees in one call.",path,1);
         {
@@ -639,11 +643,31 @@ static J *builtin_tools(){
         definition(tools,"desktop_snapshot","Read apps with empty app, then exact app name for controls. Text is sent to model API.",app,1);
         definition(tools,"desktop_action","Invoke an action advertised by current snapshot. Re-snapshot after action.",act,2);
         definition(tools,"desktop_set_text","Replace entire editable control text. Re-snapshot to verify.",text,2);
+        definition(tools,"code_outline","Extract structural symbols (classes, structs, interfaces, enums, functions, methods) and 1-based line numbers from a file or directory tree. Prefer this to orient in unfamiliar or large files before reading slices.",path,1);
+        {
+            J *outline_props=get(get(get(at(tools,9),"function"),"parameters"),"properties");
+            J *limit=obj();
+            put(limit,"type",str("integer"));
+            put(limit,"description",str("Optional maximum symbol entries to return (1..400, default 120)."));
+            put(outline_props,"max_results",limit);
+        }
+        definition(tools,"delegate_research","Run an isolated read-only research subagent (using list_files, code_outline, search_text, read_file) to answer a multi-file codebase question and return concise findings without filling the main context.",research,1);
+        {
+            J *research_props=get(get(get(at(tools,10),"function"),"parameters"),"properties");
+            J *focus=obj();
+            put(focus,"type",str("string"));
+            put(focus,"description",str("Optional workspace directory or file path to focus on (default .)."));
+            put(research_props,"path",focus);
+        }
         return tools;
     }());
     return catalog.get();
 }
 static bool tool_enabled(const App &app,const char *name){
+    if(app.subagent){
+        return !strcmp(name,"list_files")||!strcmp(name,"search_text")
+            ||!strcmp(name,"read_file")||!strcmp(name,"code_outline");
+    }
     if(!strcmp(name,"run_shell"))return app.shell;
     if(!strncmp(name,"desktop_",8))return app.desktop;
     return true;
@@ -704,6 +728,8 @@ J *tool_call(App *a,const char *name,J *args){
     if(!strcmp(name,"list_files"))return file_list(a,sget(args,"path"),args);
     if(!strcmp(name,"read_file"))return file_read(a,sget(args,"path"),args);
     if(!strcmp(name,"search_text"))return file_search(a,args);
+    if(!strcmp(name,"code_outline"))return tool_code_outline(a,args);
+    if(!strcmp(name,"delegate_research"))return tool_delegate_research(a,args);
     if(!strcmp(name,"edit_file"))return file_edit(a,args);
     if(!strcmp(name,"write_file"))return file_write(a,args);
     if(!strcmp(name,"run_shell")){

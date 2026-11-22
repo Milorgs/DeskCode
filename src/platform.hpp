@@ -32,5 +32,8 @@ const char *env_value(const char *name);
 int asprintf(char **result,const char *format,...);
 std::wstring wide(std::string_view value);
 std::string utf8(std::wstring_view value);
+void set_worker_terminal(int columns,bool ansi);
 #endif
+bool transcript_append(const std::string &text);
+bool transcript_set_activity(const std::string &text);
 #endif

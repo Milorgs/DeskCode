@@ -153,7 +153,7 @@ static std::string recap(J *messages,size_t begin,size_t end){
     for(size_t i=recent;i>begin;--i){
         J *message=at(messages,i-1);
         if(!strcmp(sget(message,"role"),"user")){
-            notes+="user: "+excerpt(sget(message,"content"),720)+"\n";
+            notes+="user: "+excerpt(user_message_text(message),720)+"\n";
             break;
         }
     }
@@ -163,6 +163,8 @@ static std::string recap(J *messages,size_t begin,size_t end){
         notes+=std::string(role)+": ";
         if(role=="tool"){
             notes+=tool_excerpt(sget(message,"content"),360);
+        }else if(role=="user"){
+            notes+=excerpt(user_message_text(message),360);
         }else{
             notes+=excerpt(sget(message,"content"),360);
             J *calls=get(message,"tool_calls");
@@ -211,7 +213,25 @@ static void strip_stale_images(J *messages){
     size_t kept=0;
     for(size_t i=alen(messages);i>0;--i){
         J *message=at(messages,i-1);
-        if(strcmp(sget(message,"role"),"tool"))continue;
+        const char *role=sget(message,"role");
+        if(!strcmp(role,"user")){
+            J *blocks=get(message,"content");
+            if(!json_object_is_type(blocks,json_type_array))continue;
+            bool images=false;
+            for(size_t j=0;j<alen(blocks);++j)images|=image_block(at(blocks,j));
+            if(!images||kept++<FRESH_IMAGES)continue;
+            for(size_t j=0;j<alen(blocks);++j){
+                J *block=at(blocks,j);
+                if(!image_block(block))continue;
+                json_object_object_del(block,"data");
+                json_object_object_del(block,"source");
+                json_object_object_del(block,"image_url");
+                put(block,"type",str("text"));
+                put(block,"text",str("[Image omitted from an earlier step.]"));
+            }
+            continue;
+        }
+        if(strcmp(role,"tool"))continue;
         JsonPtr parsed(json_tokener_parse(sget(message,"content")));
         J *blocks=get(parsed.get(),"content");
         if(!json_object_is_type(blocks,json_type_array))continue;
@@ -278,11 +298,25 @@ static J *compact_context(App *a,J *tools,size_t first){
 }
 
 J *context(App *a,J *tools,bool *compacted){
+    auto attach_guide=[&](J *selected)->J*{
+        if(!selected||a->subagent)return selected;
+        std::string guide=load_project_guide(*a);
+        if(guide.empty())return selected;
+        JsonPtr sys(obj());
+        put(sys.get(),"role",str("system"));
+        put(sys.get(),"content",str(guide.c_str()));
+        if(message_bytes(sys.get())+context_bytes(selected,tools)>context_limit())return selected;
+        JsonPtr with_guide(arr());
+        add(with_guide.get(),sys.release());
+        append_messages(with_guide.get(),selected);
+        json_object_put(selected);
+        return with_guide.release();
+    };
     if(compacted)*compacted=false;
     const size_t n=alen(a->messages);
     size_t first=n;
     for(size_t i=0;i<n;i++)if(!strcmp(sget(at(a->messages,i),"role"),"user"))first=i;
-    if(first==n)return copy(a->messages);
+    if(first==n)return attach_guide(copy(a->messages));
 
     // Bill every message once, then walk back through whole turns while the
     // request still fits: the budget decides what is sent, not a turn count.
@@ -296,7 +330,7 @@ J *context(App *a,J *tools,bool *compacted){
         if(selected){
             if(compacted)*compacted=true;
         }else seterr(a,tr("本轮超过上下文预算，请拆分任务或选择新建对话。"));
-        return selected;
+        return attach_guide(selected);
     }
 
     // Try shortening bulky tool output before dropping an earlier turn.
@@ -325,7 +359,7 @@ J *context(App *a,J *tools,bool *compacted){
         else add(history.get(),copy(at(a->messages,i)));
     }
     strip_stale_images(history.get());
-    return with_recap(a,history.release(),start,tools);
+    return attach_guide(with_recap(a,history.release(),start,tools));
 }
 J *parse_tool_arguments(const char *text){
     size_t length=strlen(text);
@@ -421,7 +455,8 @@ struct Observation {
     int count=1;
 };
 static bool readonly_probe(const char *name){
-    return !strcmp(name,"read_file")||!strcmp(name,"list_files")||!strcmp(name,"search_text");
+    return !strcmp(name,"read_file")||!strcmp(name,"list_files")||!strcmp(name,"search_text")
+        ||!strcmp(name,"code_outline")||!strcmp(name,"delegate_research");
 }
 static void recovery(App *a,std::vector<FailedOperation> &unresolved,const char *name,J *args,bool failed){
     const char *kind=domain(name),*target=sget(args,"path");
@@ -475,10 +510,12 @@ static J *repeated_result(const std::vector<Observation> &seen,const char *name,
 }
 static void show_call(const char *name,J *args){
     const char *label=!strcmp(name,"read_file")?tr("读取文件"):!strcmp(name,"list_files")?tr("查看目录"):
-        !strcmp(name,"search_text")?tr("搜索文本"):!strcmp(name,"edit_file")?tr("修改文件"):
+        !strcmp(name,"search_text")?tr("搜索文本"):!strcmp(name,"code_outline")?tr("代码大纲"):
+        !strcmp(name,"delegate_research")?tr("调研代码库"):!strcmp(name,"edit_file")?tr("修改文件"):
         !strcmp(name,"write_file")?tr("写入文件"):!strcmp(name,"run_shell")?tr("执行命令"):
         !strcmp(name,"desktop_snapshot")?tr("读取桌面"):tr("操作桌面");
-    const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):sget(args,"app");
+    const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
+        !strcmp(name,"delegate_research")?sget(args,"question"):sget(args,"app");
     const int width=std::max(24,terminal_columns()-6);
     std::string head=std::string(ui_bullet())+" "+label;
     if(*target){
@@ -511,6 +548,14 @@ static void show_result(const char *name,J *r,double elapsed){
         snprintf(text,sizeof text,tr(" · %zu 项"),alen(get(r,"entries")));
         detail=text;
     }
+    else if(!strcmp(name,"code_outline")){
+        snprintf(text,sizeof text,tr(" · %zu 个符号"),alen(get(r,"symbols")));
+        detail=text;
+    }
+    else if(!strcmp(name,"delegate_research")){
+        snprintf(text,sizeof text,tr(" · %d 步"),iget(r,"steps",0));
+        detail=text;
+    }
     else if(get(r,"accepted"))detail=tr(" · 等待重新读取核对");
     char timing[48];
     snprintf(timing,sizeof timing," · %.1fs",elapsed);
@@ -530,6 +575,8 @@ static const char *activity(const char *name){
     if(!strcmp(name,"read_file"))return tr("正在读取文件…");
     if(!strcmp(name,"list_files"))return tr("正在查看目录…");
     if(!strcmp(name,"search_text"))return tr("正在搜索…");
+    if(!strcmp(name,"code_outline"))return tr("正在分析代码结构…");
+    if(!strcmp(name,"delegate_research"))return tr("正在调研代码库…");
     if(!strcmp(name,"write_file")||!strcmp(name,"edit_file"))return tr("正在编辑文件…");
     if(!strcmp(name,"run_shell"))return tr("正在执行命令…");
     return tr("正在操作桌面…");
@@ -570,10 +617,7 @@ int run_task(App *a,const char *task){
     }
     if(!a->messages)reset_session(a);
     size_t history_start=alen(a->messages);
-    J *user=obj();
-    put(user,"role",str("user"));
-    put(user,"content",str(task));
-    add(a->messages,user);
+    add(a->messages,prepare_user_message(a,task));
     history_checkpoint(*a,history_start);
     a->state="执行中";
     a->error[0]=0;
@@ -712,7 +756,8 @@ int run_task(App *a,const char *task){
             if(a->trace){
                 J *entry=obj();
                 put(entry,"name",str(name));
-                const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):sget(args,"app");
+                const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
+                    !strcmp(name,"delegate_research")?sget(args,"question"):sget(args,"app");
                 if(*target)put(entry,"target",str(excerpt(target,240).c_str()));
                 put(entry,"ok",json_object_new_boolean(!failed));
                 if(failed&&*sget(result,"error"))put(entry,"error",str(excerpt(sget(result,"error"),240).c_str()));

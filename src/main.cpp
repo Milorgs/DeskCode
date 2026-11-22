@@ -181,7 +181,7 @@ static const ProviderPreset provider_presets[]={
     {"Ollama 本地模型","ollama","openai","http://127.0.0.1:11434/v1","","ollama"},
 };
 static int number(Tasks &jobs,int maximum,int initial=-1);
-static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial=-1,bool allow_escape=true);
+static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial=-1,bool allow_escape=true,const std::function<void()> &on_resize={});
 // Offer the provider's live model list when it answers, otherwise fall back to
 // typing an ID. Listing models is a free GET and sends no conversation data.
 static bool choose_model_id(App *a,Tasks &jobs,J *candidate,const char *suggestion){
@@ -381,14 +381,14 @@ static std::string request_text(Tasks &jobs,const char *prompt){
     if(!text)recover_interactive_eof();
     return text?text.get():"";
 }
-static std::optional<int> arrow_choice(Tasks &jobs,const std::vector<std::string> &items,int initial=1,bool allow_escape=true){
+static std::optional<int> arrow_choice(Tasks &jobs,const std::vector<std::string> &items,int initial=1,bool allow_escape=true,const std::function<void()> &on_resize={}){
     return terminal_choice(items,initial,content_top,[&]{
         jobs.refresh();
         if(jobs.on_idle)jobs.on_idle();
-    },false,false,allow_escape);
+    },false,false,allow_escape,on_resize);
 }
-static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial,bool allow_escape){
-    if(auto choice=arrow_choice(jobs,items,initial<0?1:initial,allow_escape))return *choice;
+static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial,bool allow_escape,const std::function<void()> &on_resize){
+    if(auto choice=arrow_choice(jobs,items,initial<0?1:initial,allow_escape,on_resize))return *choice;
     for(size_t i=0;i<items.size();i++)menu_printf("  [%zu] %s\n",(i+1)%items.size(),items[i].c_str());
     return number(jobs,static_cast<int>(items.size()-1),initial);
 }
@@ -512,10 +512,8 @@ struct Conversation {
     JsonPtr messages,config;
     int job=0;
     bool reset_context=false;
-#ifndef _WIN32
     std::string draft{};
     int draft_cursor=0;
-#endif
     // Absolute byte position in the worker output already shown, and where
     // the latest turn began; both survive truncation of the output buffer.
     std::uint64_t displayed=0,turn_offset=0;
@@ -559,7 +557,10 @@ static size_t show_conversation_history(App &app,const Conversation &item){
     for(size_t i=0;i<alen(messages);i++){
         J *message=at(messages,i);
         const char *role=sget(message,"role");
-        if(!strcmp(role,"user")){show_user_message(sget(message,"content"));shown++;}
+        if(!strcmp(role,"user")){
+            auto user_text=user_message_text(message);
+            if(!user_text.empty()){show_user_message(user_text);shown++;}
+        }
         else if(!strcmp(role,"assistant")){
             J *content=get(message,"content");
             std::string text;
@@ -625,7 +626,6 @@ static void sync_conversation_models(App &app,std::vector<Conversation> &items){
     }
 }
 
-#ifndef _WIN32
 // Absolute end of a worker's output so far; a turn starting now begins here.
 static std::uint64_t output_end(Tasks &jobs,int job){
     std::uint64_t dropped=0;
@@ -699,11 +699,9 @@ public:
         fflush(stdout);
     }
     ConversationScreen(App &a,Tasks &tasks,std::vector<Conversation> &list):app(a),jobs(tasks),items(list),previous(std::move(tasks.on_idle)){
-        struct winsize size{};
-        pinned=interface_active&&isatty(1)&&!ioctl(1,TIOCGWINSZ,&size)&&size.ws_row>=10&&size.ws_col>=40;
-        const char *term=env_value("TERM");
-        pinned=pinned&&term&&strcmp(term,"dumb");
-        if(pinned){rows=size.ws_row;columns=size.ws_col;content_top=6;printf("\033[2J\033[6;%dr\033[6;1H",rows);}
+        const int height=terminal_rows(),width=terminal_columns();
+        pinned=interface_active&&terminal_supports_ansi()&&height>=10&&width>=40;
+        if(pinned){rows=height;columns=width;content_top=6;printf("\033[2J\033[6;%dr\033[6;1H",rows);}
         composer=false;
         jobs.on_idle=[this]{if(previous)previous();tick();};
         tick();
@@ -716,15 +714,15 @@ public:
         fflush(stdout);
     }
     void tick(){
-        struct winsize size{};
-        const bool resized=pinned&&!ioctl(1,TIOCGWINSZ,&size)&&size.ws_row>0&&size.ws_col>0&&(rows!=size.ws_row||columns!=size.ws_col);
+        const int cur_rows=terminal_rows(),cur_cols=terminal_columns();
+        const bool resized=pinned&&cur_rows>0&&cur_cols>0&&(rows!=cur_rows||columns!=cur_cols);
         if(!resized&&monotime()-checked<0.05){
             if(has_composer()&&!controls_open)draw_composer();
             return;
         }
         checked=monotime();
         if(resized){
-            rows=size.ws_row;columns=size.ws_col;
+            rows=cur_rows;columns=cur_cols;
             if(!overlay)layout();
             last_header.clear();
         }
@@ -988,7 +986,6 @@ public:
         checked=0;tick();return true;
     }
 };
-#endif
 static std::string mcp_paste(Tasks &jobs){
     menu_text(tr("粘贴完整 JSON 后按回车，支持多行。输入空行取消。"));
     std::string text;
@@ -1146,7 +1143,7 @@ static void show_inline_status(const App &app){
         +tr("目录")+": "+app.root+"\n"
         +tr("批准")+": "+permission_name(app)+" · "+tr("推理")+": "+reasoning_name(sget(app.config,"reasoning_effort"));
     if(usage)body+="\n"+std::string(tr("词元"))+": "+token_label(model_tokens(usage.get(),app.config));
-    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-4,36),92):72;
+    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):72;
     std::string box=ui_box(tr("DeskCode 状态"),body,width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
@@ -1158,8 +1155,8 @@ static void show_inline_status(const App &app){
     terminal_message(out);
 }
 static void show_inline_help(){
-    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-4,36),92):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 选择模型 · F3 思考强度\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 选择模型 · F3 思考强度 · /paste 粘贴剪贴板图片\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · Alt+Enter 插入换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1177,21 +1174,12 @@ static void show_welcome(){
     for(const char *example:{"梳理这个项目的结构、入口和构建方式","运行测试，找出失败原因并修复","给 README 补一段安装与使用说明"}){
         text+="    "+ui_paint(Tone::Accent,"›")+" "+ui_paint(Tone::Dim,tr(example))+"\n";
     }
-    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · F2 模型 · F3 思考强度 · 滚轮/PgUp/PgDn 滚动 · Ctrl+D 返回列表"))+"\n";
+    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · @+Tab 选文件 · /paste 贴图 · F2 模型 · F3 思考强度 · Ctrl+D 返回"))+"\n";
     terminal_message(text);
 }
-static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
-#ifndef _WIN32
-    ,ConversationScreen *screen=nullptr
-#endif
-){
-#ifndef _WIN32
+static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,ConversationScreen *screen=nullptr){
     if(screen)screen->select(conversation);
-#endif
-#ifndef _WIN32
-    if(!screen||!screen->has_composer())
-#endif
-    clear_page();
+    if(!screen||!screen->has_composer())clear_page();
     if(conversation)chat_title(*a,*conversation);
     show_notice();
     // Orientation is one dim line, once per run, above any restored history.
@@ -1214,9 +1202,8 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             J *messages=get(record.get(),"transcript");
             for(size_t i=0;i<alen(messages);i++){
                 J *message=at(messages,i);
-                J *content=get(message,"content");
-                if(strcmp(sget(message,"role"),"user")||!json_object_is_type(content,json_type_string))continue;
-                std::string text=json_object_get_string(content);
+                if(strcmp(sget(message,"role"),"user"))continue;
+                std::string text=user_message_text(message);
                 if(!text.empty()&&(conversation->prompts.empty()||conversation->prompts.back()!=text))
                     conversation->prompts.push_back(std::move(text));
             }
@@ -1229,22 +1216,18 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
         prompts->push_back(text);
         if(prompts->size()>200)prompts->erase(prompts->begin());
     };
-#ifndef _WIN32
     if(conversation){
         draft.text=std::move(conversation->draft);
         draft.cursor=conversation->draft_cursor;
     }
     if(guided&&screen&&conversation)draft.approval_pending=[&]{return screen->awaiting_approval(*conversation);};
-#endif
     std::string last_model,last_modes;
     for(;;){
         if(input_closed||interrupted==SIGTERM)return false;
         if(interrupted==SIGINT)interrupted=0;
-        // Without the pinned composer (pipes, narrow windows, Windows) the modes
-        // have no home, so print them inline as before.
-#ifndef _WIN32
+        // Without the pinned composer (pipes, narrow windows) the modes have
+        // no home, so print them inline as before.
         if(!screen||!screen->has_composer())
-#endif
         {
             std::string model=sget(a->config,"model");
             std::string modes=std::string(language_code())+" "+reasoning_name(sget(a->config,"reasoning_effort"))+" "+permission_name(*a);
@@ -1259,7 +1242,6 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
                 last_modes=std::move(modes);
             }
         }
-#ifndef _WIN32
         const bool composer=screen&&screen->has_composer();
         if(composer){
             // Park the cursor on the frame's input row; draw_composer paints the
@@ -1303,18 +1285,72 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             screen->refresh_composer();
             continue;
         }
-#else
-        const char *prompt=tr("❯ ");
-        std::unique_ptr<char,decltype(&free)> line(guided?editable_input(prompt,nullptr,false,[&]{
-            jobs.refresh();
-            if(jobs.on_idle)jobs.on_idle();
-        },&draft):jobs.readline(prompt),free);
-#endif
+        if(draft.complete_file){
+            draft.complete_file=false;
+            const size_t cur=std::min(draft.text.size(),static_cast<size_t>(std::max(0,draft.cursor)));
+            size_t at_pos=0;
+            std::string query;
+            if(find_at_mention(draft.text,cur,at_pos,query)){
+                auto matches=workspace_complete_files(*a,query,9);
+                auto apply_choice=[&](const std::string &rel){
+                    std::string token=rel.find(' ')!=std::string::npos?"@\""+rel+"\" ":"@"+rel+" ";
+                    draft.text.replace(at_pos,cur-at_pos,token);
+                    draft.cursor=static_cast<int>(at_pos+token.size());
+                };
+                if(matches.empty()){
+                    terminal_message(ui_paint(Tone::Dim,std::string("  ")+tr("没有匹配的工作区文件。"))+"\n");
+                }else if(matches.size()==1){
+                    apply_choice(matches[0]);
+                }else{
+                    if(screen){screen->controls_open=true;screen->begin_overlay();}
+                    clear_page();
+                    const auto heading=ui_clip(tr("选择要引用的文件"),std::max(1,terminal_columns()-4));
+                    printf("  %s\n",ui_paint(Tone::Plain,heading,true).c_str());
+                    std::vector<std::string> options=matches;
+                    options.emplace_back(tr("返回输入"));
+                    auto picked=terminal_choice(options,1,content_top+1,[&]{
+                        jobs.refresh();
+                        if(jobs.on_idle)jobs.on_idle();
+                    },true,false,true);
+                    if(!picked){
+                        for(size_t i=0;i<options.size();i++){
+                            auto num=ui_number("["+std::to_string((i+1)%options.size())+"]");
+                            printf("  %s %s\n",num.c_str(),options[i].c_str());
+                        }
+                        picked=number(jobs,static_cast<int>(options.size()-1),0);
+                    }
+                    if(screen){screen->end_overlay();screen->controls_open=false;}
+                    else{
+                        clear_page();
+                        if(conversation)chat_title(*a,*conversation);
+                        if(conversation)show_conversation_history(*a,*conversation);
+                        last_modes.clear();
+                    }
+                    if(picked&&*picked>=1&&static_cast<size_t>(*picked)<=matches.size())
+                        apply_choice(matches[static_cast<size_t>(*picked-1)]);
+                }
+            }
+            continue;
+        }
+        if(draft.paste_image){
+            draft.paste_image=false;
+            a->error[0]=0;
+            std::string clip_token=capture_clipboard_image(*a);
+            if(clip_token.empty()){
+                terminal_message(ui_paint(Tone::Warning,std::string("  ")+a->error)+"\n");
+                a->error[0]=0;
+            }else{
+                const size_t cur=std::min(draft.text.size(),static_cast<size_t>(std::max(0,draft.cursor)));
+                std::string ins=(cur>0&&draft.text[cur-1]!=' ')?(" "+clip_token+" "):(clip_token+" ");
+                draft.text.insert(cur,ins);
+                draft.cursor=static_cast<int>(cur+ins.size());
+                terminal_message(ui_paint(Tone::Accent,std::string("  ")+tr("已从剪贴板附带图片，继续输入说明后按回车发送。"))+"\n");
+            }
+            continue;
+        }
         if(!line){
             if(interrupted==SIGINT&&!input_closed){
-#ifndef _WIN32
                 if(screen&&conversation){conversation->queue.clear();jobs.cancel(conversation->job);}
-#endif
                 continue;
             }
             return false;
@@ -1342,12 +1378,27 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
         if(trimmed=="/status"){local_action(5);continue;}
         if(trimmed=="/help"){local_action(6);continue;}
         if(trimmed=="/clear"){local_action(4);continue;}
+        if(trimmed=="/paste"||trimmed.starts_with("/paste ")){
+            a->error[0]=0;
+            std::string clip_token=capture_clipboard_image(*a);
+            if(clip_token.empty()){
+                terminal_message(ui_paint(Tone::Warning,std::string("  ")+a->error)+"\n");
+                a->error[0]=0;
+                continue;
+            }
+            if(trimmed=="/paste"){
+                draft.text=clip_token+" ";
+                draft.cursor=static_cast<int>(draft.text.size());
+                terminal_message(ui_paint(Tone::Accent,std::string("  ")+tr("已从剪贴板附带图片，继续输入说明后按回车发送。"))+"\n");
+                continue;
+            }
+            task=clip_token+" "+trimmed.substr(7);
+            trimmed=task;
+        }
         if(trimmed=="/"||trimmed=="/model"||trimmed=="/reasoning"||trimmed=="/approval"||trimmed=="/perm"||trimmed=="/mcp"||trimmed=="/new"){
             size_t revision=a->session_revision,config_revision=a->config_revision;
             a->error[0]=0;
-#ifndef _WIN32
             if(screen&&trimmed!="/new"){screen->controls_open=true;screen->begin_overlay();}
-#endif
             int selected=1,action=0;
             if(trimmed=="/model")select_model(a,jobs);
             else if(trimmed=="/reasoning")reasoning_menu(a,jobs);
@@ -1358,9 +1409,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
                 selected=chat_menu(a,jobs);
                 if(selected>=4){action=selected;selected=1;}
             }
-#ifndef _WIN32
             if(screen&&trimmed!="/new"){screen->end_overlay();screen->controls_open=false;}
-#endif
             if(conversation){
                 if(revision!=a->session_revision)conversation->reset_context=true;
                 if(config_revision!=a->config_revision)
@@ -1372,14 +1421,12 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             }
             if(selected<0||selected==2)return false;
             if(selected==3){if(conversation)return true;reset_session(a);}
-#ifndef _WIN32
             if(screen&&screen->has_composer()){
                 if(a->error[0])terminal_message(std::string(a->error)+"\n");
                 show_notice();
                 local_action(action);
                 continue;
             }
-#endif
             clear_page();
             if(a->error[0])fprintf(stderr,"%s\n",a->error);
             if(conversation)chat_title(*a,*conversation);
@@ -1388,9 +1435,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             // worker printed while the menu was up follows from the job output.
             if(conversation)show_conversation_history(*a,*conversation);
             local_action(action);
-#ifndef _WIN32
             if(screen)screen->refresh_composer();
-#endif
             last_modes.clear();
             continue;
         }
@@ -1398,7 +1443,6 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             if(conversation->title.empty())conversation->title=conversation_title(task,true);
             persist_conversation(*a,*conversation);
         }
-#ifndef _WIN32
         if(screen&&conversation){
             // Guided approvals have their own choice row; there a lone digit
             // is an ordinary request and never answers a pending approval.
@@ -1407,7 +1451,6 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr
             if(!screen->submit(*conversation,task))screen->report_error();
             continue;
         }
-#endif
         remember(task);
         if(run_task(a,task.c_str())&&!input_closed)fprintf(stderr,"%s\n",a->error);
     }
@@ -1439,9 +1482,7 @@ static void show_banner(const App &app){
     page_rule();
 }
 static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &items,int start_mode=0){
-#ifndef _WIN32
     ConversationScreen screen(*a,jobs,items);
-#endif
     // start_mode: 0 show the list, 1 open a new chat, 2 resume the latest one.
     bool new_chat=start_mode==1,resume=start_mode==2;
     while(interrupted!=SIGTERM&&!input_closed){
@@ -1523,13 +1564,9 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         a->auto_edit=item.auto_edit;
         json_object_put(a->config);a->config=copy(item.config.get());
         a->state="等待任务";
-        #ifndef _WIN32
         screen.reopen(item);
         new_chat=chat(a,jobs,&item,&screen);
         screen.select(nullptr);
-#else
-        new_chat=chat(a,jobs,&item);
-#endif
         item.messages.reset(a->messages);a->messages=previous.release();
         item.config.reset(copy(a->config));
         item.yes=a->yes;
@@ -1576,69 +1613,72 @@ static int menu(App *a,int start_mode=0){
             sync_conversation_models(*a,conversations);
             synced_config=a->config_revision;
         }
-#ifndef _WIN32
         advance_conversations(jobs,conversations);
-#endif
     };
     if(start_mode)conversation_menu(a,jobs,conversations,start_mode);
     for(;;){
         if(input_closed)return 0;
-        clear_page();
-        show_banner(*a);
-        show_notice();
-        if(!notice.empty()){puts(notice.c_str());notice.clear();}
-        menu_text(tr("  已导入的模型"));
         JsonPtr usage(load_tokens(*a));
         J *profiles=get(a->store,"profiles");
         const char *active_model=sget(a->config,"model");
         const char *active_profile=sget(a->config,"profile");
         const bool first_run=!json_object_object_length(profiles)&&!*active_model;
-        bool active_listed=false;
-        if(!json_object_object_length(profiles))menu_text(tr("    暂无已导入的模型"));
-        else{
-            size_t index=1;
-            json_object_object_foreach(profiles,name,profile){
-                const char *model=sget(profile,"model");
-                bool current=*active_model&&!strcmp(name,active_profile)&&!strcmp(model,active_model);
-                if(env_value("DESK_CONTRAST_NUMBERS")){
-                    const Tone tone=current?Tone::Accent:Tone::Plain;
-                    std::string row="    "+ui_number(std::to_string(index++)+".",tone)
-                        +ui_paint(tone," "+std::string(model),!current);
-                    if(usage){
-                        row+=ui_paint(tone," · ");
-                        row+=ui_number(token_label(model_tokens(usage.get(),profile)),tone);
-                        row+=ui_paint(tone,tr(" 词元"),!current);
+        std::string current_notice=notice;
+        notice.clear();
+        auto draw_home=[&]{
+            clear_page();
+            show_banner(*a);
+            show_notice();
+            if(!current_notice.empty())puts(current_notice.c_str());
+            menu_text(tr("  已导入的模型"));
+            bool active_listed=false;
+            if(!json_object_object_length(profiles))menu_text(tr("    暂无已导入的模型"));
+            else{
+                size_t index=1;
+                json_object_object_foreach(profiles,name,profile){
+                    const char *model=sget(profile,"model");
+                    bool current=*active_model&&!strcmp(name,active_profile)&&!strcmp(model,active_model);
+                    if(env_value("DESK_CONTRAST_NUMBERS")){
+                        const Tone tone=current?Tone::Accent:Tone::Plain;
+                        std::string row="    "+ui_number(std::to_string(index++)+".",tone)
+                            +ui_paint(tone," "+std::string(model),!current);
+                        if(usage){
+                            row+=ui_paint(tone," · ");
+                            row+=ui_number(token_label(model_tokens(usage.get(),profile)),tone);
+                            row+=ui_paint(tone,tr(" 词元"),!current);
+                        }
+                        if(current)row+=ui_paint(tone,tr(" · 当前"));
+                        puts(row.c_str());
+                        if(current)active_listed=true;
+                        continue;
                     }
-                    if(current)row+=ui_paint(tone,tr(" · 当前"));
-                    puts(row.c_str());
+                    char row[640];
+                    int used=snprintf(row,sizeof row,"    %zu. %s",index++,model);
+                    if(usage&&used>0&&used<(int)sizeof row)used+=snprintf(row+used,sizeof row-(size_t)used,tr(" · %s 词元"),token_label(model_tokens(usage.get(),profile)).c_str());
+                    if(current&&used>0&&used<(int)sizeof row)snprintf(row+used,sizeof row-(size_t)used,"%s",tr(" · 当前"));
+                    // The active profile reads as accent; the rest stay quiet.
+                    puts(current?ui_paint(Tone::Accent,row).c_str():ui_paint(Tone::Dim,row).c_str());
                     if(current)active_listed=true;
-                    continue;
                 }
-                char row[640];
-                int used=snprintf(row,sizeof row,"    %zu. %s",index++,model);
-                if(usage&&used>0&&used<(int)sizeof row)used+=snprintf(row+used,sizeof row-(size_t)used,tr(" · %s 词元"),token_label(model_tokens(usage.get(),profile)).c_str());
-                if(current&&used>0&&used<(int)sizeof row)snprintf(row+used,sizeof row-(size_t)used,"%s",tr(" · 当前"));
-                // The active profile reads as accent; the rest stay quiet.
-                puts(current?ui_paint(Tone::Accent,row).c_str():ui_paint(Tone::Dim,row).c_str());
-                if(current)active_listed=true;
             }
-        }
-        if(!active_listed){
-            if(*active_model){
-                printf(tr("  当前模型：%s\n"),active_model);
-                show_token_usage(usage.get(),a->config);
-            }else menu_text(tr("  当前模型：未配置"));
-        }
-        if(!usage&&(active_listed||!*active_model))menu_text(tr("  无法读取累计词元用量。"));
-        if(first_run){
-            putchar('\n');
-            const int columns=terminal_columns();
-            const int width=columns>12?std::min(columns-4,96):96;
-            for(const auto &line:ui_wrap(tr("首次使用：选择「添加模型」，内置 DeepSeek、Kimi、通义千问、智谱、OpenRouter、Ollama 等预设，填入 API Key 即可开始。"),width))
-                puts(("  "+ui_paint(Tone::Accent,line)).c_str());
-        }
-        page_rule();
-        int choice=arrow_menu(jobs,{tr("开始对话"),tr("选择模型"),tr("添加模型"),tr("MCP 服务"),tr("设置"),tr("退出")},first_run?3:-1,false);
+            if(!active_listed){
+                if(*active_model){
+                    printf(tr("  当前模型：%s\n"),active_model);
+                    show_token_usage(usage.get(),a->config);
+                }else menu_text(tr("  当前模型：未配置"));
+            }
+            if(!usage&&(active_listed||!*active_model))menu_text(tr("  无法读取累计词元用量。"));
+            if(first_run){
+                putchar('\n');
+                const int columns=terminal_columns();
+                const int width=columns>12?std::min(columns-4,96):96;
+                for(const auto &line:ui_wrap(tr("首次使用：选择「添加模型」，内置 DeepSeek、Kimi、通义千问、智谱、OpenRouter、Ollama 等预设，填入 API Key 即可开始。"),width))
+                    puts(("  "+ui_paint(Tone::Accent,line)).c_str());
+            }
+            page_rule();
+        };
+        draw_home();
+        int choice=arrow_menu(jobs,{tr("开始对话"),tr("选择模型"),tr("添加模型"),tr("MCP 服务"),tr("设置"),tr("退出")},first_run?3:-1,false,draw_home);
         if(choice<0){if(interrupted==SIGINT&&!input_closed)continue;return 0;}
         if(!choice)return 0;
         int rc=0;
