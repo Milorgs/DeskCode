@@ -4,6 +4,7 @@
 #include "ui.hpp"
 #include <curl/curl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <arpa/inet.h>
