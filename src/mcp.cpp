@@ -7,12 +7,17 @@
 #include <cstring>
 #include <map>
 #include <stdexcept>
-#ifndef _WIN32
+#ifdef _WIN32
+#include "windows/win.hpp"
+#else
 #include <fcntl.h>
 #include <poll.h>
+#ifdef __linux__
 #include <sys/prctl.h>
+#endif
 #include <sys/wait.h>
 #include <unistd.h>
+extern char **environ;
 #endif
 
 namespace {
@@ -70,9 +75,6 @@ void validate(J *servers){
             if(!ok)throw Failure("MCP URL must use HTTPS, or HTTP on localhost, without embedded credentials or a fragment.");
         }else{
             if(!string_value(get(entry,"command")))throw Failure("MCP stdio requires a command.");
-#ifdef _WIN32
-            throw Failure("MCP stdio is currently supported on Linux. Use a remote MCP URL on Windows.");
-#endif
             J *args=get(entry,"args");
             if(args&&!json_object_is_type(args,json_type_array))throw Failure("MCP args must be an array of strings.");
             for(size_t i=0;i<alen(args);i++)if(!string_value(at(args,i),true))throw Failure("Invalid MCP command argument.");
@@ -101,28 +103,39 @@ struct Client {
     JsonPtr config;
     CurlHandle http_handle{};
     long next_id=0;
-#ifndef _WIN32
+    std::string pending;
+#ifdef _WIN32
+    WinHandle job{},child_proc{},input_pipe{},output_pipe{};
+#else
     pid_t child=-1;
     int input=-1,output=-1;
-    std::string pending;
 #endif
     Client(App &a,const char *n,J *c):app(a),name(n),config(copy(c)){}
     bool healthy(){
         if(*sget(config.get(),"url"))return !session.empty()||version.empty();
-#ifndef _WIN32
+#ifdef _WIN32
+        if(!child_proc||!input_pipe||!output_pipe)return false;
+        return WaitForSingleObject(child_proc.get(),0)==WAIT_TIMEOUT;
+#else
         if(child<=0||input<0||output<0)return false;
         int status=0;
         pid_t ended=waitpid(child,&status,WNOHANG);
         if(ended==0)return true;
         if(ended==child)child=-1;
         return false;
-#else
-        return false;
 #endif
     }
     ~Client(){
         close_remote();
-#ifndef _WIN32
+#ifdef _WIN32
+        input_pipe.reset();
+        output_pipe.reset();
+        if(child_proc&&WaitForSingleObject(child_proc.get(),0)==WAIT_TIMEOUT){
+            if(job)TerminateJobObject(job.get(),1);
+            else TerminateProcess(child_proc.get(),1);
+            WaitForSingleObject(child_proc.get(),500);
+        }
+#else
         if(input>=0)close(input);
         if(output>=0)close(output);
         if(child>0){
@@ -167,11 +180,146 @@ struct Client {
         if(interrupted)throw Failure("MCP operation cancelled.");
         if(monotime()>until)throw Failure("MCP operation timed out. The operation was not automatically repeated.");
     }
-#ifndef _WIN32
+#ifdef _WIN32
     void start(){
+        WinHandle child_in,child_out;
+        if(!win_pipe(child_in,input_pipe))throw Failure("Could not create MCP input pipe.");
+        if(!win_pipe(output_pipe,child_out)){input_pipe.reset();throw Failure("Could not create MCP output pipe.");}
+        SetHandleInformation(input_pipe.get(),HANDLE_FLAG_INHERIT,0);
+        SetHandleInformation(output_pipe.get(),HANDLE_FLAG_INHERIT,0);
+        SECURITY_ATTRIBUTES attr{sizeof attr,nullptr,TRUE};
+        WinHandle sink(CreateFileW(L"NUL",GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,&attr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+        if(!sink){input_pipe.reset();output_pipe.reset();throw Failure("Could not open NUL device.");}
+
+        std::wstring raw_cmd=wide(sget(config.get(),"command"));
+        std::wstring resolved_exe;
+        bool is_batch=false;
+        auto probe_ext=[&](const wchar_t *ext)->bool{
+            wchar_t buf[32768];
+            DWORD n=SearchPathW(nullptr,raw_cmd.c_str(),ext,32768,buf,nullptr);
+            if(n>0&&n<32768){resolved_exe.assign(buf,n);return true;}
+            return false;
+        };
+        if(probe_ext(nullptr)||probe_ext(L".exe")||probe_ext(L".cmd")||probe_ext(L".bat")){
+            std::wstring low=resolved_exe;
+            for(wchar_t &c:low)c=static_cast<wchar_t>(towlower(c));
+            is_batch=low.ends_with(L".cmd")||low.ends_with(L".bat");
+        }else{
+            input_pipe.reset();output_pipe.reset();
+            throw Failure("Could not find MCP server command.");
+        }
+
+        std::wstring cmdline=quote_arg(resolved_exe);
+        J *args=get(config.get(),"args");
+        for(size_t i=0;i<alen(args);i++)cmdline+=L" "+quote_arg(wide(json_object_get_string(at(args,i))));
+        std::wstring app_exe=resolved_exe;
+        if(is_batch){
+            const char *comspec=env_value("ComSpec");
+            app_exe=comspec&&*comspec?wide(comspec):L"C:\\Windows\\System32\\cmd.exe";
+            cmdline=quote_arg(app_exe)+L" /d /s /c \""+cmdline+L"\"";
+        }
+
+        std::map<std::wstring,std::wstring> env_map;
+        for(const char *key:{"PATH","PATHEXT","SystemRoot","SystemDrive","ComSpec","USERPROFILE","APPDATA","LOCALAPPDATA","TEMP","TMP","HOMEDRIVE","HOMEPATH"})
+            if(const char *val=env_value(key))env_map[wide(key)]=wide(val);
+        J *env=get(config.get(),"env");
+        if(env){json_object_object_foreach(env,key,val){env_map[wide(key)]=wide(json_object_get_string(val));}}
+        std::vector<wchar_t> env_block;
+        for(const auto &[k,v]:env_map){
+            std::wstring entry=k+L"="+v;
+            env_block.insert(env_block.end(),entry.begin(),entry.end());
+            env_block.push_back(0);
+        }
+        env_block.push_back(0);
+        if(env_block.size()==1)env_block.push_back(0);
+
+        std::string cwd=sget(config.get(),"cwd");
+        if(cwd.empty())cwd=app.root;
+        std::wstring cwd_w=wide(cwd);
+
+        job=kill_job();
+        if(!job){input_pipe.reset();output_pipe.reset();throw Failure("Could not create MCP job object.");}
+        std::vector<HANDLE> inherit{child_in.get(),child_out.get(),sink.get()};
+        SIZE_T attr_bytes=0;
+        InitializeProcThreadAttributeList(nullptr,1,0,&attr_bytes);
+        std::vector<unsigned char> storage(attr_bytes);
+        auto *attr_list=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+        if(!InitializeProcThreadAttributeList(attr_list,1,0,&attr_bytes)
+           ||!UpdateProcThreadAttribute(attr_list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherit.data(),inherit.size()*sizeof(HANDLE),nullptr,nullptr)){
+            if(attr_list)DeleteProcThreadAttributeList(attr_list);
+            input_pipe.reset();output_pipe.reset();
+            throw Failure("Could not configure MCP stdio handles.");
+        }
+        STARTUPINFOEXW si{};
+        si.StartupInfo.cb=sizeof si;
+        si.StartupInfo.dwFlags=STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput=child_in.get();
+        si.StartupInfo.hStdOutput=child_out.get();
+        si.StartupInfo.hStdError=sink.get();
+        si.lpAttributeList=attr_list;
+        PROCESS_INFORMATION pi{};
+        BOOL created=CreateProcessW(app_exe.c_str(),cmdline.data(),nullptr,nullptr,TRUE,
+            EXTENDED_STARTUPINFO_PRESENT|CREATE_UNICODE_ENVIRONMENT|CREATE_NO_WINDOW|CREATE_SUSPENDED,
+            env_block.data(),cwd_w.empty()?nullptr:cwd_w.c_str(),&si.StartupInfo,&pi);
+        DeleteProcThreadAttributeList(attr_list);
+        if(!created){input_pipe.reset();output_pipe.reset();throw Failure("Could not launch MCP server.");}
+        WinHandle proc(pi.hProcess),thr(pi.hThread);
+        if(!AssignProcessToJobObject(job.get(),proc.get())||ResumeThread(thr.get())==static_cast<DWORD>(-1)){
+            TerminateProcess(proc.get(),1);WaitForSingleObject(proc.get(),1000);
+            input_pipe.reset();output_pipe.reset();
+            throw Failure("Could not start MCP server process.");
+        }
+        child_proc=std::move(proc);
+    }
+    void write_message(J *message,double until){
+        check(until);
+        std::string bytes=encoded(message)+"\n";
+        if(!win_write(input_pipe.get(),bytes))throw Failure("MCP server closed its input.");
+    }
+    JsonPtr read_message(double until){
+        for(;;){
+            check(until);
+            auto end=pending.find('\n');
+            if(end!=std::string::npos){
+                auto line=pending.substr(0,end);
+                if(!line.empty()&&line.back()=='\r')line.pop_back();
+                pending.erase(0,end+1);
+                return parsed(line);
+            }
+            DWORD available=0;
+            if(!PeekNamedPipe(output_pipe.get(),nullptr,0,nullptr,&available,nullptr))
+                throw Failure("MCP server closed its output. Check the command and its dependencies.");
+            if(!available){
+                if(WaitForSingleObject(child_proc.get(),20)!=WAIT_TIMEOUT){
+                    DWORD rem=0;
+                    if(!PeekNamedPipe(output_pipe.get(),nullptr,0,nullptr,&rem,nullptr)||!rem)
+                        throw Failure("MCP server closed its output. Check the command and its dependencies.");
+                }
+                continue;
+            }
+            char bytes[8192];
+            DWORD count=0;
+            if(!ReadFile(output_pipe.get(),bytes,(std::min)(available,static_cast<DWORD>(sizeof bytes)),&count,nullptr)||!count)
+                throw Failure("MCP server closed its output. Check the command and its dependencies.");
+            pending.append(bytes,count);
+            if(pending.size()>RESPONSE_LIMIT)throw Failure("MCP response exceeds the size limit.");
+        }
+    }
+#else
+    void start(){
+        auto cloexec_pipe=[](int fds[2])->int{
+#ifdef __linux__
+            return pipe2(fds,O_CLOEXEC);
+#else
+            if(pipe(fds)!=0)return -1;
+            fcntl(fds[0],F_SETFD,FD_CLOEXEC);
+            fcntl(fds[1],F_SETFD,FD_CLOEXEC);
+            return 0;
+#endif
+        };
         int to_child[2],from_child[2];
-        if(pipe2(to_child,O_CLOEXEC))throw Failure("Could not create MCP input pipe.");
-        if(pipe2(from_child,O_CLOEXEC)){close(to_child[0]);close(to_child[1]);throw Failure("Could not create MCP output pipe.");}
+        if(cloexec_pipe(to_child))throw Failure("Could not create MCP input pipe.");
+        if(cloexec_pipe(from_child)){close(to_child[0]);close(to_child[1]);throw Failure("Could not create MCP output pipe.");}
         std::vector<std::string> arguments{sget(config.get(),"command")};
         J *args=get(config.get(),"args");for(size_t i=0;i<alen(args);i++)arguments.emplace_back(json_object_get_string(at(args,i)));
         std::vector<char *> argv;for(auto &arg:arguments)argv.push_back(arg.data());argv.push_back(nullptr);
@@ -181,14 +329,23 @@ struct Client {
         for(const char *key:{"PATH","HOME","LANG","LC_ALL","TMPDIR","XDG_RUNTIME_DIR","DISPLAY","XAUTHORITY","WAYLAND_DISPLAY"})if(const char *value=env_value(key))environment[key]=value;
         J *env=get(config.get(),"env");if(env){json_object_object_foreach(env,key,value){environment[key]=json_object_get_string(value);}}
         std::string cwd=sget(config.get(),"cwd");if(cwd.empty())cwd=app.root;
-        pid_t parent=getpid();child=fork();
+#ifdef __linux__
+        pid_t parent=getpid();
+#endif
+        child=fork();
         if(child==0){
             signal(SIGINT,SIG_DFL);signal(SIGTERM,SIG_DFL);signal(SIGPIPE,SIG_DFL);
-            if(setpgid(0,0)||prctl(PR_SET_PDEATHSIG,SIGTERM)||getppid()!=parent||chdir(cwd.c_str()))_exit(126);
+            if(setpgid(0,0)
+#ifdef __linux__
+               ||prctl(PR_SET_PDEATHSIG,SIGTERM)||getppid()!=parent
+#endif
+               ||chdir(cwd.c_str()))_exit(126);
             int sink=open("/dev/null",O_WRONLY);
             if(sink<0||dup2(to_child[0],0)<0||dup2(from_child[1],1)<0||dup2(sink,2)<0)_exit(126);
             close(to_child[0]);close(to_child[1]);close(from_child[0]);close(from_child[1]);if(sink>2)close(sink);
-            clearenv();for(const auto &[key,value]:environment)setenv(key.c_str(),value.c_str(),1);
+            static char *empty_env[]={nullptr};
+            environ=empty_env;
+            for(const auto &[key,value]:environment)setenv(key.c_str(),value.c_str(),1);
             execvp(argv[0],argv.data());_exit(127);
         }
         close(to_child[0]);close(from_child[1]);
@@ -322,7 +479,6 @@ struct Client {
         long id=++next_id;if(!notification)put(message.get(),"id",json_object_new_int64(id));if(params)put(message.get(),"params",copy(params));
         JsonPtr response;
         if(*sget(config.get(),"url"))response=http(message.get(),id,notification);
-#ifndef _WIN32
         else{
             double until=monotime()+iget(config.get(),"timeoutMs",60000)/1000.0;
             write_message(message.get(),until);if(notification)return JsonPtr(obj());
@@ -337,7 +493,6 @@ struct Client {
                 response.reset();
             }
         }
-#endif
         if(notification)return JsonPtr(obj());
         if(!response||!json_object_is_type(get(response.get(),"id"),json_type_int)||json_object_get_int64(get(response.get(),"id"))!=id)throw Failure("MCP response did not match the request ID.");
         if(get(response.get(),"error"))throw Failure("MCP server rejected "+std::string(method)+" (JSON-RPC "+std::to_string(iget(get(response.get(),"error"),"code",0))+").");
@@ -349,9 +504,7 @@ struct Client {
             // Launching a server the user already configured is part of starting
             // the tool, not a new operation to confirm on every request. Tool
             // calls themselves still go through approve() in mcp_call().
-#ifndef _WIN32
             start();
-#endif
         }
         // Only the manual "test connection" dialog needs a progress line; a
         // normal message reconnects each time and the notice is just noise.

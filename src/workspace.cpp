@@ -63,7 +63,7 @@ std::string base64_encode(const void *data,size_t len){
     return out;
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 std::string base64_decode(std::string_view encoded){
     std::string clean;
     clean.reserve(encoded.size());
@@ -79,7 +79,8 @@ std::string base64_decode(std::string_view encoded){
     out.resize(static_cast<size_t>(decoded)-pad);
     return out;
 }
-#else
+#endif
+#ifndef _WIN32
 std::string run_clipboard_tool(const char *const argv[],bool &tool_present){
     int pipefd[2];
     if(pipe(pipefd)!=0)return {};
@@ -610,6 +611,8 @@ std::vector<std::string> workspace_complete_files(const App &app,std::string_vie
     std::vector<Candidate> matches;
     const std::string q=lower_ascii(query);
     const fs::path root=fs_path(app.root);
+    GitIgnore gitignore;
+    gitignore.load(app.root);
     std::error_code cfg_ec;
     const fs::path cfg=fs::weakly_canonical(fs_path(app.config_dir),cfg_ec);
     const double deadline=monotime()+1.5;
@@ -653,11 +656,12 @@ std::vector<std::string> workspace_complete_files(const App &app,std::string_vie
             std::error_code st_ec;
             auto st=fs::symlink_status(entry,st_ec);
             if(st_ec)continue;
+            std::string rel=path_text(entry.lexically_relative(root));
+            if(!rel.empty()&&gitignore.ignored(rel,fs::is_directory(st)))continue;
             if(fs::is_directory(st)){
                 self(self,entry,depth+1);
             }else if(fs::is_regular_file(st)){
                 visited++;
-                std::string rel=path_text(entry.lexically_relative(root));
                 if(rel.empty())continue;
                 int s=score_path(rel,depth);
                 if(s>=0)matches.push_back({s,std::move(rel)});
@@ -698,6 +702,15 @@ std::string capture_clipboard_image(App &app){
             "[Convert]::ToBase64String($ms.ToArray())}\"",5000));
         if(res&&iget(res.get(),"exit_code",-1)==0&&*sget(res.get(),"output"))
             raw=base64_decode(sget(res.get(),"output"));
+#elif defined(__APPLE__)
+        const char *argv[]={"osascript","-e",
+            "use framework \"AppKit\"\n"
+            "set pb to current application's NSPasteboard's generalPasteboard()\n"
+            "set d to pb's dataForType:(current application's NSPasteboardTypePNG)\n"
+            "if d is missing value then return \"\"\n"
+            "return (d's base64EncodedStringWithOptions:0) as text",nullptr};
+        std::string b64=run_clipboard_tool(argv,tool_present);
+        if(!b64.empty())raw=base64_decode(b64);
 #else
         if(const char *wayland=env_value("WAYLAND_DISPLAY");wayland&&*wayland){
             for(const char *mime:{"image/png","image/jpeg","image/webp"}){
@@ -904,16 +917,21 @@ std::string load_project_guide(const App &app){
     if(disabled&&*disabled&&strcmp(disabled,"0")!=0)return {};
     if(!*app.root)return {};
     std::string combined;
-    for(const char *name:{"AGENTS.md","CLAUDE.md"}){
+    std::vector<fs::path> loaded_paths;
+    auto try_load=[&](const char *name){
         fs::path candidate=fs_path(app.root)/name;
-        if(path_link(candidate))continue;
+        if(path_link(candidate))return;
         std::error_code ec;
         auto st=fs::symlink_status(candidate,ec);
-        if(ec||!fs::is_regular_file(st))continue;
+        if(ec||!fs::is_regular_file(st))return;
+        for(const auto &prev:loaded_paths){
+            std::error_code eq_ec;
+            if(fs::equivalent(prev,candidate,eq_ec)&&!eq_ec)return;
+        }
         size_t len=0;
         std::string full=path_text(candidate);
         char *bytes=read_bytes(full.c_str(),FILE_LIMIT,&len);
-        if(!bytes)continue;
+        if(!bytes)return;
         if(len&&!memchr(bytes,0,len)&&valid_utf8(std::string_view(bytes,len))){
             size_t room=combined.size()<MAX_PROJECT_GUIDE?MAX_PROJECT_GUIDE-combined.size():0;
             if(room>64){
@@ -925,10 +943,13 @@ std::string load_project_guide(const App &app){
                 combined+="):\n";
                 combined.append(bytes,take);
                 if(take<len)combined+="\n…";
+                loaded_paths.push_back(candidate);
             }
         }
         free(bytes);
-    }
+    };
+    for(const char *name:{"DESKCODE.md","deskcode.md","AGENTS.md","agents.md"})try_load(name);
+    if(combined.empty())try_load("CLAUDE.md");
     return combined;
 }
 
@@ -985,6 +1006,8 @@ J *tool_code_outline(App *app,J *args){
     }
 
     if(!fs::is_directory(st))return err(tr("无法读取目标路径。"));
+    GitIgnore gitignore;
+    gitignore.load(app->root);
     std::error_code cfg_ec;
     const fs::path cfg=fs::weakly_canonical(fs_path(app->config_dir),cfg_ec);
     std::vector<fs::path> source_files;
@@ -1005,6 +1028,8 @@ J *tool_code_outline(App *app,J *args){
             std::error_code item_ec;
             auto item_st=fs::symlink_status(entry,item_ec);
             if(item_ec)continue;
+            std::string rel=path_text(entry.lexically_relative(root));
+            if(!rel.empty()&&gitignore.ignored(rel,fs::is_directory(item_st)))continue;
             if(fs::is_directory(item_st))self(self,entry,depth+1);
             else if(fs::is_regular_file(item_st)&&detect_language(name)!=Lang::Unknown)
                 source_files.push_back(entry);

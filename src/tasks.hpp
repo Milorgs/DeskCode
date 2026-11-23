@@ -36,7 +36,8 @@ void task_event(App &app,char state);
 void task_tokens(App &app);
 // Report how much of the context budget the latest request used (0..100).
 void task_context(App &app,int percent);
+void task_detail(App &app,std::string_view detail);
 int task_worker(std::intptr_t fd);
-J *conversation_settings(const App &app,bool reset);
+J *conversation_settings(const App &app,bool reset,J *replace_messages=nullptr);
 void apply_conversation_settings(App &app,J *settings);
 #endif

@@ -186,9 +186,10 @@ const char *reasoning_name(const char *effort){
 bool approval_required(const App &app,Operation operation){
     return !app.yes&&!(app.auto_edit&&operation==Operation::FileEdit);
 }
-std::vector<std::string> approval_choices(bool preview){
+std::vector<std::string> approval_choices(bool preview,bool allow_session_rule){
     std::vector<std::string> items{tr("允许"),tr("拒绝")};
     if(preview)items.emplace_back(tr("查看完整操作"));
+    if(allow_session_rule)items.emplace_back(tr("本对话允许同类"));
     items.emplace_back(tr("取消"));
     return items;
 }
@@ -244,17 +245,30 @@ int approve(App *a,const char *description,Operation operation,const char *title
     preview(compact);
     if(a->task_events<0&&!isatty(STDIN_FILENO)){a->approval_unavailable=true;return 0;}
     bool yes=false;
+    const bool allow_rule=(operation==Operation::Shell);
+    bool show_preview=compact;
     for(;;){
         fflush(stdout);
-        task_event(*a,'a');
+        task_event(*a,allow_rule?'A':'a');
         if(a->task_events<0){
-            if(auto choice=terminal_choice(approval_choices(compact),0,1,{},true)){
-                if(*choice==3){preview(false);continue;}
+            if(auto choice=terminal_choice(approval_choices(show_preview,allow_rule),0,1,{},true)){
+                if(show_preview&&*choice==3){show_preview=false;preview(false);continue;}
+                if(allow_rule&&*choice==(show_preview?4:3)){
+                    remember_allowed_command(*a,description);
+                    yes=true;
+                    break;
+                }
                 yes=*choice==1;
                 break;
             }
         }
-        const char *prompt=a->task_events>=0&&!a->conversation_worker?tr("等待批准此次操作。"):compact?tr("请求批准：[1] 允许 [2] 拒绝 [3] 查看完整操作 [0] 取消："):tr("允许此次操作？[1] 允许 [2] 拒绝 [0] 取消：");
+        const char *prompt=a->task_events>=0&&!a->conversation_worker
+            ?tr("等待批准此次操作。")
+            :allow_rule
+                ?(compact?tr("请求批准：[1] 允许 [2] 拒绝 [3] 查看完整操作 [4] 本对话允许同类 [0] 取消：")
+                         :tr("允许此次操作？[1] 允许 [2] 拒绝 [4] 本对话允许同类 [0] 取消："))
+                :(compact?tr("请求批准：[1] 允许 [2] 拒绝 [3] 查看完整操作 [0] 取消：")
+                         :tr("允许此次操作？[1] 允许 [2] 拒绝 [0] 取消："));
 #ifndef _WIN32
         // When the controller answers on our behalf, its digit must not be
         // echoed into the transcript.
@@ -269,6 +283,12 @@ int approve(App *a,const char *description,Operation operation,const char *title
         if(quiet)tcsetattr(STDIN_FILENO,TCSANOW,&saved);
 #endif
         if(value&&compact&&!strcmp(value,"3")){free(value);preview(false);continue;}
+        if(value&&allow_rule&&(!strcmp(value,"4")||(!compact&&a->guided_approval&&!strcmp(value,"3")))){
+            remember_allowed_command(*a,description);
+            yes=true;
+            free(value);
+            break;
+        }
         yes=value&&!strcmp(value,"1");free(value);break;
     }
     task_event(*a,'r');

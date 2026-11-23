@@ -512,6 +512,7 @@ struct Conversation {
     JsonPtr messages,config;
     int job=0;
     bool reset_context=false;
+    bool sync_messages=false;
     std::string draft{};
     int draft_cursor=0;
     // Absolute byte position in the worker output already shown, and where
@@ -612,6 +613,7 @@ static void sync_conversation_models(App &app,std::vector<Conversation> &items){
         if(changed){
             if(item.messages)item.messages.reset(arr());
             item.reset_context=true;
+            item.sync_messages=false;
         }
         for(auto &request:item.queue){
             J *config=copy(item.config.get());
@@ -831,6 +833,14 @@ public:
             snprintf(used,sizeof used,tr(" · %s 词元"),token_label(tokens).c_str());
             text+=used;
         }
+        const char *detail=sget(state,"detail");
+        if(*detail&&!thinking){
+            const int room=columns-ui_width(text)-6;
+            if(room>=12){
+                text+=" · ";
+                text+=ui_clip(detail,room);
+            }
+        }
         terminal_activity(text);
     }
     // Bottom frame: a rule above the input line, then the input row, then the
@@ -930,6 +940,19 @@ public:
         }
         return false;
     }
+    bool shell_approval(const Conversation &item){
+        if(!item.job)return false;
+        JsonPtr states(jobs.snapshot());
+        for(size_t i=0;i<alen(states.get());i++){
+            J *state=at(states.get(),i);
+            if(iget(state,"id",0)==item.job)return bget(state,"shell_approval");
+        }
+        return false;
+    }
+    void set_context_percent(int p){
+        context_percent=p;
+        refresh_composer();
+    }
     bool active(const Conversation &item){
         JsonPtr states(jobs.snapshot());
         for(size_t i=0;i<alen(states.get());i++)if(iget(at(states.get(),i),"id",0)==item.job)return bget(at(states.get(),i),"active");
@@ -957,13 +980,13 @@ public:
         const bool finished=state&&!bget(state,"active")&&!strcmp(sget(state,"state"),tr("已完成"));
         item.displayed=finished||!state?output_end(jobs,item.job):item.turn_offset;
     }
-    bool submit(Conversation &item,const std::string &task){
+    bool submit(Conversation &item,const std::string &task,std::string_view display_override={}){
         app.error[0]=0;
         scroll_transcript_bottom();
         // Echo the request into the transcript before starting the job; the
         // assistant reply streams in underneath it.
-        show_user_message(task);
-        JsonPtr settings(conversation_settings(app,item.reset_context));
+        show_user_message(display_override.empty()?std::string_view(task):display_override);
+        JsonPtr settings(conversation_settings(app,item.reset_context,item.sync_messages?app.messages:nullptr));
         if(!item.job){
             persist_conversation(app,item);
             app.conversation_worker=true;
@@ -983,6 +1006,7 @@ public:
             item.turn_offset=offset;
         }
         item.reset_context=false;
+        item.sync_messages=false;
         checked=0;tick();return true;
     }
 };
@@ -1142,6 +1166,8 @@ static void show_inline_status(const App &app){
     std::string body=std::string(tr("模型"))+": "+sget(app.config,"model")+" ("+sget(app.config,"protocol")+")\n"
         +tr("目录")+": "+app.root+"\n"
         +tr("批准")+": "+permission_name(app)+" · "+tr("推理")+": "+reasoning_name(sget(app.config,"reasoning_effort"));
+    if(sandbox_supported())
+        body+="\n"+std::string(tr("沙箱"))+": "+(app.sandbox?tr("Landlock 内核沙箱已开启（限制工作目录外写入）"):tr("已关闭"));
     if(usage)body+="\n"+std::string(tr("词元"))+": "+token_label(model_tokens(usage.get(),app.config));
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):72;
     std::string box=ui_box(tr("DeskCode 状态"),body,width);
@@ -1156,7 +1182,30 @@ static void show_inline_status(const App &app){
 }
 static void show_inline_help(){
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 选择模型 · F3 思考强度 · /paste 粘贴剪贴板图片\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · Alt+Enter 插入换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /commands 自定义指令\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string out="\n";
+    for(size_t start=0;start<box.size();){
+        auto end=box.find('\n',start);
+        out+="  "+box.substr(start,end==std::string::npos?std::string::npos:end-start)+"\n";
+        if(end==std::string::npos)break;
+        start=end+1;
+    }
+    terminal_message(out);
+}
+static void show_custom_commands(const App &app){
+    auto cmds=list_custom_commands(app);
+    std::string body;
+    if(cmds.empty()){
+        body=tr("暂无自定义指令。\n可在 .deskcode/commands/<名称>.md 或 .desk-agent/commands/<名称>.md 中编写提示词模板（支持 $ARGUMENTS），在对话中输入 /<名称> 调用。");
+    }else{
+        for(size_t i=0;i<cmds.size();i++){
+            if(i)body+='\n';
+            body+="/"+cmds[i].name+" ("+cmds[i].scope+")";
+            if(!cmds[i].summary.empty())body+=" — "+cmds[i].summary;
+        }
+    }
+    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
+    std::string box=ui_box(tr("自定义斜杠指令"),body,width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1174,7 +1223,7 @@ static void show_welcome(){
     for(const char *example:{"梳理这个项目的结构、入口和构建方式","运行测试，找出失败原因并修复","给 README 补一段安装与使用说明"}){
         text+="    "+ui_paint(Tone::Accent,"›")+" "+ui_paint(Tone::Dim,tr(example))+"\n";
     }
-    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · @+Tab 选文件 · /paste 贴图 · F2 模型 · F3 思考强度 · Ctrl+D 返回"))+"\n";
+    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · @+Tab 选文件 · /paste 贴图 · /undo 撤回 · /compact 压缩 · Ctrl+D 返回"))+"\n";
     terminal_message(text);
 }
 static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,ConversationScreen *screen=nullptr){
@@ -1268,7 +1317,8 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
             const bool inline_choices=screen->has_composer();
             const int anchor=inline_choices?terminal_rows()-2:content_top;
             // Focus starts on Cancel so a stray Enter never approves anything.
-            const auto choice=terminal_choice(approval_choices(!a->verbose),0,anchor,[&]{
+            const bool allow_shell_rule=screen->shell_approval(*conversation);
+            const auto choice=terminal_choice(approval_choices(!a->verbose,allow_shell_rule),0,anchor,[&]{
                 jobs.refresh();
                 if(jobs.on_idle)jobs.on_idle();
             },true,inline_choices);
@@ -1365,9 +1415,11 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
             reset_session(a);
             if(conversation){
                 conversation->reset_context=true;
+                conversation->sync_messages=false;
                 persist_conversation(*a,*conversation);
                 history_checkpoint(*a,0);
             }
+            if(screen)screen->set_context_percent(-1);
             terminal_message(ui_paint(Tone::Accent,std::string("  ")+tr("已清空当前对话上下文，模型不会再看到之前的内容。"))+"\n");
         };
         auto local_action=[&](int action){
@@ -1378,6 +1430,74 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
         if(trimmed=="/status"){local_action(5);continue;}
         if(trimmed=="/help"){local_action(6);continue;}
         if(trimmed=="/clear"){local_action(4);continue;}
+        if(trimmed=="/commands"){show_custom_commands(*a);continue;}
+        if(trimmed=="/sandbox"){
+            if(!sandbox_supported()){
+                terminal_message(ui_paint(Tone::Dim,std::string("  ")+tr("当前平台或内核未启用 Landlock 内核沙箱。"))+"\n");
+            }else{
+                a->sandbox=!a->sandbox;
+                terminal_message(ui_paint(Tone::Accent,std::string("  ")+tr(a->sandbox?"已开启 Landlock 内核沙箱（禁止写入工作目录外文件）。":"已关闭当前会话的 Landlock 内核沙箱。"))+"\n");
+            }
+            continue;
+        }
+        if(trimmed=="/undo"){
+            if(screen&&conversation&&screen->active(*conversation)){
+                terminal_message(ui_paint(Tone::Warning,std::string("  ")+tr("当前对话正在执行任务，请等待完成或按 Ctrl+C 停止后再撤回。"))+"\n");
+                continue;
+            }
+            a->error[0]=0;
+            std::string summary;
+            if(undo_last_turn(*a,summary))
+                terminal_message(ui_paint(Tone::Accent,"  "+summary)+"\n");
+            else
+                terminal_message(ui_paint(Tone::Warning,std::string("  ")+(summary.empty()?a->error:summary))+"\n");
+            a->error[0]=0;
+            continue;
+        }
+        if(trimmed=="/compact"){
+            if(screen&&conversation&&screen->active(*conversation)){
+                terminal_message(ui_paint(Tone::Warning,std::string("  ")+tr("当前对话正在执行任务，请等待完成后再压缩上下文。"))+"\n");
+                continue;
+            }
+            if(conversation&&!conversation->id.empty()&&!conversation->reset_context){
+                J *latest=history_context(*a,conversation->id);
+                if(alen(latest)>alen(a->messages)){
+                    json_object_put(a->messages);
+                    a->messages=latest;
+                }else json_object_put(latest);
+            }
+            a->error[0]=0;
+            if(screen&&screen->has_composer())
+                terminal_activity(std::string("⠋ ")+tr("正在生成上下文摘要…"));
+            else
+                terminal_message(ui_paint(Tone::Dim,std::string("  ")+tr("正在生成上下文摘要…"))+"\n");
+            std::string summary;
+            const bool ok=compact_conversation(*a,summary);
+            terminal_activity("");
+            if(!ok){
+                terminal_message(ui_paint(Tone::Warning,std::string("  ")+a->error)+"\n");
+                a->error[0]=0;
+                continue;
+            }
+            if(conversation){
+                conversation->reset_context=false;
+                conversation->sync_messages=true;
+                persist_conversation(*a,*conversation);
+                history_checkpoint(*a,alen(a->messages));
+            }
+            if(screen)screen->set_context_percent(1);
+            const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
+            std::string box=ui_box(tr("上下文已压缩为续接摘要"),summary,width);
+            std::string out="\n";
+            for(size_t start=0;start<box.size();){
+                auto end=box.find('\n',start);
+                out+="  "+box.substr(start,end==std::string::npos?std::string::npos:end-start)+"\n";
+                if(end==std::string::npos)break;
+                start=end+1;
+            }
+            terminal_message(out);
+            continue;
+        }
         if(trimmed=="/paste"||trimmed.starts_with("/paste ")){
             a->error[0]=0;
             std::string clip_token=capture_clipboard_image(*a);
@@ -1439,19 +1559,26 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
             last_modes.clear();
             continue;
         }
+        std::string custom_label;
+        if(trimmed.size()>1&&trimmed.front()=='/'){
+            std::string expanded_cmd;
+            if(expand_custom_command(*a,trimmed,expanded_cmd,custom_label)){
+                task=std::move(expanded_cmd);
+            }
+        }
         if(conversation){
-            if(conversation->title.empty())conversation->title=conversation_title(task,true);
+            if(conversation->title.empty())conversation->title=conversation_title(custom_label.empty()?task:custom_label,true);
             persist_conversation(*a,*conversation);
         }
         if(screen&&conversation){
             // Guided approvals have their own choice row; there a lone digit
             // is an ordinary request and never answers a pending approval.
-            if(!guided&&task.size()==1&&task[0]>='0'&&task[0]<='3'&&jobs.respond(conversation->job,task[0]-'0'))continue;
-            remember(task);
-            if(!screen->submit(*conversation,task))screen->report_error();
+            if(!guided&&task.size()==1&&task[0]>='0'&&task[0]<='4'&&jobs.respond(conversation->job,task[0]-'0'))continue;
+            remember(custom_label.empty()?task:custom_label);
+            if(!screen->submit(*conversation,task,custom_label))screen->report_error();
             continue;
         }
-        remember(task);
+        remember(custom_label.empty()?task:custom_label);
         if(run_task(a,task.c_str())&&!input_closed)fprintf(stderr,"%s\n",a->error);
     }
 }
@@ -1739,6 +1866,8 @@ static int doctor(App &a,bool json){
         put(result.get(),"base_url",str(sget(probe.get(),"base_url")));
         if(!model_ok)put(result.get(),"model_error",str(model_error.c_str()));
         put(result.get(),"shell",json_object_new_boolean(a.shell));
+        put(result.get(),"sandbox_support",json_object_new_boolean(sandbox_supported()));
+        put(result.get(),"sandbox",json_object_new_boolean(a.sandbox&&sandbox_supported()));
         put(result.get(),"desktop_support",json_object_new_boolean(desktop_compiled()));
         put(result.get(),"mcp_configured",json_object_new_int64(static_cast<int64_t>(mcp_total)));
         put(result.get(),"mcp_enabled",json_object_new_int64(static_cast<int64_t>(mcp_enabled)));
@@ -1757,7 +1886,9 @@ static int doctor(App &a,bool json){
     };
     row(writable?1:-1,"工作目录",display_path(a.root)+(writable?"":tr("（不可写）")));
     row(model_ok?1:-1,"模型配置",model_ok?std::string(sget(probe.get(),"model"))+" ("+sget(probe.get(),"protocol")+") · "+sget(probe.get(),"base_url"):model_error);
-    row(a.shell?1:0,"命令工具",a.shell?tr("已开启"):tr("已关闭"));
+    row(a.shell?1:0,"命令工具",a.shell
+        ?(sandbox_supported()&&a.sandbox?tr("已开启（Landlock 内核沙箱保护）"):tr("已开启"))
+        :tr("已关闭"));
     row(desktop_compiled()?1:0,"桌面工具",desktop_compiled()?tr("AT-SPI 可用，可在设置中开启"):tr("当前构建未启用"));
     char mcp_line[160];
     snprintf(mcp_line,sizeof mcp_line,tr("%zu 个已启用 / 共 %zu 个"),mcp_enabled,mcp_total);
@@ -1888,6 +2019,7 @@ static int run_cli(int argc,char **argv){
         else if(!strcmp(arg,"--json"))json_output=true;
         else if(!strcmp(arg,"-c")||!strcmp(arg,"--continue"))resume=true;
         else if(!strcmp(arg,"--no-shell"))a.shell=false;
+        else if(!strcmp(arg,"--no-sandbox"))a.sandbox=false;
         else if(!strcmp(arg,"--allow-shell"))a.shell=true;
         else if(!strcmp(arg,"--allow-desktop"))a.desktop=true;
         else if(!strcmp(arg,"--record"))a.record=true;

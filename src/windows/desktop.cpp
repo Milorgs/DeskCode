@@ -21,42 +21,55 @@ Desktop *state(App *app){
     app->desktop_data=data.release();return static_cast<Desktop *>(app->desktop_data);
 }
 bool password(IUIAutomationElement *element){BOOL value=TRUE;return FAILED(element->get_CurrentIsPassword(&value))||value;}
-void visit(Desktop &data,IUIAutomationElement *element,int depth,J *items){
-    if(interrupted||depth>10||data.references.size()>=180||monotime()-data.created>8||password(element))return;
+bool match_ci(std::string_view hay,const char *needle){
+    if(!needle||!*needle)return true;
+    std::string_view nd(needle);
+    if(hay.size()<nd.size())return false;
+    auto it=std::search(hay.begin(),hay.end(),nd.begin(),nd.end(),[](unsigned char a,unsigned char b){
+        return std::tolower(a)==std::tolower(b);
+    });
+    return it!=hay.end();
+}
+void visit(Desktop &data,IUIAutomationElement *element,int depth,J *items,const char *filter){
+    if(interrupted||depth>16||data.references.size()>=500||monotime()-data.created>8||password(element))return;
     std::string name=name_of(element);CONTROLTYPEID role=0;if(FAILED(element->get_CurrentControlType(&role)))return;
-    Reference reference;reference.element=element;reference.name=name;reference.role=role;data.references.push_back(std::move(reference));
-    std::string ref=data.stamp+":"+std::to_string(data.references.size());J *node=obj(),*actions=arr();put(node,"ref",str(ref.c_str()));put(node,"name",str(name.c_str()));put(node,"control_type",json_object_new_int(role));put(node,"depth",json_object_new_int(depth));put(node,"actions",actions);
-    BSTR localized=nullptr;if(SUCCEEDED(element->get_CurrentLocalizedControlType(&localized))&&localized){auto value=utf8(localized);put(node,"role",str(value.c_str()));}SysFreeString(localized);
-    BOOL enabled=FALSE;element->get_CurrentIsEnabled(&enabled);put(node,"enabled",json_object_new_boolean(enabled));
-    ComPtr<IUIAutomationInvokePattern> invoke;if(SUCCEEDED(element->GetCurrentPatternAs(UIA_InvokePatternId,IID_PPV_ARGS(&invoke))))add(actions,str("invoke"));
-    ComPtr<IUIAutomationTogglePattern> toggle;if(SUCCEEDED(element->GetCurrentPatternAs(UIA_TogglePatternId,IID_PPV_ARGS(&toggle))))add(actions,str("toggle"));
-    ComPtr<IUIAutomationSelectionItemPattern> select;if(SUCCEEDED(element->GetCurrentPatternAs(UIA_SelectionItemPatternId,IID_PPV_ARGS(&select))))add(actions,str("select"));
-    ComPtr<IUIAutomationValuePattern> value;BOOL readonly=TRUE;
-    if(SUCCEEDED(element->GetCurrentPatternAs(UIA_ValuePatternId,IID_PPV_ARGS(&value)))){
-        value->get_CurrentIsReadOnly(&readonly);BSTR text=nullptr;
-        if(SUCCEEDED(value->get_CurrentValue(&text))&&text){std::wstring excerpt(text,SysStringLen(text));if(excerpt.size()>1200)excerpt.resize(1200);if(!excerpt.empty()&&excerpt.back()>=0xd800&&excerpt.back()<=0xdbff)excerpt.pop_back();auto bytes=utf8(excerpt);put(node,"text",str(bytes.c_str()));}SysFreeString(text);
+    std::string role_str;
+    BSTR localized=nullptr;if(SUCCEEDED(element->get_CurrentLocalizedControlType(&localized))&&localized)role_str=utf8(localized);SysFreeString(localized);
+    if(!filter||!*filter||match_ci(name,filter)||match_ci(role_str,filter)){
+        Reference reference;reference.element=element;reference.name=name;reference.role=role;data.references.push_back(std::move(reference));
+        std::string ref=data.stamp+":"+std::to_string(data.references.size());J *node=obj(),*actions=arr();put(node,"ref",str(ref.c_str()));put(node,"name",str(name.c_str()));put(node,"control_type",json_object_new_int(role));put(node,"depth",json_object_new_int(depth));put(node,"actions",actions);
+        if(!role_str.empty())put(node,"role",str(role_str.c_str()));
+        BOOL enabled=FALSE;element->get_CurrentIsEnabled(&enabled);put(node,"enabled",json_object_new_boolean(enabled));
+        ComPtr<IUIAutomationInvokePattern> invoke;if(SUCCEEDED(element->GetCurrentPatternAs(UIA_InvokePatternId,IID_PPV_ARGS(&invoke))))add(actions,str("invoke"));
+        ComPtr<IUIAutomationTogglePattern> toggle;if(SUCCEEDED(element->GetCurrentPatternAs(UIA_TogglePatternId,IID_PPV_ARGS(&toggle))))add(actions,str("toggle"));
+        ComPtr<IUIAutomationSelectionItemPattern> select;if(SUCCEEDED(element->GetCurrentPatternAs(UIA_SelectionItemPatternId,IID_PPV_ARGS(&select))))add(actions,str("select"));
+        ComPtr<IUIAutomationValuePattern> value;BOOL readonly=TRUE;
+        if(SUCCEEDED(element->GetCurrentPatternAs(UIA_ValuePatternId,IID_PPV_ARGS(&value)))){
+            value->get_CurrentIsReadOnly(&readonly);BSTR text=nullptr;
+            if(SUCCEEDED(value->get_CurrentValue(&text))&&text){std::wstring excerpt(text,SysStringLen(text));if(excerpt.size()>1200)excerpt.resize(1200);if(!excerpt.empty()&&excerpt.back()>=0xd800&&excerpt.back()<=0xdbff)excerpt.pop_back();auto bytes=utf8(excerpt);put(node,"text",str(bytes.c_str()));}SysFreeString(text);
+        }
+        put(node,"editable",json_object_new_boolean(!readonly));add(items,node);
     }
-    put(node,"editable",json_object_new_boolean(!readonly));add(items,node);
     ComPtr<IUIAutomationElement> child;if(FAILED(data.walker->GetFirstChildElement(element,&child)))return;
-    for(int count=0;child&&count<180&&data.references.size()<180&&monotime()-data.created<=8;count++){
-        visit(data,child.Get(),depth+1,items);ComPtr<IUIAutomationElement> next;data.walker->GetNextSiblingElement(child.Get(),&next);child=std::move(next);
+    for(int count=0;child&&count<500&&data.references.size()<500&&monotime()-data.created<=8;count++){
+        visit(data,child.Get(),depth+1,items,filter);ComPtr<IUIAutomationElement> next;data.walker->GetNextSiblingElement(child.Get(),&next);child=std::move(next);
     }
 }
 }
 void desktop_clear(App *app){auto *data=static_cast<Desktop *>(app->desktop_data);if(data){data->references.clear();data->created=0;}}
 void desktop_destroy(App *app){delete static_cast<Desktop *>(app->desktop_data);app->desktop_data=nullptr;}
 bool desktop_compiled(){return true;}
-J *desktop_snapshot(App *app,const char *target){
+J *desktop_snapshot(App *app,const char *target,const char *filter){
     Desktop *data=state(app);if(!data)return err("Windows UI Automation could not be initialized.");desktop_clear(app);
     char stamp[33];id_string(stamp);data->stamp=stamp;data->created=monotime();
     ComPtr<IUIAutomationElement> root;if(FAILED(data->api->GetRootElement(&root)))return err("Could not read the Windows desktop.");
     J *result=obj(),*apps=arr(),*nodes=arr();put(result,"apps",apps);put(result,"nodes",nodes);put(result,"app",str(target));
     ComPtr<IUIAutomationElement> window;data->walker->GetFirstChildElement(root.Get(),&window);bool found=!*target;
     for(int count=0;window&&count<80&&!interrupted&&monotime()-data->created<8;count++){
-        if(!password(window.Get())){std::string name=name_of(window.Get());if(!name.empty())add(apps,str(name.c_str()));if(*target&&name==target){found=true;visit(*data,window.Get(),0,nodes);}}
+        if(!password(window.Get())){std::string name=name_of(window.Get());if(!name.empty())add(apps,str(name.c_str()));if(*target&&name==target){found=true;visit(*data,window.Get(),0,nodes,filter);}}
         ComPtr<IUIAutomationElement> next;data->walker->GetNextSiblingElement(window.Get(),&next);window=std::move(next);
     }
-    put(result,"partial",json_object_new_boolean(data->references.size()>=180||monotime()-data->created>=8));
+    put(result,"partial",json_object_new_boolean(data->references.size()>=500||monotime()-data->created>=8));
     put(result,"hint",str("Use an exact window title from apps. Read a fresh snapshot after every action."));
     if(!found)put(result,"error",str("Application window not found. Read the current window titles again."));return result;
 }

@@ -160,7 +160,13 @@ static void test_files(void){
         CHECK(!get(huge_res.get(),"error"));
         CHECK(iget(huge_res.get(),"total_lines",0)==5000);
         CHECK(strstr(sget(huge_res.get(),"content"),"Line 4999:")&&strstr(sget(huge_res.get(),"content"),"Line 5000:"));
-        CHECK(!get(huge_res.get(),"sha256"));
+        CHECK(strlen(sget(huge_res.get(),"sha256"))==64);
+        JsonPtr huge_edit(args("huge.log"));
+        put(huge_edit.get(),"old_text",str("Line 4999: 0123456789"));
+        put(huge_edit.get(),"new_text",str("Line 4999 [EDITED]: 0123456789"));
+        put(huge_edit.get(),"expected_sha256",str(sget(huge_res.get(),"sha256")));
+        JsonPtr huge_edit_res(tool_call(&a,"edit_file",huge_edit.get()));
+        CHECK(!get(huge_edit_res.get(),"error")&&bget(huge_edit_res.get(),"verified"));
 
         // Sorted list_files with file sizes and recursive max_depth.
         char sub_dir[PATH_MAX],sub_file[PATH_MAX];
@@ -541,20 +547,20 @@ static void test_context_and_validation(void){
 }
 static void test_tool_configuration(){
     App a=fresh();a.shell=true;a.desktop=true;
-    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==11);
+    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==15);
     // Mutating one caller's schema must not change validation or other callers.
     json_object_object_del(get(get(get(at(enabled.get(),0),"function"),"parameters"),"properties"),"path");
     JsonPtr untouched(schemas(&a));
     CHECK(get(get(get(get(at(untouched.get(),0),"function"),"parameters"),"properties"),"path"));
     JsonPtr empty(obj()),result(tool_call(&a,"list_files",empty.get()));CHECK(tool_failed(result.get()));
     a.shell=false;a.desktop=false;
-    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==7);
+    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==10);
     JsonPtr shell_args(obj());put(shell_args.get(),"command",str("exit 0"));
     result.reset(tool_call(&a,"run_shell",shell_args.get()));CHECK(tool_failed(result.get()));
     JsonPtr desktop_args(obj());put(desktop_args.get(),"app",str(""));
     result.reset(tool_call(&a,"desktop_snapshot",desktop_args.get()));CHECK(tool_failed(result.get()));
-    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==8);
-    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==7);
+    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==11);
+    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==10);
     a.subagent=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==4);
     JsonPtr research_args(obj());put(research_args.get(),"question",str("nested?"));
     result.reset(tool_call(&a,"delegate_research",research_args.get()));CHECK(tool_failed(result.get()));
@@ -2613,7 +2619,7 @@ static void test_mcp(){
     child=restarted;
     JsonPtr failed(mcp_call(a,fail.c_str(),input.get()));CHECK(tool_failed(failed.get()));
     CHECK(!workflow(&a,{model_tool("external",echo.c_str(),copy(input.get())),model_reply(nullptr,"MCP model integration complete")}));
-    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==10);
+    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==13);
     JsonPtr follow(capture(&a,1));J *messages=get(get(follow.get(),"body"),"messages");CHECK(strstr(sget(at(messages,alen(messages)-1),"content"),"MCP_ECHO_OK"));
     mcp_close(a);CHECK(kill(child,0)<0&&errno==ESRCH);
     put(get(loaded.get(),"fixture"),"disabled",json_object_new_boolean(true));CHECK(mcp_save(a,loaded.get()));CHECK(mcp_prepare(a));tools.reset(mcp_tools(a));CHECK(alen(tools.get())==0);
@@ -3122,6 +3128,405 @@ static void test_mentions_paste_and_multimodal(){
     app_cleanup(&a);
 }
 
+static void test_v1_13_features(){
+    App a=fresh();
+    a.yes=true;
+    a.desktop=true;
+
+    // 1. Multi-edit turn undo (/undo) + newly created file removal + cache GC.
+    std::string tracked_path=std::string(a.root)+"/tracked.txt";
+    CHECK(!atomic_file(tracked_path.c_str(),"original-v1\n",12,0644));
+    a.turn_id="0123456789abcdef0123456789abcdef";
+    {
+        JsonPtr r1(tool_call(&a,"read_file",JsonPtr(args("tracked.txt")).get()));
+        JsonPtr e1(args("tracked.txt"));
+        put(e1.get(),"old_text",str("original-v1"));
+        put(e1.get(),"new_text",str("mid-v2"));
+        put(e1.get(),"expected_sha256",str(sget(r1.get(),"sha256")));
+        JsonPtr w1(tool_call(&a,"edit_file",e1.get()));
+        CHECK(!get(w1.get(),"error"));
+
+        JsonPtr e2(args("tracked.txt"));
+        put(e2.get(),"old_text",str("mid-v2"));
+        put(e2.get(),"new_text",str("final-v3"));
+        put(e2.get(),"expected_sha256",str(sget(w1.get(),"sha256")));
+        JsonPtr w2(tool_call(&a,"edit_file",e2.get()));
+        CHECK(!get(w2.get(),"error"));
+
+        JsonPtr cr(args("brand_new.txt"));
+        put(cr.get(),"content",str("created in turn\n"));
+        put(cr.get(),"expected_sha256",nullptr);
+        JsonPtr wc(tool_call(&a,"write_file",cr.get()));
+        CHECK(!get(wc.get(),"error"));
+    }
+    std::string bdir=std::string(a.root)+"/.desk-agent/backups";
+    CHECK(!mkdirs(bdir.c_str(),0700));
+    for(int i=0;i<38;i++){
+        char orphan[PATH_MAX];
+        snprintf(orphan,sizeof orphan,"%s/orphan-%02d.bak",bdir.c_str(),i);
+        CHECK(!atomic_file(orphan,"x",1,0600));
+    }
+    prune_workspace_cache(a);
+    std::string undo_msg;
+    // A directory in the restore target blocks one entry. Undo must remove
+    // the new file now and retain the blocked entry for a later retry.
+    CHECK(!unlink(tracked_path.c_str()));
+    CHECK(!mkdir(tracked_path.c_str(),0700));
+    CHECK(!undo_last_turn(a,undo_msg));
+    CHECK(undo_msg.find("tracked.txt")!=std::string::npos);
+    std::string created_path=std::string(a.root)+"/brand_new.txt";
+    CHECK(!fs::exists(fs_path(created_path)));
+    CHECK(!rmdir(tracked_path.c_str()));
+    CHECK(!atomic_file(created_path.c_str(),"keep",4,0600));
+    CHECK(undo_last_turn(a,undo_msg));
+    char *restored=read_bytes(tracked_path.c_str(),1024,nullptr);
+    CHECK(restored&&!strcmp(restored,"original-v1\n"));
+    free(restored);
+    CHECK(fs::exists(fs_path(created_path)));
+    CHECK(!undo_last_turn(a,undo_msg));
+
+    // 2. Regex search, file_pattern glob, and .gitignore filtering.
+    CHECK(!atomic_file((std::string(a.root)+"/.gitignore").c_str(),"ignored_out/\n*.gen.cpp\n",23,0600));
+    CHECK(!mkdirs((std::string(a.root)+"/ignored_out").c_str(),0700));
+    CHECK(!mkdirs((std::string(a.root)+"/pkg").c_str(),0700));
+    CHECK(!atomic_file((std::string(a.root)+"/ignored_out/skip.cpp").c_str(),"int target_fn_42() { return 0; }\n",33,0600));
+    CHECK(!atomic_file((std::string(a.root)+"/pkg/auto.gen.cpp").c_str(),"int target_fn_99() { return 0; }\n",33,0600));
+    CHECK(!atomic_file((std::string(a.root)+"/pkg/keep.cpp").c_str(),"int target_fn_77() { return 77; }\n",34,0600));
+    CHECK(!atomic_file((std::string(a.root)+"/pkg/readme.md").c_str(),"target_fn_88 in markdown\n",25,0600));
+    {
+        JsonPtr sq(args("."));
+        put(sq.get(),"query",str("target_fn_[0-9]+\\("));
+        put(sq.get(),"regex",json_object_new_boolean(true));
+        put(sq.get(),"file_pattern",str("*.{cpp,hpp}"));
+        JsonPtr sr(tool_call(&a,"search_text",sq.get()));
+        CHECK(!get(sr.get(),"error"));
+        J *matches=get(sr.get(),"matches");
+        CHECK(alen(matches)==1);
+        CHECK(!strcmp(sget(at(matches,0),"path"),"pkg/keep.cpp"));
+
+        JsonPtr bad_re(args("."));
+        put(bad_re.get(),"query",str("[unclosed"));
+        put(bad_re.get(),"regex",json_object_new_boolean(true));
+        JsonPtr bad_res(tool_call(&a,"search_text",bad_re.get()));
+        CHECK(get(bad_res.get(),"error"));
+
+        auto completed=workspace_complete_files(a,"target",20);
+        for(const auto &c:completed)CHECK(c.find("ignored_out")==std::string::npos&&c.find(".gen.cpp")==std::string::npos);
+        auto keep_comp=workspace_complete_files(a,"keep",10);
+        CHECK(!keep_comp.empty()&&keep_comp[0]=="pkg/keep.cpp");
+    }
+
+    // 3. Smarter shell approval granularity & session command rules.
+    CHECK(safe_readonly_command("git status --short"));
+    CHECK(safe_readonly_command("ls -la pkg"));
+    CHECK(!safe_readonly_command("rg --pre=sh target ."));
+    CHECK(!safe_readonly_command("git status && rm -rf /"));
+    CHECK(!safe_readonly_command("cat pkg/keep.cpp | sh"));
+    CHECK(!safe_readonly_command("git checkout -f"));
+    {
+        a.yes=false;
+        a.auto_edit=true;
+        JsonPtr ro_cmd(obj());
+        put(ro_cmd.get(),"command",str("pwd"));
+        JsonPtr ro_res(tool_call(&a,"run_shell",ro_cmd.get()));
+        CHECK(!tool_failed(ro_res.get())&&iget(ro_res.get(),"exit_code",-1)==0);
+
+        JsonPtr rw_cmd(obj());
+        put(rw_cmd.get(),"command",str("echo nope > blocked.txt"));
+        JsonPtr rw_res(tool_call(&a,"run_shell",rw_cmd.get()));
+        CHECK(bget(rw_res.get(),"denied"));
+
+        remember_allowed_command(a,"git commit");
+        CHECK(command_allowed_in_session(a,"git commit -m 'msg'"));
+        CHECK(!command_allowed_in_session(a,"git push --force"));
+        a.auto_edit=false;
+        a.yes=true;
+    }
+
+    // 4. web_fetch SSRF blocks + local HTTP HTML readable text extraction.
+    {
+        for(const char *blocked_url:{"http://example.com/doc","https://10.0.0.1/secret","https://192.168.1.1/","https://169.254.169.254/latest/meta-data"}){
+            JsonPtr fq(obj());
+            put(fq.get(),"url",str(blocked_url));
+            JsonPtr fr(tool_call(&a,"web_fetch",fq.get()));
+            CHECK(get(fr.get(),"error"));
+        }
+        int sfd=socket(AF_INET,SOCK_STREAM,0);
+        CHECK(sfd>=0);
+        sockaddr_in addr{};
+        addr.sin_family=AF_INET;
+        addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(bind(sfd,reinterpret_cast<sockaddr *>(&addr),sizeof addr)==0);
+        socklen_t slen=sizeof addr;
+        CHECK(getsockname(sfd,reinterpret_cast<sockaddr *>(&addr),&slen)==0);
+        CHECK(listen(sfd,2)==0);
+        pid_t web_pid=fork();
+        if(web_pid==0){
+            int cfd=accept(sfd,nullptr,nullptr);
+            if(cfd>=0){
+                char req[2048];
+                ssize_t r=read(cfd,req,sizeof req);(void)r;
+                const char *html="<html><head><title>Ignored</title><script>evil_js()</script></head>"
+                                 "<body><h1>API Guide</h1><p>Hello &amp; Welcome to DeskCode.</p></body></html>";
+                char resp[1024];
+                int n=snprintf(resp,sizeof resp,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                    strlen(html),html);
+                ssize_t w=write(cfd,resp,static_cast<size_t>(n));(void)w;
+                close(cfd);
+            }
+            close(sfd);
+            _exit(0);
+        }
+        close(sfd);
+        std::string local_url="http://127.0.0.1:"+std::to_string(ntohs(addr.sin_port))+"/guide";
+        JsonPtr fq(obj());
+        put(fq.get(),"url",str(local_url.c_str()));
+        JsonPtr fr(tool_call(&a,"web_fetch",fq.get()));
+        int wst=0;waitpid(web_pid,&wst,0);
+        CHECK(!get(fr.get(),"error"));
+        CHECK(strstr(sget(fr.get(),"content"),"# API Guide"));
+        CHECK(strstr(sget(fr.get(),"content"),"Hello & Welcome to DeskCode."));
+        CHECK(!strstr(sget(fr.get(),"content"),"evil_js"));
+    }
+
+    // 5. desktop_screenshot multimodal wiring (OpenAI follow-up vision + Anthropic native image tool_result).
+    {
+        static const unsigned char png_1x1[]={
+            0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
+            0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x08,0x06,0x00,0x00,0x00,0x1f,0x15,0xc4,
+            0x89,0x00,0x00,0x00,0x0a,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x00,0x01,0x00,0x00,
+            0x05,0x00,0x01,0x0d,0x0a,0x2d,0xb4,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,
+            0x42,0x60,0x82
+        };
+        std::string shot_file=std::string(a.root)+"/mock-screen.png";
+        CHECK(!atomic_file(shot_file.c_str(),png_1x1,sizeof png_1x1,0600));
+        setenv("DESK_DESKTOP_SCREENSHOT_FILE",shot_file.c_str(),1);
+        reset_session(&a);
+        CHECK(!workflow(&a,{model_tool("shot1","desktop_screenshot",obj()),model_reply(nullptr,"Screenshot inspected.")}));
+        JsonPtr req2(capture(&a,1));
+        J *wire_msgs=get(get(req2.get(),"body"),"messages");
+        CHECK(alen(wire_msgs)==4);
+        CHECK(!strcmp(sget(at(wire_msgs,2),"role"),"tool"));
+        CHECK(strstr(sget(at(wire_msgs,2),"content"),"[Image attached below]"));
+        CHECK(!strcmp(sget(at(wire_msgs,3),"role"),"user"));
+        J *vcontent=get(at(wire_msgs,3),"content");
+        CHECK(json_object_is_type(vcontent,json_type_array)&&alen(vcontent)==2);
+        CHECK(!strcmp(sget(at(vcontent,1),"type"),"image_url"));
+
+        JsonPtr anth(native_payload(a.config,a.messages,nullptr));
+        J *anth_msgs=get(anth.get(),"messages");
+        // user(0), assistant(1), user(tool_result)(2), assistant(3)
+        J *tr_block=at(get(at(anth_msgs,2),"content"),0);
+        CHECK(!strcmp(sget(tr_block,"type"),"tool_result"));
+        J *tr_inner=get(tr_block,"content");
+        CHECK(json_object_is_type(tr_inner,json_type_array)&&alen(tr_inner)==2);
+        CHECK(!strcmp(sget(at(tr_inner,1),"type"),"image"));
+        CHECK(!strcmp(sget(get(at(tr_inner,1),"source"),"media_type"),"image/png"));
+        unsetenv("DESK_DESKTOP_SCREENSHOT_FILE");
+    }
+
+    // 6. Active /compact model-driven context summarization.
+    {
+        const char *compact_resp=
+            "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\","
+            "\"content\":\"Goals: implement 1.13.0\\nFiles: pkg/keep.cpp\"}}]}";
+        const char *resps[]={compact_resp};
+        pid_t srv=fake_server(&a,resps,1);
+        std::string summary;
+        CHECK(compact_conversation(a,summary));
+        server_done(srv);
+        CHECK(summary.find("pkg/keep.cpp")!=std::string::npos);
+        CHECK(alen(a.messages)==2);
+    }
+
+    app_cleanup(&a);
+}
+
+static void test_v1_14_features(){
+    App a=fresh();
+    a.yes=true;
+
+    // 1. Linux Landlock kernel filesystem sandbox.
+    if(sandbox_supported()&&access("/dev/shm",W_OK)==0){
+        char shm_probe[128];
+        snprintf(shm_probe,sizeof shm_probe,"/dev/shm/desk-landlock-probe-%d",static_cast<int>(getpid()));
+        unlink(shm_probe);
+        a.sandbox=true;
+        std::string inside_cmd="echo ok > landlock_inside.txt";
+        JsonPtr r_in(run_command(&a,inside_cmd.c_str(),5000));
+        CHECK(iget(r_in.get(),"exit_code",-1)==0);
+        CHECK(fs::exists(fs_path(std::string(a.root)+"/landlock_inside.txt")));
+
+        std::string outside_cmd=std::string("echo blocked > ")+shm_probe;
+        JsonPtr r_out(run_command(&a,outside_cmd.c_str(),5000));
+        CHECK(iget(r_out.get(),"exit_code",0)!=0);
+        CHECK(access(shm_probe,F_OK)!=0);
+
+        // Disabling sandbox allows the exact same write, proving Landlock was the blocker.
+        a.sandbox=false;
+        JsonPtr r_nosb(run_command(&a,outside_cmd.c_str(),5000));
+        CHECK(iget(r_nosb.get(),"exit_code",-1)==0);
+        CHECK(access(shm_probe,F_OK)==0);
+        unlink(shm_probe);
+        a.sandbox=true;
+    }
+
+    // 2. Atomic multi-hunk multi_edit + rollback on failed hunk + /undo.
+    std::string me_path=std::string(a.root)+"/module.cpp";
+    const char *initial_src="int alpha() { return 1; }\nint beta() { return 2; }\nint gamma() { return 3; }\n";
+    CHECK(!atomic_file(me_path.c_str(),initial_src,strlen(initial_src),0644));
+    a.turn_id="fedcba9876543210fedcba9876543210";
+    {
+        JsonPtr rf(tool_call(&a,"read_file",JsonPtr(args("module.cpp")).get()));
+        const char *sha=sget(rf.get(),"sha256");
+
+        // Second hunk missing -> entire multi_edit fails atomically without touching disk.
+        JsonPtr bad_me(args("module.cpp"));
+        put(bad_me.get(),"expected_sha256",str(sha));
+        J *bad_edits=arr(),*bh1=obj(),*bh2=obj();
+        put(bh1,"old_text",str("return 1;"));put(bh1,"new_text",str("return 10;"));add(bad_edits,bh1);
+        put(bh2,"old_text",str("return 999;"));put(bh2,"new_text",str("return 20;"));add(bad_edits,bh2);
+        put(bad_me.get(),"edits",bad_edits);
+        JsonPtr bad_res(tool_call(&a,"multi_edit",bad_me.get()));
+        CHECK(get(bad_res.get(),"error")&&iget(bad_res.get(),"failed_edit_index",-1)==1);
+        char *unchanged=read_bytes(me_path.c_str(),1024,nullptr);
+        CHECK(unchanged&&!strcmp(unchanged,initial_src));
+        free(unchanged);
+
+        // Valid 3-hunk multi_edit succeeds in one transaction.
+        JsonPtr ok_me(args("module.cpp"));
+        put(ok_me.get(),"expected_sha256",str(sha));
+        J *edits=arr();
+        for(auto [o,n]:{std::pair{"return 1;","return 10;"},std::pair{"return 2;","return 20;"},std::pair{"return 3;","return 30;"}}){
+            J *h=obj();put(h,"old_text",str(o));put(h,"new_text",str(n));add(edits,h);
+        }
+        put(ok_me.get(),"edits",edits);
+        JsonPtr ok_res(tool_call(&a,"multi_edit",ok_me.get()));
+        CHECK(!get(ok_res.get(),"error")&&iget(ok_res.get(),"edits_applied",0)==3);
+        char *after_me=read_bytes(me_path.c_str(),1024,nullptr);
+        CHECK(after_me&&strstr(after_me,"return 10;")&&strstr(after_me,"return 20;")&&strstr(after_me,"return 30;"));
+        free(after_me);
+
+        std::string undo_summary;
+        CHECK(undo_last_turn(a,undo_summary));
+        char *reverted=read_bytes(me_path.c_str(),1024,nullptr);
+        CHECK(reverted&&!strcmp(reverted,initial_src));
+        free(reverted);
+    }
+
+    // 3. Lifecycle hooks (post_edit & pre_shell) + custom slash commands (.desk-agent & .claude).
+    {
+        CHECK(!mkdirs(a.config_dir,0700));
+        const char *hooks_json=
+            "{"
+            "\"post_edit\":[{\"pattern\":\"*.cpp\",\"command\":\"echo HOOK_LINT:$DESK_HOOK_FILE\"}],"
+            "\"pre_shell\":\"if echo \\\"$DESK_HOOK_CMD\\\" | grep -q BLOCK_ME_NOW; then echo 'Blocked by pre_shell policy'; exit 3; fi\""
+            "}";
+        CHECK(!atomic_file((std::string(a.config_dir)+"/hooks.json").c_str(),hooks_json,strlen(hooks_json),0600));
+
+        JsonPtr rf(tool_call(&a,"read_file",JsonPtr(args("module.cpp")).get()));
+        JsonPtr ed(args("module.cpp"));
+        put(ed.get(),"expected_sha256",str(sget(rf.get(),"sha256")));
+        put(ed.get(),"old_text",str("return 1;"));
+        put(ed.get(),"new_text",str("return 11;"));
+        JsonPtr ed_res(tool_call(&a,"edit_file",ed.get()));
+        CHECK(!get(ed_res.get(),"error"));
+        CHECK(iget(ed_res.get(),"hook_exit_code",-1)==0);
+        CHECK(strstr(sget(ed_res.get(),"hook_output"),"HOOK_LINT:module.cpp")!=nullptr);
+
+        JsonPtr sh_bad(obj());
+        put(sh_bad.get(),"command",str("echo BLOCK_ME_NOW"));
+        JsonPtr sh_bad_res(tool_call(&a,"run_shell",sh_bad.get()));
+        CHECK(get(sh_bad_res.get(),"error")&&strstr(sget(sh_bad_res.get(),"error"),"Blocked by pre_shell policy"));
+        std::error_code ec;
+        fs::remove(fs_path(std::string(a.config_dir)+"/hooks.json"),ec);
+
+        CHECK(!mkdirs((std::string(a.root)+"/.deskcode/commands").c_str(),0700));
+        CHECK(!mkdirs((std::string(a.root)+"/.desk-agent/commands").c_str(),0700));
+        const char *rev_tpl="# Audit target\nAudit $ARGUMENTS for thread safety and leaks.";
+        const char *rel_tpl="Generate bilingual release summary.";
+        CHECK(!atomic_file((std::string(a.root)+"/.deskcode/commands/audit.md").c_str(),rev_tpl,strlen(rev_tpl),0600));
+        CHECK(!atomic_file((std::string(a.root)+"/.desk-agent/commands/ship.md").c_str(),rel_tpl,strlen(rel_tpl),0600));
+        auto cmds=list_custom_commands(a);
+        CHECK(cmds.size()==2);
+        std::string expanded,label;
+        CHECK(expand_custom_command(a,"/audit src/mcp.cpp",expanded,label));
+        CHECK(label=="/audit src/mcp.cpp");
+        CHECK(expanded.find("Audit src/mcp.cpp for thread safety and leaks.")!=std::string::npos);
+
+        CHECK(!atomic_file((std::string(a.root)+"/deskcode.md").c_str(),"Follow DESKCODE native rules.\n",30,0600));
+        std::string guide=load_project_guide(a);
+        CHECK(guide.find("Follow DESKCODE native rules.")!=std::string::npos);
+    }
+
+    // 4. Built-in web_search (DuckDuckGo HTML uddg unwrapping via local test server).
+    {
+        int sfd=socket(AF_INET,SOCK_STREAM,0);
+        CHECK(sfd>=0);
+        sockaddr_in addr{};
+        addr.sin_family=AF_INET;
+        addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(bind(sfd,reinterpret_cast<sockaddr *>(&addr),sizeof addr)==0);
+        socklen_t slen=sizeof addr;
+        CHECK(getsockname(sfd,reinterpret_cast<sockaddr *>(&addr),&slen)==0);
+        CHECK(listen(sfd,2)==0);
+        pid_t spid=fork();
+        if(spid==0){
+            int cfd=accept(sfd,nullptr,nullptr);
+            if(cfd>=0){
+                char req[2048];ssize_t r=read(cfd,req,sizeof req);(void)r;
+                const char *ddg_html=
+                    "<html><body>"
+                    "<div class=\"result\"><a class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fman7.org%2Flinux%2Fman-pages%2Fman7%2Flandlock.7.html&amp;rut=123\">landlock(7) - Linux manual page</a>"
+                    "<a class=\"result__snippet\">Unprivileged sandboxing &amp; access control.</a></div>"
+                    "</body></html>";
+                char resp[1024];
+                int n=snprintf(resp,sizeof resp,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                    strlen(ddg_html),ddg_html);
+                ssize_t w=write(cfd,resp,static_cast<size_t>(n));(void)w;
+                close(cfd);
+            }
+            close(sfd);
+            _exit(0);
+        }
+        close(sfd);
+        std::string search_ep="http://127.0.0.1:"+std::to_string(ntohs(addr.sin_port))+"/search";
+        setenv("DESK_SEARCH_URL",search_ep.c_str(),1);
+        JsonPtr ws_args(obj());
+        put(ws_args.get(),"query",str("linux landlock syscall"));
+        JsonPtr ws_res(tool_call(&a,"web_search",ws_args.get()));
+        unsetenv("DESK_SEARCH_URL");
+        int wst=0;waitpid(spid,&wst,0);
+        CHECK(!get(ws_res.get(),"error"));
+        J *items=get(ws_res.get(),"results");
+        CHECK(alen(items)==1);
+        CHECK(!strcmp(sget(at(items,0),"url"),"https://man7.org/linux/man-pages/man7/landlock.7.html"));
+        CHECK(strstr(sget(at(items,0),"snippet"),"Unprivileged sandboxing & access control."));
+    }
+
+    // 5. Anthropic native Prompt Caching (cache_control breakpoints + HTTP 400 fallback).
+    {
+        JsonPtr anth_cfg(config("anth-cache-test","anthropic"));
+        JsonPtr defs(schemas(&a));
+        JsonPtr msgs(arr());
+        J *sys=obj();put(sys,"role",str("system"));put(sys,"content",str("Project guide"));add(msgs.get(),sys);
+        J *usr=obj();put(usr,"role",str("user"));put(usr,"content",str("Hello Claude"));add(msgs.get(),usr);
+        JsonPtr cached(native_payload(anth_cfg.get(),msgs.get(),defs.get(),true));
+        J *sys_blocks=get(cached.get(),"system");
+        CHECK(json_object_is_type(sys_blocks,json_type_array)&&alen(sys_blocks)==1);
+        CHECK(!strcmp(sget(get(at(sys_blocks,0),"cache_control"),"type"),"ephemeral"));
+        J *tool_defs=get(cached.get(),"tools");
+        CHECK(!strcmp(sget(get(at(tool_defs,alen(tool_defs)-1),"cache_control"),"type"),"ephemeral"));
+        J *hist_msgs=get(cached.get(),"messages");
+        J *u_blocks=get(at(hist_msgs,0),"content");
+        CHECK(!strcmp(sget(get(at(u_blocks,alen(u_blocks)-1),"cache_control"),"type"),"ephemeral"));
+    }
+
+    app_cleanup(&a);
+}
+
 int main(int argc,char **argv){
     if(argc==2&&!strcmp(argv[1],"--mcp-fixture"))return mcp_fixture();
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -3153,6 +3558,8 @@ int main(int argc,char **argv){
     test_stream_usage_and_tail_utf8();
     test_code_outline_and_project_guide();
     test_mentions_paste_and_multimodal();
+    test_v1_13_features();
+    test_v1_14_features();
     test_chat_actions_layout();
     test_menu_navigation_and_resize();
     test_persistent_conversations();

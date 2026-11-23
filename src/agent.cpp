@@ -437,10 +437,10 @@ static void pending(App *a,J *calls,size_t start){
     }
 }
 static bool mutation(const char *name){
-    return !strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"desktop_action")||!strcmp(name,"desktop_set_text");
+    return !strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit")||!strcmp(name,"desktop_action")||!strcmp(name,"desktop_set_text");
 }
 static const char *domain(const char *name){
-    if(!strcmp(name,"read_file")||!strcmp(name,"write_file")||!strcmp(name,"edit_file"))return "file";
+    if(!strcmp(name,"read_file")||!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit"))return "file";
     if(!strncmp(name,"desktop_",8))return "desktop";
     return name;
 }
@@ -456,7 +456,7 @@ struct Observation {
 };
 static bool readonly_probe(const char *name){
     return !strcmp(name,"read_file")||!strcmp(name,"list_files")||!strcmp(name,"search_text")
-        ||!strcmp(name,"code_outline")||!strcmp(name,"delegate_research");
+        ||!strcmp(name,"code_outline")||!strcmp(name,"delegate_research")||!strcmp(name,"web_fetch")||!strcmp(name,"web_search");
 }
 static void recovery(App *a,std::vector<FailedOperation> &unresolved,const char *name,J *args,bool failed){
     const char *kind=domain(name),*target=sget(args,"path");
@@ -511,11 +511,14 @@ static J *repeated_result(const std::vector<Observation> &seen,const char *name,
 static void show_call(const char *name,J *args){
     const char *label=!strcmp(name,"read_file")?tr("读取文件"):!strcmp(name,"list_files")?tr("查看目录"):
         !strcmp(name,"search_text")?tr("搜索文本"):!strcmp(name,"code_outline")?tr("代码大纲"):
-        !strcmp(name,"delegate_research")?tr("调研代码库"):!strcmp(name,"edit_file")?tr("修改文件"):
-        !strcmp(name,"write_file")?tr("写入文件"):!strcmp(name,"run_shell")?tr("执行命令"):
-        !strcmp(name,"desktop_snapshot")?tr("读取桌面"):tr("操作桌面");
+        !strcmp(name,"delegate_research")?tr("调研代码库"):!strcmp(name,"web_fetch")?tr("读取网页"):
+        !strcmp(name,"web_search")?tr("联网搜索"):!strcmp(name,"multi_edit")?tr("批量修改文件"):
+        !strcmp(name,"edit_file")?tr("修改文件"):!strcmp(name,"write_file")?tr("写入文件"):
+        !strcmp(name,"run_shell")?tr("执行命令"):!strcmp(name,"desktop_snapshot")?tr("读取桌面"):
+        !strcmp(name,"desktop_screenshot")?tr("截取桌面"):tr("操作桌面");
     const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
-        !strcmp(name,"delegate_research")?sget(args,"question"):sget(args,"app");
+        !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"web_fetch")?sget(args,"url"):
+        !strcmp(name,"web_search")?sget(args,"query"):sget(args,"app");
     const int width=std::max(24,terminal_columns()-6);
     std::string head=std::string(ui_bullet())+" "+label;
     if(*target){
@@ -536,7 +539,7 @@ static void show_result(const char *name,J *r,double elapsed){
         detail=text;
     }
     else if(get(r,"written"))detail=tr(" · 已回读核对");
-    else if(!strcmp(name,"read_file")){
+    else if(!strcmp(name,"read_file")||!strcmp(name,"web_fetch")){
         snprintf(text,sizeof text,tr(" · %d 字节"),json_object_get_string_len(get(r,"content")));
         detail=text;
     }
@@ -555,6 +558,13 @@ static void show_result(const char *name,J *r,double elapsed){
     else if(!strcmp(name,"delegate_research")){
         snprintf(text,sizeof text,tr(" · %d 步"),iget(r,"steps",0));
         detail=text;
+    }
+    else if(!strcmp(name,"web_search")){
+        snprintf(text,sizeof text,tr(" · %zu 条结果"),alen(get(r,"results")));
+        detail=text;
+    }
+    else if(!strcmp(name,"desktop_screenshot")){
+        detail=tr(" · 已附带截图");
     }
     else if(get(r,"accepted"))detail=tr(" · 等待重新读取核对");
     char timing[48];
@@ -577,7 +587,10 @@ static const char *activity(const char *name){
     if(!strcmp(name,"search_text"))return tr("正在搜索…");
     if(!strcmp(name,"code_outline"))return tr("正在分析代码结构…");
     if(!strcmp(name,"delegate_research"))return tr("正在调研代码库…");
-    if(!strcmp(name,"write_file")||!strcmp(name,"edit_file"))return tr("正在编辑文件…");
+    if(!strcmp(name,"web_fetch"))return tr("正在读取网页…");
+    if(!strcmp(name,"web_search"))return tr("正在联网搜索…");
+    if(!strcmp(name,"desktop_screenshot"))return tr("正在截取桌面…");
+    if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit"))return tr("正在编辑文件…");
     if(!strcmp(name,"run_shell"))return tr("正在执行命令…");
     return tr("正在操作桌面…");
 }
@@ -616,6 +629,12 @@ int run_task(App *a,const char *task){
         if(!desktop_lock->acquired()){seterr(a,tr("桌面资源等待已取消、被占用或无法加锁；请返回对应对话处理已有操作。"));a->state=interrupted?"已取消":"失败";return -1;}
     }
     if(!a->messages)reset_session(a);
+    if(!a->subagent){
+        char tid[33];
+        id_string(tid);
+        a->turn_id=tid;
+        prune_workspace_cache(*a);
+    }
     size_t history_start=alen(a->messages);
     add(a->messages,prepare_user_message(a,task));
     history_checkpoint(*a,history_start);
@@ -745,7 +764,7 @@ int run_task(App *a,const char *task){
             a->error[0]=0;
             if(!cached&&!failed&&!strncmp(name,"desktop_",8)){
                 if(mutation(name))desktop_unverified=true;
-                else if(*sget(args,"app"))desktop_unverified=false;
+                else if(!strcmp(name,"desktop_screenshot")||*sget(args,"app"))desktop_unverified=false;
             }
             if(a->verbose)show_result(name,result,monotime()-tool_started);
             else if(failed){
@@ -757,7 +776,8 @@ int run_task(App *a,const char *task){
                 J *entry=obj();
                 put(entry,"name",str(name));
                 const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
-                    !strcmp(name,"delegate_research")?sget(args,"question"):sget(args,"app");
+                    !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"web_fetch")?sget(args,"url"):
+                    !strcmp(name,"web_search")?sget(args,"query"):sget(args,"app");
                 if(*target)put(entry,"target",str(excerpt(target,240).c_str()));
                 put(entry,"ok",json_object_new_boolean(!failed));
                 if(failed&&*sget(result,"error"))put(entry,"error",str(excerpt(sget(result,"error"),240).c_str()));

@@ -7,7 +7,7 @@ struct Job {
     int id=0;bool active=true,alive=true,cancelled=false,truncated=false;std::uint64_t dropped=0;
     bool retired=false;double retired_at=0;
     bool thinking=false;double thinking_started=0,changed_at=0,turn_started=0;
-    std::uint64_t tokens=0;int context=-1;std::string pending_events;
+    std::uint64_t tokens=0;int context=-1;bool shell_approval=false;std::string detail,pending_events;
     std::string title,workspace,state="执行中",text;
     WinHandle process,group,feed,approval,logs,events,cancellation;
     std::mutex mutex;std::jthread reader;
@@ -35,17 +35,26 @@ void pump(Job &job){
                 job.context=static_cast<unsigned char>(job.pending_events[k+1]);
                 k+=1;used=k+1;continue;
             }
+            if(event=='p'){
+                if(k+2>job.pending_events.size())break;
+                size_t plen=static_cast<unsigned char>(job.pending_events[k+1]);
+                if(k+2+plen>job.pending_events.size())break;
+                job.detail.assign(job.pending_events.data()+k+2,plen);
+                k+=1+plen;used=k+1;continue;
+            }
             used=k+1;
             job.changed_at=monotime();
-            if(event=='t'){job.thinking=true;job.thinking_started=monotime();continue;}
+            if(event=='t'){job.thinking=true;job.thinking_started=monotime();job.detail.clear();continue;}
             if(event=='e'){job.thinking=false;continue;}
             job.thinking=false;
-            if(event=='d'){job.state="已完成";job.active=false;}
-            else if(event=='f'){job.state="失败";job.active=false;}
-            else if(event=='c'){job.state="已取消";job.active=false;}
-            else if(event=='a')job.state="等待确认";
+            job.detail.clear();
+            if(event=='d'){job.state="已完成";job.active=false;job.shell_approval=false;}
+            else if(event=='f'){job.state="失败";job.active=false;job.shell_approval=false;}
+            else if(event=='c'){job.state="已取消";job.active=false;job.shell_approval=false;}
+            else if(event=='a'){job.state="等待确认";job.shell_approval=false;}
+            else if(event=='A'){job.state="等待确认";job.shell_approval=true;}
             else if(event=='q')job.state="等待资源";
-            else if(event=='r')job.state="执行中";
+            else if(event=='r'){job.state="执行中";job.shell_approval=false;}
         }
         job.pending_events.erase(0,used);
     }};
@@ -75,6 +84,16 @@ void task_context(App &app,int percent){
     if(app.task_events<0)return;
     const char message[2]={'x',static_cast<char>(std::clamp(percent,0,100))};
     DWORD count=0;WriteFile(reinterpret_cast<HANDLE>(app.task_events),message,sizeof message,&count,nullptr);
+}
+void task_detail(App &app,std::string_view detail){
+    if(app.task_events<0)return;
+    size_t len=(std::min)(detail.size(),static_cast<size_t>(96));
+    while(len>0&&len<detail.size()&&(static_cast<unsigned char>(detail[len])&0xc0)==0x80)--len;
+    char message[98];
+    message[0]='p';
+    message[1]=static_cast<char>(len);
+    if(len)memcpy(message+2,detail.data(),len);
+    DWORD count=0;WriteFile(reinterpret_cast<HANDLE>(app.task_events),message,static_cast<DWORD>(2+len),&count,nullptr);
 }
 ResourceLock::ResourceLock(App &app,bool desktop){
     std::string directory=desktop?app.config_dir:std::string(app.root)+"/.desk-agent";
@@ -167,6 +186,8 @@ J *Tasks::snapshot(){
         put(entry,"state",str(tr(job->active&&job->cancelled?"正在停止":job->state.c_str())));
         put(entry,"workspace",str(job->workspace.c_str()));
         put(entry,"awaiting_approval",json_object_new_boolean(job->active&&!job->cancelled&&job->state=="等待确认"));
+        put(entry,"shell_approval",json_object_new_boolean(job->active&&!job->cancelled&&job->state=="等待确认"&&job->shell_approval));
+        put(entry,"detail",str(job->detail.c_str()));
         put(entry,"changed_at",json_object_new_double(job->changed_at));
         bool thinking=job->thinking&&job->active&&!job->cancelled;
         put(entry,"thinking",json_object_new_boolean(thinking));
@@ -198,9 +219,11 @@ std::string Tasks::output(int id,bool *truncated,std::uint64_t *dropped){if(drop
 bool Tasks::decide(int id,bool allow){Job *job=impl->find(id);if(!job)return false;std::lock_guard lock(job->mutex);return job->active&&job->state=="等待确认"&&win_write(job->approval.get(),allow?"1\n":"2\n");}
 char *Tasks::readline(const char *prompt){refresh();if(on_idle)on_idle();return input(prompt,nullptr,false);}
 bool Tasks::respond(int id,int answer){
-    Job *job=impl->find(id);if(!job||answer<0||answer>3)return false;
+    Job *job=impl->find(id);if(!job||answer<0)return false;
     std::lock_guard lock(job->mutex);
-    return job->active&&job->state=="等待确认"&&win_write(job->approval.get(),std::to_string(answer)+"\n");
+    if(!job->active||job->state!="等待确认"||answer>(job->shell_approval?4:3))return false;
+    if(!win_write(job->approval.get(),std::to_string(answer)+"\n"))return false;
+    job->state="执行中";job->shell_approval=false;return true;
 }
 int task_worker(std::intptr_t raw){
     WinHandle control(reinterpret_cast<HANDLE>(raw));Lines source{control.get()};std::string line;if(!source.next(line))return 1;
