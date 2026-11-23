@@ -119,9 +119,6 @@ jobs:
   macos:
     runs-on: macos-15-intel
     timeout-minutes: 10
-    env:
-      DESK_NO_ARROW: 1
-      DESK_VERBOSE_TEST: 1
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -146,36 +143,40 @@ jobs:
             LDLIBS="$JSONC_DIR/lib/libjson-c.a $OSSL_DIR/lib/libssl.a $OSSL_DIR/lib/libcrypto.a $RL_DIR/lib/libreadline.a $RL_DIR/lib/libhistory.a -lcurl -lncurses"
           mkdir -p "$RUNNER_TEMP/build-x64" && cp build/desk "$RUNNER_TEMP/build-x64/desk"
 
-          fetch_arm64_lib() {
-            pkg="$1"
-            archive="$2"
-            dest="$RUNNER_TEMP/arm64-bottles/$pkg"
-            mkdir -p "$dest"
-            for tag in arm64_sequoia arm64_sonoma arm64_ventura; do
-              if brew fetch --force --bottle-tag="$tag" "$pkg" >/dev/null 2>&1; then
-                bottle="$(brew --cache --bottle-tag="$tag" "$pkg")"
-                if [ -f "$bottle" ]; then
-                  tar -xzf "$bottle" -C "$dest"
-                  found="$(find "$dest" -name "$archive" | head -n1)"
-                  if [ -n "$found" ]; then
-                    dirname "$found"
-                    return 0
-                  fi
-                fi
-              fi
-            done
-            echo "Failed to fetch arm64 bottle for $pkg ($archive)" >&2
-            return 1
+          fetch_arm64_root() {
+            python3 - "$1" "$2" "$RUNNER_TEMP/arm64-bottles/$1" <<'PY'
+          import hashlib, json, os, pathlib, sys, tarfile, urllib.request
+          pkg, archive, dest = sys.argv[1], sys.argv[2], sys.argv[3]
+          os.makedirs(dest, exist_ok=True)
+          meta = json.loads(urllib.request.urlopen(f"https://formulae.brew.sh/api/formula/{pkg}.json").read())
+          files = meta["bottle"]["stable"]["files"]
+          tag = next(t for t in ("arm64_sequoia", "arm64_sonoma", "arm64_ventura", "arm64_tahoe", "arm64_golden_gate") if t in files)
+          entry = files[tag]
+          req = urllib.request.Request(entry["url"], headers={"Authorization": "Bearer QQ=="})
+          blob = urllib.request.urlopen(req).read()
+          if hashlib.sha256(blob).hexdigest() != entry["sha256"]:
+              raise SystemExit(f"SHA256 mismatch for {pkg} ({tag})")
+          tgz = os.path.join(dest, "bottle.tar.gz")
+          with open(tgz, "wb") as fh:
+              fh.write(blob)
+          with tarfile.open(tgz) as tf:
+              tf.extractall(dest)
+          matches = list(pathlib.Path(dest).rglob(archive))
+          if not matches:
+              raise SystemExit(f"Missing {archive} in {pkg} ({tag})")
+          print(matches[0].parent.parent)
+          PY
           }
-          ARM_JSONC_LIB="$(fetch_arm64_lib json-c libjson-c.a)"
-          ARM_OSSL_LIB="$(fetch_arm64_lib openssl@3 libssl.a)"
-          ARM_RL_LIB="$(fetch_arm64_lib readline libreadline.a)"
+          ARM_JSONC_ROOT="$(fetch_arm64_root json-c libjson-c.a)"
+          ARM_OSSL_ROOT="$(fetch_arm64_root openssl@3 libssl.a)"
+          ARM_RL_ROOT="$(fetch_arm64_root readline libreadline.a)"
+          ARM_INC_FLAGS="-isystem $ARM_JSONC_ROOT/include -isystem $ARM_JSONC_ROOT/include/json-c -isystem $ARM_OSSL_ROOT/include -isystem $ARM_RL_ROOT/include -Isrc"
 
           rm -rf build
           make -j4 build/desk \
             CXXFLAGS="-O2 -g -arch arm64" \
-            CPPFLAGS="$INC_FLAGS" \
-            LDLIBS="$ARM_JSONC_LIB/libjson-c.a $ARM_OSSL_LIB/libssl.a $ARM_OSSL_LIB/libcrypto.a $ARM_RL_LIB/libreadline.a $ARM_RL_LIB/libhistory.a -lcurl -lncurses"
+            CPPFLAGS="$ARM_INC_FLAGS" \
+            LDLIBS="$ARM_JSONC_ROOT/lib/libjson-c.a $ARM_OSSL_ROOT/lib/libssl.a $ARM_OSSL_ROOT/lib/libcrypto.a $ARM_RL_ROOT/lib/libreadline.a $ARM_RL_ROOT/lib/libhistory.a -lcurl -lncurses"
           mkdir -p "$RUNNER_TEMP/build-arm64" && cp build/desk "$RUNNER_TEMP/build-arm64/desk"
 
           mkdir -p dist/desk-agent-macos-universal
