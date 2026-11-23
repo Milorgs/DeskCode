@@ -3370,6 +3370,13 @@ static void test_v1_14_features(){
         CHECK(access(shm_probe,F_OK)==0);
         unlink(shm_probe);
         a.sandbox=true;
+
+        setenv("DESK_NO_SANDBOX","1",1);
+        JsonPtr r_env_nosb(run_command(&a,outside_cmd.c_str(),5000));
+        unsetenv("DESK_NO_SANDBOX");
+        CHECK(iget(r_env_nosb.get(),"exit_code",-1)==0);
+        CHECK(access(shm_probe,F_OK)==0);
+        unlink(shm_probe);
     }
 
     // 2. Atomic multi-hunk multi_edit + rollback on failed hunk + /undo.
@@ -3448,12 +3455,30 @@ static void test_v1_14_features(){
         const char *rel_tpl="Generate bilingual release summary.";
         CHECK(!atomic_file((std::string(a.root)+"/.deskcode/commands/audit.md").c_str(),rev_tpl,strlen(rev_tpl),0600));
         CHECK(!atomic_file((std::string(a.root)+"/.desk-agent/commands/ship.md").c_str(),rel_tpl,strlen(rel_tpl),0600));
+        CHECK(!atomic_file((std::string(a.root)+"/.deskcode/commands/sandbox.md").c_str(),rel_tpl,strlen(rel_tpl),0600));
         auto cmds=list_custom_commands(a);
         CHECK(cmds.size()==2);
         std::string expanded,label;
+        CHECK(!expand_custom_command(a,"/sandbox",expanded,label));
+        CHECK(!expand_custom_command(a,"/sandbox off",expanded,label));
         CHECK(expand_custom_command(a,"/audit src/mcp.cpp",expanded,label));
         CHECK(label=="/audit src/mcp.cpp");
         CHECK(expanded.find("Audit src/mcp.cpp for thread safety and leaks.")!=std::string::npos);
+
+        auto help_zh=run_desk({"--help"},{},"");
+        auto help_en=run_desk({"--lang","en","--help"},{},"");
+        CHECK(help_zh.status==0&&help_zh.out.find("--no-sandbox")!=std::string::npos);
+        CHECK(help_en.status==0&&help_en.out.find("--no-sandbox")!=std::string::npos);
+#ifdef __linux__
+        JsonPtr tool_list(schemas(&a));
+        bool shell_mentions_landlock=false;
+        for(size_t i=0;i<alen(tool_list.get());i++){
+            J *fn=get(at(tool_list.get(),i),"function");
+            if(!strcmp(sget(fn,"name"),"run_shell")&&strstr(sget(fn,"description"),"Landlock"))
+                shell_mentions_landlock=true;
+        }
+        CHECK(shell_mentions_landlock);
+#endif
 
         CHECK(!atomic_file((std::string(a.root)+"/deskcode.md").c_str(),"Follow DESKCODE native rules.\n",30,0600));
         std::string guide=load_project_guide(a);

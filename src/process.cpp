@@ -149,6 +149,7 @@ J *run_command(App *a,const char *command,int timeout_ms){
     }
     double start=monotime();
 #ifdef __linux__
+    const bool use_sandbox=a->sandbox&&sandbox_supported();
     const std::string sandbox_error=std::string(tr("无法启用 Landlock 沙箱，命令未执行。"))+'\n';
 #endif
     pid_t child=fork();
@@ -165,7 +166,7 @@ J *run_command(App *a,const char *command,int timeout_ms){
         if(fileno(output)>2)close(fileno(output));
 #ifdef __linux__
         const char *no_sb=env_value("DESK_NO_SANDBOX");
-        if(a->sandbox&&(!no_sb||!*no_sb||!strcmp(no_sb,"0"))&&!apply_landlock_sandbox(a->root)){
+        if(use_sandbox&&(!no_sb||!*no_sb||!strcmp(no_sb,"0"))&&!apply_landlock_sandbox(a->root)){
             const ssize_t written=write(STDERR_FILENO,sandbox_error.data(),sandbox_error.size());
             (void)written;
             _exit(126);

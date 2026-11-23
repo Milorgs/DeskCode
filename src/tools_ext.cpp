@@ -1133,7 +1133,7 @@ std::vector<std::string> collect_hook_commands(App &app,const char *event_name,s
 bool builtin_slash_name(std::string_view name){
     static constexpr std::string_view reserved[]={
         "help","status","clear","undo","compact","paste","model",
-        "reasoning","approval","perm","mcp","new","commands"
+        "reasoning","approval","perm","mcp","new","commands","sandbox"
     };
     for(auto r:reserved)if(name==r)return true;
     return false;

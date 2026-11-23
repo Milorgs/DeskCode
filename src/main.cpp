@@ -1182,7 +1182,7 @@ static void show_inline_status(const App &app){
 }
 static void show_inline_help(){
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /commands 自定义指令\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1433,6 +1433,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
         if(trimmed=="/commands"){show_custom_commands(*a);continue;}
         if(trimmed=="/sandbox"){
             if(!sandbox_supported()){
+                a->sandbox=false;
                 terminal_message(ui_paint(Tone::Dim,std::string("  ")+tr("当前平台或内核未启用 Landlock 内核沙箱。"))+"\n");
             }else{
                 a->sandbox=!a->sandbox;
@@ -1819,7 +1820,7 @@ static int menu(App *a,int start_mode=0){
     }
 }
 static void help(void){
-    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --allow-desktop  --record  --verbose  --version  --help"));
+    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --no-sandbox  --allow-desktop  --record  --verbose  --version  --help"));
 }
 #ifdef _WIN32
 #define desk_dup _dup

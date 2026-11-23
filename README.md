@@ -120,9 +120,9 @@ In a chat, press `/` for the command palette (model, reasoning, approval, new ch
 
 ## 安装包和源码 / Packages and source
 
-最新版本：**1.14.1**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64；macOS 支持直接从源码构建。
+最新版本：**1.14.2**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64；macOS 支持直接从源码构建。
 
-Latest version: **1.14.1**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries; the Windows package targets Windows 10/11 x64; macOS builds directly from source.
+Latest version: **1.14.2**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries; the Windows package targets Windows 10/11 x64; macOS builds directly from source.
 
 也可以直接进入对话或执行一次请求：
 

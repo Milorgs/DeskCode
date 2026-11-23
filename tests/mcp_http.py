@@ -122,7 +122,11 @@ for native,source in ((False,'file'),(True,'url'),(False,'paste')):
             send('/');until('❯ 1. Select model')
             send('\x1b[B'*2);until('❯ 3. Approval mode')
             send('\n');until('❯ 1. Ask for approval')
-            send('0\n');until('❯ ')
+            send('0\n');until('Reasoning:')
+            deadline=time.monotonic()+10
+            while b'\x1b[?2004h' not in page:
+                assert time.monotonic()<deadline,(page[-4000:].decode(errors='replace'),state)
+                assert read(),(page[-4000:].decode(errors='replace'),state)
             send('\x04');until('0. Main menu');send('0\n0\n')
             deadline=time.monotonic()+8
             while read(): assert time.monotonic()<deadline
