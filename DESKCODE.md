@@ -43,7 +43,7 @@ PTY 测试全绿不代表真实终端渲染无误，涉及 UI/排版改动后必
 
 ## 版本与发布
 
-版本号同步维护在四处：`src/desk.hpp`（`VERSION`）、`CMakeLists.txt`、`vcpkg.json`、`README.md`（中英两处），并同步新增中英双语发布说明 `docs/releases/v<版本>.md`。
+版本号同步维护在五处：`src/desk.hpp`（`VERSION`）、`CMakeLists.txt`、`vcpkg.json`、`README.md`、`README_EN.md`，并同步新增中英双语发布说明 `docs/releases/v<版本>.md`。
 
 ## 代码约定
 

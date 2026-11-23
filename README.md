@@ -1,162 +1,226 @@
 # DeskCode
 
-## 我做了什么 / What I built
+**原生 C++20 跨平台终端与桌面 AI 编程助手** — 集成本地代码精确编辑、Linux Landlock 内核沙箱命令执行、多模态桌面无障碍自动化、OpenAI / Anthropic 原生双协议流式推理与 MCP 工具生态。
 
-我做了 `DeskCode`，一个用终端操作的 CLI AI 助手。我用它编辑本地文件、执行终端任务、操作桌面应用，也可以同时运行多个对话。
+[![Build and tests](https://github.com/Milorgs/DeskCode/actions/workflows/test.yml/badge.svg)](https://github.com/Milorgs/DeskCode/actions/workflows/test.yml)
+[![Latest Release](https://img.shields.io/github/v/release/Milorgs/DeskCode?label=release)](https://github.com/Milorgs/DeskCode/releases)
+[![Standard](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](CMakeLists.txt)
+[![Platforms](https://img.shields.io/badge/platform-Linux%20x64%20%7C%20Windows%20x64%20%7C%20macOS-4c8bf5)](https://github.com/Milorgs/DeskCode/releases)
 
-I built `DeskCode`, a terminal AI assistant. I use it to edit local files, run terminal tasks, control desktop applications, and keep multiple conversations running at the same time.
+简体中文 | [English](README_EN.md)
 
-支持 Linux x86_64、Windows 10/11 x64 与 macOS 源码构建。模型接口支持 OpenAI 兼容接口和 Anthropic 原生接口（含自动 `cache_control` 提示词缓存断点），也支持导入 MCP 工具、项目约定 `DESKCODE.md`、生命周期钩子（`hooks.json`）与自定义斜杠指令（`.deskcode/commands/*.md`）。
+---
 
-It supports Linux x86_64, Windows 10/11 x64, and macOS source builds, OpenAI-compatible APIs, the native Anthropic API (with automatic `cache_control` prompt caching), imported MCP tools, `DESKCODE.md` project instructions, lifecycle hooks (`hooks.json`), and custom slash commands (`.deskcode/commands/*.md`).
+## 核心特性
 
-## 一行安装 / One-line install
+- **原生 C++20 单二进制交付**：无需 Node.js 或 Python 运行时，毫秒级启动、低内存占用；终端内置底部固定输入栏、实时流式 Markdown 排版、彩色 Diff 审批框、鼠标滚轮翻阅与右侧拖拽滚动条。
+- **可校验、可撤回的原子代码编辑**：写入强制核对 `SHA256` 杜绝盲改覆盖；支持单处精确替换 `edit_file` 与单次最多 20 处原子替换 `multi_edit`（最大 `4 MB` 源码文件），自动兼容 `CRLF` 换行，支持 `/undo` 一键回滚上一轮修改与新建文件（部分失败自动保留进度可重试）。
+- **Linux Landlock 内核沙箱与细粒度审批**：Linux 下默认启用 Landlock 内核级文件系统沙箱，限制子进程仅可写入当前工作区与 `/tmp`；支持 `ask` / `edit` / `full` 三档批准模式，`edit` 模式自动放行只读检查命令，命令审批支持「本对话允许同类」，并实时显示耗时命令最新输出行。
+- **跨平台桌面无障碍自动化 + 多模态视觉**：原生对接 Linux `AT-SPI`、Windows `UI Automation` 与 macOS `System Events`（支持最多 500 个控件节点与 `filter` 过滤），配合 `desktop_screenshot` 桌面视觉截图、`/paste` 剪贴板贴图与 `@图片` 内联输入，打通终端与 GUI 应用边界。
+- **双协议原生推理与提示词缓存**：原生支持 OpenAI Chat Completions 与 Anthropic Messages API（含自适应推理强度 `reasoning_effort` / `thinking` 与 Anthropic 自动 `cache_control` 提示词缓存断点），内置 OpenAI、Anthropic、DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter 与本地 Ollama 预设。
+- **多对话后台并发与工程化扩展**：支持同时挂起多个后台对话（最多 4 路并发执行、32 个会话槽），`Ctrl+D` 返回列表不中断后台任务；原生支持跨平台本地 `stdio` 与远程 `Streamable HTTP` **MCP 服务**、项目规范 `DESKCODE.md`、生命周期钩子 `hooks.json` 与自定义斜杠指令。
 
-### Linux
+---
+
+## 快速安装
+
+当前最新版本：**1.14.2**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+
+### Linux (x86_64)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-linux.sh | sh
 ```
 
-脚本会下载最新 Linux 版本，安装到 `~/.local/bin/desk`，并尝试加入当前用户的 PATH。安装后重新打开终端，输入 `desk`。
+脚本自动下载最新 Linux 发行包并安装至 `~/.local/bin/desk`（必要时自动写入当前用户 `PATH`）。重新打开终端后输入 `desk` 即可启动。
 
-This downloads the latest Linux release, installs `desk` to `~/.local/bin`, and adds it to your PATH when possible. Open a new terminal and run `desk`.
-
-### Windows PowerShell
+### Windows 10/11 (PowerShell x64)
 
 ```powershell
 irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 | iex
 ```
 
-脚本会下载最新 Windows 版本，安装到当前用户目录，并加入用户 PATH。安装后重新打开 PowerShell，输入 `desk`。
+脚本自动下载最新 Windows 发行包到当前用户目录并加入用户 `PATH`。重新打开 PowerShell 后输入 `desk` 即可启动。
 
-This downloads the latest Windows release, installs it for the current user, and adds it to the user PATH. Open a new PowerShell window and run `desk`.
-
-手动下载： [GitHub Releases](https://github.com/Milorgs/DeskCode/releases)。
-
-Manual downloads: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases).
-
-## 第一次使用 / First run
-
-1. 输入 `desk`。没有模型时，主菜单会提示并默认选中「添加模型」。
-2. 选择服务商：OpenAI、Anthropic、DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter 或 Ollama 本地模型。
-3. 填入 API Key（地址已预填），从在线模型列表中选一个模型。
-4. 选择 `[1] 开始对话`，直接描述要做的事。
-
-1. Run `desk`. With no model configured, the main menu says so and preselects Add model.
-2. Pick a provider: OpenAI, Anthropic, DeepSeek, Kimi, Qwen, Zhipu GLM, SiliconFlow, OpenRouter, or local Ollama.
-3. Enter the API key (the URL is prefilled) and choose a model from the provider's live list.
-4. Choose `[1] Start chat` and describe what you want done.
-
-API Key 只保存在我运行 `desk` 的本机用户配置目录，不会写入仓库或安装包。随时可以运行 `desk doctor` 检查环境。
-
-API keys stay in the local user configuration directory where I run `desk`. They are not included in the repository or release packages. Run `desk doctor` at any time to check the setup.
-
-## 我能做什么 / What I can do
-
-- 用自然语言读取、搜索、编辑工作目录内的文件（`edit_file` 与单次多处原子替换的 `multi_edit` 支持最大 4 MB 源码文件）；改动前在审批面板里看到带颜色的 diff，随时输入 `/undo` 一键撤回上一轮修改与新建文件。
-- 用 `code_outline` 提取源码符号与行号大纲，用支持正则、`file_pattern` 通配符与 `.gitignore` 过滤的 `search_text` 精准搜索，用 `delegate_research` 发起只读子任务调研，用 `web_search` 与 `web_fetch` 联网检索并读取网页，自动加载项目根目录的 `DESKCODE.md` / `deskcode.md`（兼容 `AGENTS.md`）、生命周期钩子（`post_edit` / `pre_shell`）与自定义斜杠指令。
-- 输入 `@关键词` 按 `Tab` 模糊补全文件，发送 `@文件` 或 `@文件:起-止` 直接附带文件/图片内容；用 `/paste` 附带剪贴板图片，多行粘贴自动折叠不误提交；用 `/compact` 主动将长对话提炼为高密度续接摘要。
-- 执行终端命令并实时显示最新输出行进度；Linux 下默认启用 **Landlock 内核级文件系统沙箱**禁止命令修改工作目录外的宿主文件，「帮我批准」模式下自动放行安全的只读检查命令，命令审批时可选「本对话允许同类」。
-- 通过 Linux AT-SPI、Windows UI Automation 或 macOS System Events 操作桌面应用（支持最多 500 个节点与 `filter` 过滤），并支持 `desktop_screenshot` 桌面多模态视觉截图。
-- 使用多个模型配置，选择后会成为下次启动的默认模型。
-- 在对话列表中切换对话；按 `Ctrl+D` 返回列表，任务会继续在后台运行。`desk -c` 直接继续最近的对话。
-- 在 Linux、Windows 和 macOS 上均可导入本地 stdio 或远程 Streamable HTTP MCP 服务。
-- 回复按 Markdown 排版，代码块、列表和标题在终端里清晰可读。
-
-- Read, search, and edit files inside the workspace (`edit_file` and multi-hunk atomic `multi_edit` support files up to 4 MB), review a coloured diff before each change, and run `/undo` to revert the last turn's file edits and newly created files in one step.
-- Map source symbols and line numbers with `code_outline`, search with regex, `file_pattern` globs, and `.gitignore` awareness in `search_text`, delegate multi-file investigation with read-only `delegate_research`, search and fetch documentation pages with `web_search` + `web_fetch`, and load workspace `DESKCODE.md` / `deskcode.md` (compatible with `AGENTS.md`), `post_edit` / `pre_shell` hooks, and custom slash commands automatically.
-- Type `@query` + `Tab` to fuzzy-complete workspace files, attach `@file` or `@file:start-end` slices and images inline, run `/paste` to attach clipboard images, paste multiline snippets safely without premature submission, and run `/compact` to condense long conversations into a dense continuation summary.
-- Run terminal commands with live latest-line progress; on Linux, the **Landlock kernel sandbox** restricts shell writes to the workspace and `/tmp` by default, auto-edit mode lets verified read-only inspection commands run without friction, and shell approvals include an `Allow similar` option for the current chat.
-- Control desktop applications through Linux AT-SPI, Windows UI Automation, or macOS System Events (up to 500 controls with `filter` support) and inspect UI state visually with `desktop_screenshot`.
-- Keep multiple model profiles; the selected profile becomes the default on the next launch.
-- Switch conversations; `Ctrl+D` returns to the list while tasks keep running in the background. `desk -c` resumes the latest one.
-- Import local stdio or remote Streamable HTTP MCP servers on Linux, Windows, and macOS.
-- Replies render as Markdown, so code blocks, lists and headings stay readable in the terminal.
-
-MCP 菜单支持从文件导入、直接粘贴多行 JSON，以及查看或保存配置示例。也可以直接填写远程 MCP 地址。
-
-The MCP menu accepts a configuration file or pasted multiline JSON and can show or save an example. You can also enter a remote MCP URL directly.
-
-对话会自动保存在本机，按工作目录分别显示。重开后可以继续、重命名或删除。Linux 默认位置是 `~/.config/desk-agent/history/`，Windows 是 `%LOCALAPPDATA%\desk-agent\history\`。
-
-Chats are saved locally and listed by workspace. Reopen them to continue, rename, or delete. The default locations are `~/.config/desk-agent/history/` on Linux and `%LOCALAPPDATA%\desk-agent\history\` on Windows.
-
-## 脚本与 AI 调用 / Scripts and agents
+### macOS（源码构建）
 
 ```sh
-desk -p "检查当前项目并告诉我最重要的问题" > report.md   # 标准输出只有最终回复
-git diff | desk -p - --approval edit                      # 从标准输入读取需求
-desk --json -p "运行测试并修复失败用例" --approval edit    # 一个 JSON 结果
-desk doctor --json                                        # 机器可读的环境检查
+brew install curl json-c openssl@3 readline pkg-config
+make -j"$(sysctl -n hw.ncpu)" && ./install.sh
 ```
 
-`--json` 输出 `status`（`completed`、`failed`、`approval_required`、`denied`、`interrupted`、`step_limit`、`not_configured`）、`reply`、`error`、`tokens`、`elapsed_seconds` 和 `tools`（每次工具调用的名称、目标与结果）。没有终端时如需批准，会返回 `approval_required`，用 `--approval edit` 或 `--approval full` 重新运行。退出码：0 完成、1 未完成、2 参数错误、130 已中断。
+---
 
-`--json` prints `status` (`completed`, `failed`, `approval_required`, `denied`, `interrupted`, `step_limit`, `not_configured`), `reply`, `error`, `tokens`, `elapsed_seconds`, and `tools` (name, target and result of each tool call). Without a terminal, a needed approval returns `approval_required`; rerun with `--approval edit` or `--approval full`. Exit codes: 0 done, 1 not completed, 2 usage error, 130 interrupted.
+## 30 秒上手
 
-## 菜单和快捷键 / Menus and keys
-
-```text
-[1] 开始对话 / Start chat
-[2] 选择模型 / Select model
-[3] 添加模型 / Add model
-[4] MCP 服务 / MCP servers
-[5] 设置 / Settings
-[0] 退出 / Exit
-```
-
-对话中按 `/` 打开命令面板（选择模型、推理模式、批准模式、新建对话、清空上下文、查看状态、快捷键帮助等），`F2` 切换模型，`F3` 调整推理强度。鼠标放进对话窗口直接用滚轮上下滚动审查对话（审批 diff 时同样可滚轮翻阅），也可以按住右侧滚动条拖动定位；按住 `Shift` 拖动鼠标选择文字，也支持 `↑/↓`、`PgUp/PgDn` 翻页、`Ctrl+↑/↓` 逐行滚动；`Ctrl+P/Ctrl+N`（或 `Alt+↑/↓`）调出本对话之前发送的需求，底部状态栏显示估算的上下文占用比例。二级菜单按 `Esc` 返回。Linux 下：
-
-- `Ctrl+D`：返回选择对话，任务继续运行。
-- `Ctrl+C`：停止当前任务。
-- `0`：普通需求内容，不是退出键。
-
-In a chat, press `/` for the command palette (model, reasoning, approval, new chat, clear context, status, keyboard shortcuts, and more), `F2` to switch models, or `F3` to adjust reasoning. Hover the mouse inside the conversation and use the scroll wheel to review messages and approval diffs or drag the right-hand scrollbar to navigate; hold `Shift` while dragging to select text, or use `Up/Down`, `PgUp/PgDn` by page, and `Ctrl+Up/Down` by line. `Ctrl+P/Ctrl+N` (or `Alt+Up/Down`) recall earlier requests of the conversation, and the status line shows an estimate of how much of the context budget is in use. `Esc` leaves submenus. On Linux:
-
-- `Ctrl+D`: return to the conversation list while the task continues.
-- `Ctrl+C`: stop the current task.
-- `0`: normal request text, not an exit key.
-
-## 安装包和源码 / Packages and source
-
-最新版本：**1.14.2**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64；macOS 支持直接从源码构建。
-
-Latest version: **1.14.2**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries; the Windows package targets Windows 10/11 x64; macOS builds directly from source.
-
-也可以直接进入对话或执行一次请求：
+1. 运行 `desk` 打开主菜单（首次未配置模型时会自动高亮引导 **「添加模型」**）。
+2. 选择内置服务商预设（DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter、OpenAI、Anthropic 或本地 Ollama）。
+3. 填入 API Key（接口地址已自动预填），直接从拉取的在线模型列表中选择目标模型。
+4. 选择 **`[1] 开始对话`**，或使用命令行快捷入口：
 
 ```sh
-desk chat
-desk -p "检查当前项目并告诉我最重要的问题"
+desk                        # 打开交互主菜单与多对话管理器
+desk chat                   # 在当前目录直接新建对话
+desk -c                     # 继续当前目录最近一次对话（同 --continue）
+desk "梳理项目架构并运行测试"  # 单次执行需求后退出（同 -p）
+desk doctor                 # 检查工作区权限、模型配置、沙箱与桌面支持状态
 ```
 
-You can also start a chat directly or run one request:
+> **本地密钥与安全隔离**：API Key 仅以私有权限（Linux/macOS `0600`，Windows 当前用户独占 ACL）保存在本机配置目录（`~/.config/desk-agent` 或 `%LOCALAPPDATA%\desk-agent`）。执行 Shell 命令与本地 MCP 子进程时，所有含 `KEY`、`TOKEN`、`SECRET`、`PASSWORD` 的敏感环境变量均会被自动剥离。
+
+---
+
+## 内置工具矩阵（15 项 + MCP）
+
+| 类别 | 工具名 | 功能说明 |
+|---|---|---|
+| **代码浏览与调研** | `list_files` | 列出工作区目录结构与文件字节大小（支持 `max_depth` `1..4`） |
+| | `read_file` | 读取 UTF-8 文件全文（`256 KB` 内）或按 `start_line..end_line` 分段读取最大 `16 MB` 文件（`4 MB` 内均返回全文 `SHA256`） |
+| | `search_text` | 递归全文/ECMAScript 正则搜索，支持 `file_pattern` 通配符（如 `*.{cpp,hpp}`）并自动遵守 `.gitignore` |
+| | `code_outline` | 提取源码中的类、结构体、接口、枚举、函数与方法定义及行号大纲 |
+| | `delegate_research` | 启动独立上下文的只读调研子代理完成跨文件排查，避免撑满主会话上下文 |
+| **安全代码编辑** | `edit_file` | 校验 `SHA256` 后对文件（最大 `4 MB`）做唯一精确替换，歧义时返回候选行号 |
+| | `multi_edit` | 单次 `SHA256` 校验下对同一文件原子应用 `1..20` 处修改（任一分块不匹配则整体零写入回滚） |
+| | `write_file` | 新建或完整替换 UTF-8 文件，自动生成 `.bak` 备份并回读校验 |
+| **终端与联网** | `run_shell` | 执行非交互式命令（默认 30s，最高 300s），支持实时输出进度与 Linux Landlock 内核写保护 |
+| | `web_search` | 关键词联网检索并返回标题、链接与摘要（支持通过 `DESK_SEARCH_URL` 接入自建检索端） |
+| | `web_fetch` | 拉取公开 HTTPS 网页（或本机调试 `localhost` HTTP）并提取可读正文，内置私有/内网地址 SSRF 拦截与 DNS 绑定校验 |
+| **桌面自动化与视觉** | `desktop_snapshot` | 读取当前桌面应用列表或目标应用的无障碍控件树（最多 500 节点，支持 `filter` 过滤） |
+| | `desktop_action` | 触发最新快照中指定控件暴露的原语动作（点击、激活等） |
+| | `desktop_set_text` | 设置可编辑桌面控件的文本内容 |
+| | `desktop_screenshot` | 截取当前活动窗口或全屏 PNG 图像并按多模态图像块送入模型进行视觉核验 |
+| **MCP 生态扩展** | `mcp_<server>_<tool>` | 动态挂载本地 `stdio` 或远程 `Streamable HTTP` MCP 服务暴露的工具（支持分页发现、会话鉴权与自动清理） |
+
+---
+
+## 对话指令与快捷键
+
+### 斜杠指令与上下文引用
+
+| 指令 / 语法 | 作用 |
+|---|---|
+| `@关键词` + `Tab` | 模糊搜索并补全工作区文件路径（遵循 `.gitignore`） |
+| `@文件` / `@文件:起-止` | 在消息中直接内联附带源码片段或本地图片（`PNG` / `JPEG` / `WebP` / `GIF`） |
+| `/` | 打开交互式对话操作面板（切换模型、推理强度、批准模式、MCP、清空上下文等） |
+| `/undo` | 一键撤回上一轮任务修改与新建的工作区文件 |
+| `/compact` | 主动调用当前模型将长对话压缩为高密度工程续接摘要 |
+| `/paste [说明]` | 从系统剪贴板读取图片并附带到当前输入（或按 `Ctrl+V`） |
+| `/sandbox` | 开启或关闭当前会话的 Linux Landlock 内核文件系统沙箱 |
+| `/commands` | 查看已加载的工作区与用户级自定义斜杠指令 |
+| `/approval`（或 `/perm`） | 切换当前对话批准模式（请求批准 / 帮我批准 / 完全访问权限） |
+| `/model` · `/reasoning` | 切换模型配置 · 调整模型原生推理强度档位 |
+| `/mcp` · `/status` · `/clear` · `/new` · `/help` | 管理 MCP 服务 · 查看会话与词元状态 · 清空上下文 · 新建对话 · 查看快捷键帮助 |
+
+### 键盘与鼠标操作
+
+- **`F2` / `F3`**：快速切换模型 / 调整思考推理强度。
+- **`Alt+Enter`**：在输入框内插入换行；粘贴多行代码自动折叠为摘要块，不会误触发提交。
+- **`Ctrl+P` / `Ctrl+N`（或 `Alt+↑` / `Alt+↓`）**：回调当前对话历史发送过的需求。
+- **鼠标滚轮 / 右侧滚动条 / `PgUp` `PgDn` / `Ctrl+↑↓`**：上下滚动审阅历史对话与审批面板中的长 Diff；按住 **`Shift` + 鼠标拖动** 选择复制终端文字。
+- **`Ctrl+C`**：立即中断当前正在执行的请求或命令；**`Ctrl+D`**：返回对话列表，当前对话在后台继续执行。
+
+---
+
+## 项目级定制与扩展
+
+### 1. 项目约定文件 `DESKCODE.md`
+在仓库根目录放置 `DESKCODE.md`（或 `deskcode.md`，同时兼容 `AGENTS.md` 与 `CLAUDE.md`），DeskCode 会在发起请求时自动注入项目构建命令、目录结构与代码规范（设置 `DESK_NO_PROJECT_GUIDE=1` 可临时关闭）。
+
+### 2. 自定义斜杠指令（`.deskcode/commands/*.md`）
+在工作区 `.deskcode/commands/`、`.desk-agent/commands/` 或用户目录 `~/.config/desk-agent/commands/` 下创建 Markdown 模板，即可在对话中通过 `/<文件名> [参数]` 调用：
+
+```markdown
+<!-- .deskcode/commands/review.md -->
+请审查 $ARGUMENTS 的并发安全、错误处理、边界条件与潜在内存泄漏，并给出具体修复建议。
+```
+
+### 3. 生命周期钩子（`hooks.json`）
+在 `~/.config/desk-agent/hooks.json` 或工作区 `.desk-agent/hooks.json`（工作区级钩子首次运行前会弹窗请求批准）配置 `pre_shell` 与 `post_edit`：
+
+```json
+{
+  "pre_shell": "if echo \"$DESK_HOOK_CMD\" | grep -q 'git push --force'; then echo '禁止强制推送'; exit 1; fi",
+  "post_edit": [
+    {
+      "pattern": "*.{cpp,hpp}",
+      "command": "make -j4 build/desk"
+    }
+  ]
+}
+```
+- `pre_shell` 返回非零退出码时直接拦截该命令并将输出原因返回给模型；
+- `post_edit` 在文件写入成功后自动运行，并将 `hook_exit_code` 与 `hook_output`（如编译报错或单测输出）回传给模型继续自修。
+
+### 4. MCP 服务配置
+在主菜单或对话内输入 `/mcp`，支持从文件导入、直接粘贴多行 JSON 或填写远程 URL，同时兼容本地 `stdio` 与远程 `Streamable HTTP`：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "remote-docs": {
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 脚本化与无头自动化（CI / Agent 调用）
+
+当标准输出重定向到文件或管道时，DeskCode 自动将进度与提示输出到 `stderr`，`stdout` 仅输出最终纯文本回复；加上 `--json` 则输出单行结构化 JSON：
 
 ```sh
-desk chat
-desk -p "Review this project and tell me the most important issue"
+# 仅将最终报告写入文件
+desk -p "检查当前项目并列出最关键的三个风险点" > report.md
+
+# 从标准输入管道读取 diff 并自动批准工作区内文件编辑
+git diff | desk -p - --approval edit
+
+# 输出机器可读 JSON（含 status / reply / tokens / elapsed_seconds / tools 调用轨迹）
+desk --json -p "运行测试并修复失败用例" --approval edit --max-steps 25
+
+# 机器可读环境健康检查
+desk doctor --json
 ```
 
-我只在需要开发或修改源码时从源码构建：
+- **批准档位**：`--approval ask`（默认）｜`--approval edit`（自动批准工作区文件修改与安全只读命令）｜`--approval full`（同 `--yes`，自动批准已启用工具；可选 `--no-sandbox` 关闭沙箱）。
+- **退出码约定**：`0` 完成 · `1` 未完成（含非交互终端下需人工审批返回 `approval_required`） · `2` 参数错误 · `130` 中断退出。
 
-I build from source only when I need to develop or modify the code:
+---
+
+## 从源码构建与测试
+
+### Linux / macOS
+依赖：C++20 编译器（GCC 11+ / Clang 14+）、`make`、`pkg-config`、`libcurl`、`json-c`、`openssl`、`readline`；Linux 桌面无障碍支持另需 `libatspi2.0-dev`。
 
 ```sh
-make
-./build/desk
+make -j"$(nproc)"          # 编译 build/desk
+make test                  # 运行单元与集成回归测试套件（约 4960+ 项断言）
+make test-mcp-http         # 运行 OpenAI / Anthropic + MCP Streamable HTTP 端到端测试
+make sanitize              # 运行 ASan + UBSan 内存与未定义行为检测
+./install.sh               # 安装到 ~/.local/bin/desk
 ```
 
-源码构建需要 C++20、Make、pkg-config、libcurl、json-c、OpenSSL、Readline；Linux 桌面功能还需要 AT-SPI 开发库。
+### Windows (MSVC + CMake + vcpkg)
 
-A source build needs C++20, Make, pkg-config, libcurl, json-c, OpenSSL, and Readline. Linux desktop support also needs AT-SPI development files.
+```powershell
+cmake -S . -B build/windows -A x64 "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static -DBUILD_TESTING=ON
+cmake --build build/windows --config Release --parallel
+ctest --test-dir build/windows -C Release --output-on-failure
+```
 
-## 项目链接 / Links
+---
 
-- [GitHub repository](https://github.com/Milorgs/DeskCode)
-- [Releases](https://github.com/Milorgs/DeskCode/releases)
-- [开发记录 / Development notes](docs/development.md)
+## 相关链接
 
-我会继续把可运行版本和 Windows/Linux 安装包放到 GitHub。
-
-I will keep publishing working versions and Windows/Linux packages on GitHub.
+- **版本发布与安装包下载**：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)
+- **版本更新说明**：[docs/releases/](docs/releases/)
+- **早期迭代与工程记录**：[docs/development.md](docs/development.md)
