@@ -579,6 +579,8 @@ constexpr Translation catalog[]={
     {"搜索服务返回 HTTP %ld。","Search endpoint returned HTTP %ld."},
     {"运行项目钩子","Run workspace hook"},
     {"pre_shell 钩子拦截了此次命令。","Command blocked by pre_shell hook."},
+    {"System Events 可用，可在设置中开启","System Events available; enable in Settings"},
+    {"UI Automation 可用，可在设置中开启","UI Automation available; enable in Settings"},
 };
 std::string preference_path(){
     return config_base()+"/desk-agent/ui.json";

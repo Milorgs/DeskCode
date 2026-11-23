@@ -7,7 +7,13 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <arpa/inet.h>
+#ifdef __APPLE__
+#include <util.h>
+#include <mach-o/dyld.h>
+#include <sys/sysctl.h>
+#else
 #include <pty.h>
+#endif
 #include <termios.h>
 #include <algorithm>
 #include <functional>
@@ -403,6 +409,13 @@ static void test_migration(void){
     app_cleanup(&b);
 }
 static bool alive(pid_t pid){
+#ifdef __APPLE__
+    int mib[4]={CTL_KERN,KERN_PROC,KERN_PROC_PID,static_cast<int>(pid)};
+    struct kinfo_proc info{};
+    size_t len=sizeof info;
+    if(sysctl(mib,4,&info,&len,nullptr,0)<0||len==0)return false;
+    return info.kp_proc.p_stat!=SZOMB;
+#else
     char path[64];
     snprintf(path,sizeof path,"/proc/%ld/stat",(long)pid);
     FILE *f=fopen(path,"r");
@@ -413,6 +426,7 @@ static bool alive(pid_t pid){
     if(!result)return false;
     char *p=strrchr(line,')');
     return p&&p[2]!='Z'&&p[2]!='X';
+#endif
 }
 static void test_process(void){
     App a=fresh();
@@ -1043,7 +1057,11 @@ static void test_removed_tasks(){
     const auto running=model_tool("run","run_shell",command("echo $$ > removed.pid; sleep 30"));
     std::vector<const char *> responses(34,done.c_str());responses.push_back(running.c_str());
     pid_t server=fake_server(&a,responses.data(),static_cast<int>(responses.size()));
+#ifdef __APPLE__
+    auto descriptors=[](){return static_cast<size_t>(std::distance(fs::directory_iterator("/dev/fd"),fs::directory_iterator{}));};
+#else
     auto descriptors=[](){return static_cast<size_t>(std::distance(fs::directory_iterator("/proc/self/fd"),fs::directory_iterator{}));};
+#endif
     {
         Tasks jobs("./build/desk");const auto before=descriptors();
         for(int i=0;i<34;i++){
@@ -2560,9 +2578,20 @@ static int mcp_fixture(){
     }
     free(line);return 0;
 }
+static std::string self_executable(){
+#ifdef __APPLE__
+    char buf[PATH_MAX];
+    uint32_t sz=sizeof buf;
+    CHECK(_NSGetExecutablePath(buf,&sz)==0);
+    char resolved[PATH_MAX];
+    return realpath(buf,resolved)?std::string(resolved):std::string(buf);
+#else
+    return path_text(fs::read_symlink("/proc/self/exe"));
+#endif
+}
 static void test_mcp(){
     App a=fresh();JsonPtr servers(obj()),entry(obj());
-    put(entry.get(),"command",str(path_text(fs::read_symlink("/proc/self/exe")).c_str()));
+    put(entry.get(),"command",str(self_executable().c_str()));
     J *arguments=arr();add(arguments,str("--mcp-fixture"));put(entry.get(),"args",arguments);
     J *environment=obj();put(environment,"EXPLICIT_VALUE",str("explicit-test-value"));put(entry.get(),"env",environment);
     put(servers.get(),"fixture",entry.release());CHECK(mcp_save(a,servers.get()));
@@ -3560,7 +3589,7 @@ int main(int argc,char **argv){
     setenv("DESK_NO_COMPOSER","1",1);
     char directory[]="/tmp/desk-c-test-XXXXXX";
     CHECK(mkdtemp(directory));
-    strcpy(sandbox,directory);
+    CHECK(realpath(directory,sandbox));
     test_layout_and_markdown();
     test_diff_preview();
     test_headless();

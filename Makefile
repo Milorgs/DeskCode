@@ -1,15 +1,20 @@
 CXX ?= c++
 CXXFLAGS ?= -O2 -g
 WARN = -std=c++20 -Wall -Wextra -Wpedantic -Werror
+ifeq ($(shell uname -s),Darwin)
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+ifneq ($(BREW_PREFIX),)
+export PKG_CONFIG_PATH := $(BREW_PREFIX)/opt/readline/lib/pkgconfig:$(BREW_PREFIX)/opt/openssl@3/lib/pkgconfig:$(BREW_PREFIX)/lib/pkgconfig$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH),)
+endif
+else
+PTYLIB = -lutil
+endif
 PKGS = libcurl json-c openssl readline
 ATSPI := $(shell pkg-config --exists atspi-2 gobject-2.0 && echo atspi-2 gobject-2.0)
 CPPFLAGS += $(shell pkg-config --cflags $(PKGS) $(ATSPI)) -Isrc
 LDLIBS += $(shell pkg-config --libs $(PKGS) $(ATSPI))
 ifneq ($(ATSPI),)
 CPPFLAGS += -DWITH_ATSPI
-endif
-ifneq ($(shell uname -s),Darwin)
-PTYLIB = -lutil
 endif
 CORE = src/history.cpp src/mcp.cpp src/common.cpp src/platform.cpp src/ui.cpp src/tasks_ui.cpp src/util.cpp src/config.cpp src/api.cpp src/files.cpp src/workspace.cpp src/tools_ext.cpp src/process.cpp src/desktop.cpp src/agent.cpp src/tasks.cpp src/i18n.cpp
 CORE_OBJ = $(CORE:%.cpp=build/obj/%.o)

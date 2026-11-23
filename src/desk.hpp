@@ -3,6 +3,11 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#ifdef __APPLE__
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE
+#endif
+#endif
 #include <json-c/json.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,7 +24,7 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.14.2"
+#define VERSION "1.14.3"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.

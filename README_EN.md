@@ -24,7 +24,7 @@
 
 ## Quick Install
 
-Latest version: **1.14.2** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
+Latest version: **1.14.3** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
 
 ### Linux (x86_64)
 
@@ -42,11 +42,17 @@ irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 
 
 Downloads the latest Windows x64 package to your user profile directory and adds it to your user `PATH`. Open a new PowerShell window and run `desk`.
 
-### macOS (Build from Source)
+### macOS (Apple Silicon arm64 & Intel Source Build)
 
 ```sh
-brew install curl json-c openssl@3 readline pkg-config
-make -j"$(sysctl -n hw.ncpu)" && ./install.sh
+curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos.sh | sh
+```
+
+On Apple Silicon (`arm64`) Macs, this downloads the pre-built self-contained binary (statically linked—no Homebrew runtime required) to `~/.local/bin/desk`. On Intel (`x86_64`) Macs, build directly from source:
+
+```sh
+brew install json-c openssl@3 readline pkg-config
+make -j"$(sysctl -n hw.ncpu)" && ./install.sh --setup-path
 ```
 
 ---

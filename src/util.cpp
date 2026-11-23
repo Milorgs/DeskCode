@@ -2,7 +2,6 @@
 #include "ui.hpp"
 #include "tasks.hpp"
 #include <sys/stat.h>
-#include <sys/random.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -65,7 +64,15 @@ int mkdirs(const char *path,unsigned int mode){
             if(lstat(temp,&st)){
                 if(errno!=ENOENT||mkdir(temp,mode))return -1;
             }
-            else if(!S_ISDIR(st.st_mode)||S_ISLNK(st.st_mode))return -1;
+            else if(S_ISLNK(st.st_mode)){
+#ifdef __APPLE__
+                struct stat dst;
+                if(!c||(strcmp(temp,"/tmp")&&strcmp(temp,"/var")&&strcmp(temp,"/etc"))||stat(temp,&dst)||!S_ISDIR(dst.st_mode))return -1;
+#else
+                return -1;
+#endif
+            }
+            else if(!S_ISDIR(st.st_mode))return -1;
             *p=c;
             if(!c)break;
         }

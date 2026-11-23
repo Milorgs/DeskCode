@@ -1890,7 +1890,13 @@ static int doctor(App &a,bool json){
     row(a.shell?1:0,"命令工具",a.shell
         ?(sandbox_supported()&&a.sandbox?tr("已开启（Landlock 内核沙箱保护）"):tr("已开启"))
         :tr("已关闭"));
+#ifdef __APPLE__
+    row(desktop_compiled()?1:0,"桌面工具",desktop_compiled()?tr("System Events 可用，可在设置中开启"):tr("当前构建未启用"));
+#elif defined(_WIN32)
+    row(desktop_compiled()?1:0,"桌面工具",desktop_compiled()?tr("UI Automation 可用，可在设置中开启"):tr("当前构建未启用"));
+#else
     row(desktop_compiled()?1:0,"桌面工具",desktop_compiled()?tr("AT-SPI 可用，可在设置中开启"):tr("当前构建未启用"));
+#endif
     char mcp_line[160];
     snprintf(mcp_line,sizeof mcp_line,tr("%zu 个已启用 / 共 %zu 个"),mcp_enabled,mcp_total);
     row(servers?1:-1,"MCP 服务",servers?std::string(mcp_line):mcp_error);

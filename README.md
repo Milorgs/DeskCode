@@ -24,7 +24,7 @@
 
 ## 快速安装
 
-当前最新版本：**1.14.2**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+当前最新版本：**1.14.3**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
 
 ### Linux (x86_64)
 
@@ -42,11 +42,17 @@ irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 
 
 脚本自动下载最新 Windows 发行包到当前用户目录并加入用户 `PATH`。重新打开 PowerShell 后输入 `desk` 即可启动。
 
-### macOS（源码构建）
+### macOS (Apple Silicon arm64 / Intel 源码构建)
 
 ```sh
-brew install curl json-c openssl@3 readline pkg-config
-make -j"$(sysctl -n hw.ncpu)" && ./install.sh
+curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos.sh | sh
+```
+
+Apple Silicon（`arm64`）Mac 自动下载预编译独立二进制（已静态链接依赖，无需安装 Homebrew 运行库）并安装至 `~/.local/bin/desk`。Intel（`x86_64`）Mac 可直接从源码安装：
+
+```sh
+brew install json-c openssl@3 readline pkg-config
+make -j"$(sysctl -n hw.ncpu)" && ./install.sh --setup-path
 ```
 
 ---

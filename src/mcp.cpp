@@ -328,6 +328,13 @@ struct Client {
         // Other environment variables must be explicitly configured.
         for(const char *key:{"PATH","HOME","LANG","LC_ALL","TMPDIR","XDG_RUNTIME_DIR","DISPLAY","XAUTHORITY","WAYLAND_DISPLAY"})if(const char *value=env_value(key))environment[key]=value;
         J *env=get(config.get(),"env");if(env){json_object_object_foreach(env,key,value){environment[key]=json_object_get_string(value);}}
+        std::vector<std::string> env_entries;
+        env_entries.reserve(environment.size());
+        for(const auto &[key,value]:environment)env_entries.push_back(key+"="+value);
+        std::vector<char *> envp;
+        envp.reserve(env_entries.size()+1);
+        for(auto &entry:env_entries)envp.push_back(entry.data());
+        envp.push_back(nullptr);
         std::string cwd=sget(config.get(),"cwd");if(cwd.empty())cwd=app.root;
 #ifdef __linux__
         pid_t parent=getpid();
@@ -343,9 +350,7 @@ struct Client {
             int sink=open("/dev/null",O_WRONLY);
             if(sink<0||dup2(to_child[0],0)<0||dup2(from_child[1],1)<0||dup2(sink,2)<0)_exit(126);
             close(to_child[0]);close(to_child[1]);close(from_child[0]);close(from_child[1]);if(sink>2)close(sink);
-            static char *empty_env[]={nullptr};
-            environ=empty_env;
-            for(const auto &[key,value]:environment)setenv(key.c_str(),value.c_str(),1);
+            environ=envp.data();
             execvp(argv[0],argv.data());_exit(127);
         }
         close(to_child[0]);close(from_child[1]);
