@@ -8,7 +8,14 @@
 #define _DARWIN_C_SOURCE
 #endif
 #endif
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
 #include <json-c/json.h>
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <signal.h>
