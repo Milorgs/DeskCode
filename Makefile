@@ -4,15 +4,17 @@ WARN = -std=c++20 -Wall -Wextra -Wpedantic -Werror
 ifeq ($(shell uname -s),Darwin)
 BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
 ifneq ($(BREW_PREFIX),)
-export PKG_CONFIG_PATH := $(BREW_PREFIX)/opt/readline/lib/pkgconfig:$(BREW_PREFIX)/opt/openssl@3/lib/pkgconfig:$(BREW_PREFIX)/lib/pkgconfig$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH),)
+PKG_ENV = PKG_CONFIG_PATH="$(BREW_PREFIX)/opt/readline/lib/pkgconfig:$(BREW_PREFIX)/opt/openssl@3/lib/pkgconfig:$(BREW_PREFIX)/opt/json-c/lib/pkgconfig:$(BREW_PREFIX)/lib/pkgconfig$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH),)"
 endif
 else
 PTYLIB = -lutil
 endif
 PKGS = libcurl json-c openssl readline
-ATSPI := $(shell pkg-config --exists atspi-2 gobject-2.0 && echo atspi-2 gobject-2.0)
-CPPFLAGS += $(shell pkg-config --cflags $(PKGS) $(ATSPI)) -Isrc
-LDLIBS += $(shell pkg-config --libs $(PKGS) $(ATSPI))
+ATSPI := $(shell $(PKG_ENV) pkg-config --exists atspi-2 gobject-2.0 && echo atspi-2 gobject-2.0)
+PKG_CFLAGS := $(shell $(PKG_ENV) pkg-config --cflags $(PKGS) $(ATSPI))
+PKG_LIBS := $(shell $(PKG_ENV) pkg-config --libs $(PKGS) $(ATSPI))
+CPPFLAGS += $(PKG_CFLAGS) -Isrc
+LDLIBS += $(PKG_LIBS)
 ifneq ($(ATSPI),)
 CPPFLAGS += -DWITH_ATSPI
 endif
