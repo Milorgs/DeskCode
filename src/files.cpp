@@ -35,7 +35,7 @@ char *sha256(const void *data,size_t len){
     if(!EVP_Digest(data,len,hash,&n,EVP_sha256(),NULL))return NULL;
     char *out=static_cast<char *>(malloc(n*2+1));
     if(!out)return NULL;
-    for(unsigned int i=0;i<n;i++)sprintf(out+i*2,"%02x",hash[i]);
+    for(unsigned int i=0;i<n;i++)snprintf(out+i*2,3,"%02x",hash[i]);
     return out;
 }
 int resolve_file(App *a,const char *path,char out[PATH_MAX]){

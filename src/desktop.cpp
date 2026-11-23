@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <ctype.h>
-static bool desktop_match_ci(const char *haystack,const char *needle){
+[[maybe_unused]] static bool desktop_match_ci(const char *haystack,const char *needle){
     if(!needle||!*needle)return true;
     if(!haystack||!*haystack)return false;
     size_t nlen=strlen(needle);
