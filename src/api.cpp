@@ -274,7 +274,55 @@ static J *textblock(const char *text){
     put(b,"text",str(text));
     return b;
 }
-J *native_payload(J *c,J *messages,J *tools){
+static J *anthropic_image_from_part(J *part){
+    const char *ptype=sget(part,"type");
+    if(!strcmp(ptype,"image_url")){
+        std::string_view url=sget(get(part,"image_url"),"url");
+        auto semi=url.find(";base64,");
+        if(url.starts_with("data:")&&semi!=std::string_view::npos){
+            std::string mime(url.substr(5,semi-5));
+            std::string data(url.substr(semi+8));
+            J *img=obj(),*src=obj();
+            put(img,"type",str("image"));
+            put(src,"type",str("base64"));
+            put(src,"media_type",str(mime.c_str()));
+            put(src,"data",str(data.c_str()));
+            put(img,"source",src);
+            return img;
+        }
+    }else if(!strcmp(ptype,"image")){
+        if(get(part,"source"))return copy(part);
+        if(*sget(part,"data")&&*sget(part,"mimeType")){
+            J *img=obj(),*src=obj();
+            put(img,"type",str("image"));
+            put(src,"type",str("base64"));
+            put(src,"media_type",str(sget(part,"mimeType")));
+            put(src,"data",str(sget(part,"data")));
+            put(img,"source",src);
+            return img;
+        }
+    }
+    return nullptr;
+}
+static J *openai_image_from_part(J *part){
+    const char *ptype=sget(part,"type");
+    if(!strcmp(ptype,"image_url")&&*sget(get(part,"image_url"),"url"))return copy(part);
+    if(!strcmp(ptype,"image")&&*sget(part,"data")&&*sget(part,"mimeType")){
+        std::string url=std::string("data:")+sget(part,"mimeType")+";base64,"+sget(part,"data");
+        J *ib=obj(),*iu=obj();
+        put(ib,"type",str("image_url"));
+        put(iu,"url",str(url.c_str()));
+        put(ib,"image_url",iu);
+        return ib;
+    }
+    return nullptr;
+}
+static J *ephemeral_cache_marker(){
+    J *cc=obj();
+    put(cc,"type",str("ephemeral"));
+    return cc;
+}
+J *native_payload(J *c,J *messages,J *tools,bool prompt_cache){
     J *body=obj(),*history=arr();
     put(body,"model",str(sget(c,"model")));
     put(body,"max_tokens",json_object_new_int(iget(c,"max_tokens",4096)));
@@ -288,7 +336,14 @@ J *native_payload(J *c,J *messages,J *tools){
         J *m=at(messages,i);
         const char *role=sget(m,"role");
         if(!strcmp(role,"system")){
-            put(body,"system",copy(get(m,"content")));
+            if(prompt_cache&&*sget(m,"content")){
+                J *sys_arr=arr(),*sb=textblock(sget(m,"content"));
+                put(sb,"cache_control",ephemeral_cache_marker());
+                add(sys_arr,sb);
+                put(body,"system",sys_arr);
+            }else{
+                put(body,"system",copy(get(m,"content")));
+            }
             continue;
         }
         J *blocks=arr();
@@ -299,21 +354,7 @@ J *native_payload(J *c,J *messages,J *tools){
                     J *part=at(content,k);
                     const char *ptype=sget(part,"type");
                     if(!strcmp(ptype,"text"))add(blocks,textblock(sget(part,"text")));
-                    else if(!strcmp(ptype,"image_url")){
-                        std::string_view url=sget(get(part,"image_url"),"url");
-                        auto semi=url.find(";base64,");
-                        if(url.starts_with("data:")&&semi!=std::string_view::npos){
-                            std::string mime(url.substr(5,semi-5));
-                            std::string data(url.substr(semi+8));
-                            J *img=obj(),*src=obj();
-                            put(img,"type",str("image"));
-                            put(src,"type",str("base64"));
-                            put(src,"media_type",str(mime.c_str()));
-                            put(src,"data",str(data.c_str()));
-                            put(img,"source",src);
-                            add(blocks,img);
-                        }
-                    }else if(!strcmp(ptype,"image"))add(blocks,copy(part));
+                    else if(J *img=anthropic_image_from_part(part))add(blocks,img);
                 }
             }else add(blocks,textblock(sget(m,"content")));
         }
@@ -321,8 +362,24 @@ J *native_payload(J *c,J *messages,J *tools){
             J *b=obj();
             put(b,"type",str("tool_result"));
             put(b,"tool_use_id",str(sget(m,"tool_call_id")));
-            put(b,"content",str(sget(m,"content")));
             J *result=json_tokener_parse(sget(m,"content"));
+            J *rblocks=get(result,"content");
+            bool has_img=false;
+            if(json_object_is_type(rblocks,json_type_array)){
+                for(size_t k=0;k<alen(rblocks);k++)
+                    if(!strncmp(sget(at(rblocks,k),"type"),"image",5))has_img=true;
+            }
+            if(has_img){
+                J *tr_content=arr();
+                for(size_t k=0;k<alen(rblocks);k++){
+                    J *part=at(rblocks,k);
+                    if(!strcmp(sget(part,"type"),"text"))add(tr_content,textblock(sget(part,"text")));
+                    else if(J *img=anthropic_image_from_part(part))add(tr_content,img);
+                }
+                put(b,"content",tr_content);
+            }else{
+                put(b,"content",str(sget(m,"content")));
+            }
             put(b,"is_error",json_object_new_boolean(tool_failed(result)));
             json_object_put(result);
             add(blocks,b);
@@ -358,12 +415,22 @@ J *native_payload(J *c,J *messages,J *tools){
             put(d,"name",str(sget(f,"name")));
             put(d,"description",str(sget(f,"description")));
             put(d,"input_schema",copy(get(f,"parameters")));
+            if(prompt_cache&&i+1==alen(tools))put(d,"cache_control",ephemeral_cache_marker());
             add(defs,d);
         }
         put(body,"tools",defs);
         J *choice=obj();
         put(choice,"type",str("auto"));
         put(body,"tool_choice",choice);
+    }
+    if(prompt_cache){
+        for(size_t i=alen(history);i>0;--i){
+            J *hm=at(history,i-1);
+            if(strcmp(sget(hm,"role"),"user"))continue;
+            J *hc=get(hm,"content");
+            if(alen(hc)>0)put(at(hc,alen(hc)-1),"cache_control",ephemeral_cache_marker());
+            break;
+        }
     }
     return body;
 }
@@ -433,12 +500,17 @@ static std::uint64_t reported_tokens(J *usage,bool native){
 }
 J *api_complete(App *a,J *c,J *messages,J *tools){
     bool native=!strcmp(sget(c,"protocol"),"anthropic");
+    static std::set<std::string> usage_option_rejected;
+    static std::set<std::string> cache_control_rejected;
+    const std::string usage_key=std::string(sget(c,"profile"))+'\n'+sget(c,"base_url")+'\n'+sget(c,"model");
+    const bool ask_cache=native&&!cache_control_rejected.contains(usage_key);
     J *body;
-    if(native)body=native_payload(c,messages,tools);
+    if(native)body=native_payload(c,messages,tools,ask_cache);
     else{
         body=obj();
         put(body,"model",str(sget(c,"model")));
         J *wire=arr();
+        std::vector<JsonPtr> pending_tool_images;
         for(size_t i=0;i<alen(messages);i++){
             J *clean=copy(at(messages,i));
             std::vector<std::string> internal_keys;
@@ -447,7 +519,38 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
                 if(key[0]=='_')internal_keys.emplace_back(key);
             }
             for(const auto &k:internal_keys)json_object_object_del(clean,k.c_str());
+            if(!strcmp(sget(clean,"role"),"tool")){
+                JsonPtr parsed(json_tokener_parse(sget(clean,"content")));
+                J *rblocks=get(parsed.get(),"content");
+                bool stripped=false;
+                if(json_object_is_type(rblocks,json_type_array)){
+                    for(size_t k=0;k<alen(rblocks);k++){
+                        J *part=at(rblocks,k);
+                        if(J *img=openai_image_from_part(part)){
+                            pending_tool_images.emplace_back(img);
+                            json_object_object_del(part,"image_url");
+                            json_object_object_del(part,"data");
+                            json_object_object_del(part,"mimeType");
+                            put(part,"type",str("text"));
+                            put(part,"text",str("[Image attached below]"));
+                            stripped=true;
+                        }
+                    }
+                }
+                if(stripped)
+                    put(clean,"content",str(json_object_to_json_string_ext(parsed.get(),JSON_C_TO_STRING_PLAIN)));
+            }
             add(wire,clean);
+            const bool next_is_tool=(i+1<alen(messages))&&!strcmp(sget(at(messages,i+1),"role"),"tool");
+            if(!next_is_tool&&!pending_tool_images.empty()){
+                J *vision_msg=obj(),*vblocks=arr();
+                put(vision_msg,"role",str("user"));
+                add(vblocks,textblock("Attached image from tool result:"));
+                for(auto &img:pending_tool_images)add(vblocks,img.release());
+                pending_tool_images.clear();
+                put(vision_msg,"content",vblocks);
+                add(wire,vision_msg);
+            }
         }
         put(body,"messages",wire);
         if(*sget(c,"reasoning_effort"))put(body,"reasoning_effort",str(sget(c,"reasoning_effort")));
@@ -468,8 +571,6 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
     // OpenAI only reports usage on a stream when asked. An endpoint and model
     // that reject the option get one plain retry and are not asked again in
     // this process; other providers and models keep requesting usage.
-    static std::set<std::string> usage_option_rejected;
-    const std::string usage_key=std::string(sget(c,"profile"))+'\n'+sget(c,"base_url")+'\n'+sget(c,"model");
     const bool ask_usage=!native&&!usage_option_rejected.contains(usage_key);
     if(ask_usage){
         J *options=obj();
@@ -477,19 +578,27 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
         put(body,"stream_options",options);
     }
     J *data=api_request(a,c,native?"/messages":"/chat/completions",body,&stream);
-    if(!data&&ask_usage&&!interrupted&&!strncmp(a->error,"API HTTP 400",12)&&!stream.events){
-        // Retry once without the option; only a success proves the option was
-        // the problem. Otherwise the first, more specific error stands.
+    if(!data&&!interrupted&&!strncmp(a->error,"API HTTP 400",12)&&!stream.events&&(ask_usage||ask_cache)){
+        // Retry once without the optional extension; only a success proves the
+        // option was the problem. Otherwise the first, more specific error stands.
         const std::string first_error=a->error;
-        json_object_object_del(body,"stream_options");
+        if(ask_usage)json_object_object_del(body,"stream_options");
+        if(ask_cache){
+            json_object_put(body);
+            body=native_payload(c,messages,tools,false);
+            put(body,"stream",json_object_new_boolean(1));
+        }
         stream=StreamState{};
         stream.native=native;
         stream.delta=[a](const std::string &part){
             if(a->stream_text)a->stream_text(part);
         };
         a->error[0]=0;
-        data=api_request(a,c,"/chat/completions",body,&stream);
-        if(data)usage_option_rejected.insert(usage_key);
+        data=api_request(a,c,native?"/messages":"/chat/completions",body,&stream);
+        if(data){
+            if(ask_usage)usage_option_rejected.insert(usage_key);
+            if(ask_cache)cache_control_rejected.insert(usage_key);
+        }
         else if(!interrupted)snprintf(a->error,sizeof a->error,"%s",first_error.c_str());
     }
     json_object_put(body);

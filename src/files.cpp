@@ -11,6 +11,24 @@
 #include <algorithm>
 #include <cctype>
 #include <errno.h>
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+#include <regex>
+static bool compile_search_regex(const char *pattern,bool ci,std::regex &out){
+    try{
+        auto flags=std::regex::ECMAScript|std::regex::optimize;
+        if(ci)flags|=std::regex::icase;
+        out=std::regex(pattern,flags);
+        return true;
+    }catch(const std::regex_error &){
+        return false;
+    }
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 char *sha256(const void *data,size_t len){
     unsigned char hash[EVP_MAX_MD_SIZE];
     unsigned int n=0;
@@ -136,11 +154,39 @@ static J *file_read(App *a,const char *path,J *args=nullptr){
     put(result,"start_line",json_object_new_int64(start_line));
     put(result,"end_line",json_object_new_int64(actual_end));
     put(result,"total_lines",json_object_new_int64(static_cast<int64_t>(total_lines)));
-    if(n<=FILE_LIMIT){
+    if(n<=EDIT_FILE_LIMIT){
         char *hash=sha256(bytes,n);
         put(result,"sha256",str(hash));
         free(hash);
     }
+    free(bytes);
+    return result;
+}
+static J *file_read_editable(App *a,const char *path){
+    char full[PATH_MAX];
+    if(resolve_file(a,path,full))return err(a->error);
+    std::error_code status_ec;
+    auto st=fs::symlink_status(fs_path(full),status_ec);
+    if(!status_ec){
+        if(!fs::exists(st))return err(tr("文件不存在，请先用 list_files 或 search_text 确认路径。"));
+        if(fs::is_directory(st))return err(tr("目标是文件夹，请改用 list_files 查看目录内容。"));
+        if(fs::is_regular_file(st)){
+            auto fsize=fs::file_size(fs_path(full),status_ec);
+            if(!status_ec&&fsize>EDIT_FILE_LIMIT)return err(tr("无法读取原文件或原文件过大。"));
+        }
+    }
+    size_t n=0;
+    char *bytes=read_bytes(full,EDIT_FILE_LIMIT,&n);
+    if(!bytes)return err(tr("无法读取原文件或原文件过大。"));
+    if(!utf8_text(bytes,n)){
+        free(bytes);
+        return err(tr("只支持 UTF-8 文本文件。"));
+    }
+    char *hash=sha256(bytes,n);
+    J *result=obj();
+    put(result,"content",json_object_new_string_len(bytes,static_cast<int>(n)));
+    put(result,"sha256",str(hash));
+    free(hash);
     free(bytes);
     return result;
 }
@@ -221,6 +267,10 @@ struct Search {
     App *app;
     const char *query;
     bool case_insensitive=false;
+    bool use_regex=false;
+    const std::regex *re=nullptr;
+    const char *file_pattern=nullptr;
+    GitIgnore gitignore{};
     J *matches;
     size_t entries=0,files=0,bytes=0,skipped=0;
     double until;
@@ -233,6 +283,24 @@ static bool search_limit(Search *s){
 static bool search_skip(const char *name){
     return !strcmp(name,"node_modules")||!strcmp(name,"build")||!strcmp(name,"dist")||!strcmp(name,"target")||!strcmp(name,".venv")||!strcmp(name,"venv")||!strcmp(name,"__pycache__")||!strcmp(name,".cache")||!strcmp(name,"CMakeFiles")||!strcmp(name,".next")||!strcmp(name,"coverage");
 }
+static void emit_search_match(Search *s,const char *relative,size_t line,char *line_start,char *found,char *end){
+    J *m=obj();
+    put(m,"path",str(relative));
+    put(m,"line",json_object_new_int64(static_cast<int64_t>(line)));
+    char *start=line_start;
+    if(found-line_start>120){
+        start=found-120;
+        while(((unsigned char)*start&0xc0)==0x80)start++;
+    }
+    size_t length=static_cast<size_t>(end-start);
+    if(length>360){
+        length=360;
+        while(length&&((unsigned char)start[length]&0xc0)==0x80)length--;
+    }
+    put(m,"text",json_object_new_string_len(start,static_cast<int>(length)));
+    put(m,"line_truncated",json_object_new_boolean(start!=line_start||start+length<end));
+    add(s->matches,m);
+}
 static void search_walk(Search *s,const char *path,int depth){
     if(search_limit(s))return;
     s->entries++;
@@ -240,25 +308,50 @@ static void search_walk(Search *s,const char *path,int depth){
     if(path_link(source)){s->skipped++;return;}
     auto status=fs::symlink_status(source,ec);if(ec){s->skipped++;return;}
     char full[PATH_MAX];if(resolve_file(s->app,path,full)){s->skipped++;return;}
+    const fs::path root_path=fs_path(s->app->root);
     if(fs::is_directory(status)){
         if(depth>=24){s->truncated=true;return;}
         fs::directory_iterator directory(fs_path(full),ec);if(ec){s->skipped++;return;}
         for(auto it=directory;it!=fs::directory_iterator{}&&!search_limit(s);it.increment(ec)){
             if(ec){s->skipped++;break;}
             std::string name=path_text(it->path().filename());if(search_skip(name.c_str())){s->skipped++;continue;}
+            std::error_code child_ec;
+            const bool child_dir=!path_link(it->path())&&it->is_directory(child_ec);
+            std::string child_rel=path_text(it->path().lexically_relative(root_path));
+            if(!child_rel.empty()&&s->gitignore.ignored(child_rel,child_dir)){s->skipped++;continue;}
             std::string child=path_text(it->path());search_walk(s,child.c_str(),depth+1);
         }
         return;
     }
     if(!fs::is_regular_file(status)){s->skipped++;return;}
+    std::string rel=path_text(fs_path(full).lexically_relative(root_path));
+    if(s->file_pattern&&*s->file_pattern&&!glob_match(s->file_pattern,rel,s->case_insensitive)){s->skipped++;return;}
     s->files++;
     size_t n=0;
     char *data=read_bytes(full,FILE_LIMIT,&n);
     if(!data){s->skipped++;return;}
     s->bytes+=n;
     if(!utf8_text(data,n)){s->skipped++;free(data);return;}
-    const std::string_view query(s->query);
     char *const limit=data+n;
+    if(s->use_regex&&s->re){
+        size_t line=1;
+        for(char *p=data;p<limit&&!search_limit(s);line++){
+            char *end=static_cast<char *>(memchr(p,'\n',static_cast<size_t>(limit-p)));
+            if(!end)end=limit;
+            char *clean_end=(end>p&&end[-1]=='\r')?end-1:end;
+            const char *scan_end=(clean_end-p>4096)?p+4096:clean_end;
+            std::cmatch cm;
+            if(std::regex_search(static_cast<const char *>(p),scan_end,cm,*s->re)){
+                char *found=const_cast<char *>(cm[0].first);
+                emit_search_match(s,rel.c_str(),line,p,found,clean_end);
+            }
+            if(end==limit)break;
+            p=end+1;
+        }
+        free(data);
+        return;
+    }
+    const std::string_view query(s->query);
     size_t line=1;
     for(char *p=data;p<limit&&!search_limit(s);line++){
         size_t at=std::string_view::npos;
@@ -276,26 +369,7 @@ static void search_walk(Search *s,const char *path,int depth){
         for(char *nl;(nl=static_cast<char *>(memchr(p,'\n',(size_t)(found-p))));p=nl+1)line++;
         char *end=static_cast<char *>(memchr(found,'\n',(size_t)(limit-found)));
         if(!end)end=limit;
-        {
-            J *m=obj();
-            const char *relative=full+strlen(s->app->root);
-            if(*relative=='/')relative++;
-            put(m,"path",str(relative));
-            put(m,"line",json_object_new_int64((int64_t)line));
-            char *start=p;
-            if(found-p>120){
-                start=found-120;
-                while(((unsigned char)*start&0xc0)==0x80)start++;
-            }
-            size_t length=(size_t)(end-start);
-            if(length>360){
-                length=360;
-                while(length&&((unsigned char)start[length]&0xc0)==0x80)length--;
-            }
-            put(m,"text",json_object_new_string_len(start,(int)length));
-            put(m,"line_truncated",json_object_new_boolean(start!=p||start+length<end));
-            add(s->matches,m);
-        }
+        emit_search_match(s,rel.c_str(),line,p,found,end);
         if(end==limit)break;
         p=end+1;
     }
@@ -304,11 +378,20 @@ static void search_walk(Search *s,const char *path,int depth){
 static J *file_search(App *a,J *args){
     const char *query=sget(args,"query");
     if(!*query||strlen(query)>256||strchr(query,'\n')||strchr(query,'\r'))return err(tr("搜索内容须为 1..256 字节的单行文本，按字面匹配。"));
+    const char *file_pattern=sget(args,"file_pattern");
+    if(*file_pattern&&strlen(file_pattern)>128)return err(tr("file_pattern 长度不能超过 128 字节。"));
+    const bool use_regex=bget(args,"regex");
+    const bool ci=bget(args,"case_insensitive");
+    std::regex compiled;
+    if(use_regex&&!compile_search_regex(query,ci,compiled)){
+        return err(tr("正则表达式语法无效。"));
+    }
     char full[PATH_MAX];
     if(resolve_file(a,sget(args,"path"),full))return err(a->error);
     std::error_code ec;auto status=fs::status(fs_path(full),ec);
     if(ec||(!fs::is_directory(status)&&!fs::is_regular_file(status)))return err(tr("搜索路径须为存在的文件或目录。"));
-    Search s={.app=a,.query=query,.case_insensitive=bget(args,"case_insensitive"),.matches=arr(),.until=monotime()+5};
+    Search s={.app=a,.query=query,.case_insensitive=ci,.use_regex=use_regex,.re=use_regex?&compiled:nullptr,.file_pattern=*file_pattern?file_pattern:nullptr,.matches=arr(),.until=monotime()+5};
+    s.gitignore.load(a->root);
     search_walk(&s,full,0);
     if(interrupted){json_object_put(s.matches);return err(tr("搜索已取消。"));}
     J *r=obj();
@@ -376,8 +459,9 @@ std::string diff_preview(std::string_view before,std::string_view after,size_t f
 }
 static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t edit_added=0,size_t edit_removed=0){
     const char *path=sget(args,"path"),*content=sget(args,"content");
+    const size_t byte_limit=edit_diff?EDIT_FILE_LIMIT:FILE_LIMIT;
     size_t n=strlen(content);
-    if(n>FILE_LIMIT)return err(tr("文件超过 256 KB 限制。"));
+    if(n>byte_limit)return err(edit_diff?tr("修改后的文件超过 4 MB 限制。"):tr("文件超过 256 KB 限制。"));
     char full[PATH_MAX];
     if(resolve_file(a,path,full))return err(a->error);
     std::error_code ec;auto status=fs::symlink_status(fs_path(full),ec);
@@ -386,7 +470,7 @@ static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t 
     if(exists&&!fs::is_regular_file(status))return err(tr("目标不是普通文件。"));
     unsigned int mode=exists?static_cast<unsigned int>(status.permissions())&0777:0644;
     size_t old_len=0;
-    char *old=exists?read_bytes(full,FILE_LIMIT,&old_len):NULL;
+    char *old=exists?read_bytes(full,byte_limit,&old_len):NULL;
     if(exists&&!old)return err(tr("无法读取原文件或原文件过大。"));
     char *hash=exists?sha256(old,old_len):NULL;
     J *expected=get(args,"expected_sha256");
@@ -414,7 +498,7 @@ static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t 
         return r;
     }
     size_t latest_len=0;
-    char *latest=read_bytes(full,FILE_LIMIT,&latest_len);
+    char *latest=read_bytes(full,byte_limit,&latest_len);
     bool unchanged=exists?(latest&&latest_len==old_len&&!memcmp(old,latest,old_len)):(!latest&&errno==ENOENT);
     free(latest);
     if(!unchanged){
@@ -436,10 +520,12 @@ static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t 
     char *slash=strrchr(parent,'/');
     if(slash&&slash!=parent)*slash=0;
     if(mkdirs(parent,0755)||atomic_file(full,content,n,mode))return err(tr("写入文件失败。"));
-    latest=read_bytes(full,FILE_LIMIT,&latest_len);
+    latest=read_bytes(full,byte_limit,&latest_len);
     bool verified=latest&&latest_len==n&&!memcmp(latest,content,n);
     free(latest);
     if(!verified)return err(tr("已写入，但回读核对不一致；请重新读取当前文件，不要直接重试覆盖。"));
+    std::string rel_written=path_text(fs_path(full).lexically_relative(fs_path(a->root)));
+    if(!rel_written.empty())record_file_change(a,rel_written.c_str(),backup,exists,mode);
     J *result=obj();
     put(result,"written",str(path));
     hash=sha256(content,n);
@@ -447,6 +533,7 @@ static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t 
     free(hash);
     put(result,"backup",*backup?str(backup):NULL);
     put(result,"verified",json_object_new_boolean(1));
+    if(!rel_written.empty())run_post_edit_hook(*a,rel_written.c_str(),result);
     return result;
 }
 static std::string to_crlf(std::string_view input){
@@ -470,7 +557,7 @@ static std::vector<size_t> find_occurrences(std::string_view text,std::string_vi
 static J *file_edit(App *a,J *args){
     const char *before_raw=sget(args,"old_text"),*after_raw=sget(args,"new_text");
     if(!*before_raw||!strcmp(before_raw,after_raw))return err(tr("old_text 不能为空，且新旧文本须不同。"));
-    JsonPtr original(file_read(a,sget(args,"path")));
+    JsonPtr original(file_read_editable(a,sget(args,"path")));
     J *read=original.get();
     if(get(read,"error"))return original.release();
     if(strcmp(sget(read,"sha256"),sget(args,"expected_sha256"))){
@@ -509,7 +596,7 @@ static J *file_edit(App *a,J *args){
         return failure;
     }
     size_t offset=matches[0],size=content.size()-before.size()+after.size();
-    if(size>FILE_LIMIT)return err(tr("修改后的文件超过 256 KB 限制。"));
+    if(size>EDIT_FILE_LIMIT)return err(tr("修改后的文件超过 4 MB 限制。"));
     std::string updated(content);
     updated.replace(offset,before.size(),after);
     size_t first_line=1;
@@ -522,6 +609,79 @@ static J *file_edit(App *a,J *args){
     put(write.get(),"content",str(updated.c_str()));
     J *result=file_write(a,write.get(),&preview,added,removed);
     if(result&&bget(result,"verified"))put(result,"line",json_object_new_int64(static_cast<int64_t>(first_line)));
+    return result;
+}
+static J *file_multi_edit(App *a,J *args){
+    J *edits=get(args,"edits");
+    const size_t count=alen(edits);
+    if(count<1||count>20)return err(tr("multi_edit 的 edits 须包含 1 到 20 处修改。"));
+    JsonPtr original(file_read_editable(a,sget(args,"path")));
+    J *read=original.get();
+    if(get(read,"error"))return original.release();
+    if(strcmp(sget(read,"sha256"),sget(args,"expected_sha256"))){
+        J *mismatch=err(tr("文件已变化，或修改前未读取，请重新读取文件。"));
+        put(mismatch,"current_sha256",str(sget(read,"sha256")));
+        return mismatch;
+    }
+    std::string working(sget(read,"content"));
+    std::string combined_preview;
+    size_t total_added=0,total_removed=0,first_changed_line=1;
+    for(size_t idx=0;idx<count;idx++){
+        J *hunk=at(edits,idx);
+        const char *before_raw=sget(hunk,"old_text"),*after_raw=sget(hunk,"new_text");
+        if(!*before_raw||!strcmp(before_raw,after_raw)){
+            J *bad=err(tr("old_text 不能为空，且新旧文本须不同。"));
+            put(bad,"failed_edit_index",json_object_new_int64(static_cast<int64_t>(idx)));
+            return bad;
+        }
+        std::string before(before_raw),after(after_raw);
+        auto matches=find_occurrences(working,before);
+        if(matches.empty()&&working.find("\r\n")!=working.npos&&before.find('\n')!=before.npos&&before.find("\r\n")==before.npos){
+            std::string candidate=to_crlf(before);
+            auto crlf_matches=find_occurrences(working,candidate);
+            if(crlf_matches.size()==1){
+                before=std::move(candidate);
+                after=to_crlf(after);
+                matches=std::move(crlf_matches);
+            }
+        }
+        if(matches.size()!=1){
+            J *failure=err(tr("old_text 必须在文件中精确匹配一次；请加入相邻上下文后重试。"));
+            put(failure,"failed_edit_index",json_object_new_int64(static_cast<int64_t>(idx)));
+            put(failure,"match_count",json_object_new_int64(static_cast<int64_t>(matches.size())));
+            if(matches.size()>1){
+                J *lines=arr();
+                size_t line=1,cursor=0;
+                for(size_t i=0;i<std::min<size_t>(matches.size(),10);++i){
+                    for(;cursor<matches[i];++cursor)if(working[cursor]=='\n')++line;
+                    add(lines,json_object_new_int64(static_cast<int64_t>(line)));
+                }
+                put(failure,"match_lines",lines);
+            }
+            return failure;
+        }
+        const size_t offset=matches[0];
+        const size_t next_size=working.size()-before.size()+after.size();
+        if(next_size>EDIT_FILE_LIMIT)return err(tr("修改后的文件超过 4 MB 限制。"));
+        size_t line_no=1;
+        for(size_t i=0;i<offset;i++)if(working[i]=='\n')line_no++;
+        if(idx==0)first_changed_line=line_no;
+        size_t h_add=0,h_rem=0;
+        if(!combined_preview.empty())combined_preview+='\n';
+        combined_preview+=diff_preview(before,after,line_no,h_add,h_rem);
+        total_added+=h_add;
+        total_removed+=h_rem;
+        working.replace(offset,before.size(),after);
+    }
+    JsonPtr write(obj());
+    put(write.get(),"path",str(sget(args,"path")));
+    put(write.get(),"expected_sha256",str(sget(args,"expected_sha256")));
+    put(write.get(),"content",str(working.c_str()));
+    J *result=file_write(a,write.get(),&combined_preview,total_added,total_removed);
+    if(result&&bget(result,"verified")){
+        put(result,"line",json_object_new_int64(static_cast<int64_t>(first_changed_line)));
+        put(result,"edits_applied",json_object_new_int64(static_cast<int64_t>(count)));
+    }
     return result;
 }
 static void definition(J *tools,const char *name,const char *description,const char **fields,int count){
@@ -546,7 +706,8 @@ static void definition(J *tools,const char *name,const char *description,const c
             !strcmp(fields[i],"expected_sha256")?"SHA256 from the latest read_file result; null only when creating a new file.":
             !strcmp(fields[i],"old_text")?"Exact original text, including whitespace. Must occur exactly once; include surrounding lines to disambiguate.":
             !strcmp(fields[i],"new_text")?"Replacement text; empty string deletes the matched text.":
-            !strcmp(fields[i],"query")?"Literal single-line search text, not a regular expression (1..256 bytes).":
+            !strcmp(fields[i],"query")?"Single-line search text, or ECMAScript regular expression when regex=true (1..256 bytes).":
+            !strcmp(fields[i],"url")?"HTTPS URL to fetch (or localhost HTTP for local debugging).":
             !strcmp(fields[i],"content")?"Complete UTF-8 file contents (up to 256 KB).":
             !strcmp(fields[i],"command")?
 #ifdef _WIN32
@@ -596,6 +757,15 @@ static J *builtin_tools(){
         }
         ,*research[]={
             "question"
+        }
+        ,*fetch_url[]={
+            "url"
+        }
+        ,*multi_edit_req[]={
+            "path","expected_sha256"
+        }
+        ,*web_q[]={
+            "query"
         };
         definition(tools,"list_files","List up to 200 workspace entries sorted with directories first and byte sizes on files. Set optional max_depth (1..4) to inspect directory trees in one call.",path,1);
         {
@@ -605,15 +775,21 @@ static J *builtin_tools(){
             put(depth,"description",str("Optional traversal depth (1..4, default 1)."));
             put(list_props,"max_depth",depth);
         }
-        definition(tools,"search_text","Recursively locate literal text with file paths and line numbers. Skips symlinks, protected files, common dependency/build directories and non-UTF-8 or >256 KB files. Up to 120 matching lines, 4000 files, depth 24, 32 MB, 5 seconds; inspect truncated and skipped before claiming absence. Narrow path to continue.",search,2);
+        definition(tools,"search_text","Recursively locate text or regex matches with file paths and line numbers. Respects .gitignore and skips symlinks, protected files, dependency/build directories and non-UTF-8 or >256 KB files. Up to 120 matching lines, 4000 files, depth 24, 32 MB, 5 seconds; inspect truncated and skipped before claiming absence.",search,2);
         {
             J *search_props=get(get(get(at(tools,1),"function"),"parameters"),"properties");
-            J *ci=obj();
+            J *ci=obj(),*re=obj(),*fp=obj();
             put(ci,"type",str("boolean"));
             put(ci,"description",str("Optional case-insensitive matching (default false)."));
             put(search_props,"case_insensitive",ci);
+            put(re,"type",str("boolean"));
+            put(re,"description",str("Optional ECMAScript regular expression mode (default false)."));
+            put(search_props,"regex",re);
+            put(fp,"type",str("string"));
+            put(fp,"description",str("Optional filename or path glob filter such as *.cpp, *.{ts,tsx}, or src/*.h."));
+            put(search_props,"file_pattern",fp);
         }
-        definition(tools,"read_file","Read a UTF-8 file (full file up to 256 KB with SHA256, or optional 1-based start_line..end_line slice from files up to 16 MB). Read before editing an existing file; search snippets are not sufficient.",path,1);
+        definition(tools,"read_file","Read a UTF-8 file (full file up to 256 KB with SHA256, or optional 1-based start_line..end_line slice from files up to 16 MB; full-file SHA256 is included up to 4 MB so edit_file works on sliced reads). Read before editing an existing file.",path,1);
         {
             J *read_props=get(get(get(at(tools,2),"function"),"parameters"),"properties");
             J *sline=obj(),*eline=obj();
@@ -624,7 +800,7 @@ static J *builtin_tools(){
             put(read_props,"start_line",sline);
             put(read_props,"end_line",eline);
         }
-        definition(tools,"edit_file","Replace one unique exact text occurrence in an existing file. Prefer this for small edits. Supply SHA256 from read_file; if ambiguous, match_lines are returned so you can add surrounding context. Preserves other bytes and creates a backup. Result verified means bytes were read back, not that the user's goal or tests passed.",edit,4);
+        definition(tools,"edit_file","Replace one unique exact text occurrence in an existing UTF-8 file (up to 4 MB). Prefer this for targeted edits. Supply SHA256 from read_file; if ambiguous, match_lines are returned so you can add surrounding context. Preserves other bytes and creates a backup.",edit,4);
         definition(tools,"write_file","Create a UTF-8 file or replace its entire contents. Prefer edit_file for small changes. Read existing file first and supply SHA256; null only for a new file. Original bytes are backed up and new bytes read back. Verify the task's actual behavior separately.",write,3);
         definition(tools,"run_shell",
 #ifdef _WIN32
@@ -640,7 +816,14 @@ static J *builtin_tools(){
             put(timeout,"description",str("Optional command timeout in milliseconds (1000..300000, default 30000)."));
             put(shell_props,"timeout_ms",timeout);
         }
-        definition(tools,"desktop_snapshot","Read apps with empty app, then exact app name for controls. Text is sent to model API.",app,1);
+        definition(tools,"desktop_snapshot","Read apps with empty app, or up to 500 controls for an exact app name (with optional filter on control name/role). Text is sent to model API.",app,1);
+        {
+            J *snap_props=get(get(get(at(tools,6),"function"),"parameters"),"properties");
+            J *flt=obj();
+            put(flt,"type",str("string"));
+            put(flt,"description",str("Optional case-insensitive substring filter matching control name or role."));
+            put(snap_props,"filter",flt);
+        }
         definition(tools,"desktop_action","Invoke an action advertised by current snapshot. Re-snapshot after action.",act,2);
         definition(tools,"desktop_set_text","Replace entire editable control text. Re-snapshot to verify.",text,2);
         definition(tools,"code_outline","Extract structural symbols (classes, structs, interfaces, enums, functions, methods) and 1-based line numbers from a file or directory tree. Prefer this to orient in unfamiliar or large files before reading slices.",path,1);
@@ -658,6 +841,53 @@ static J *builtin_tools(){
             put(focus,"type",str("string"));
             put(focus,"description",str("Optional workspace directory or file path to focus on (default .)."));
             put(research_props,"path",focus);
+        }
+        definition(tools,"web_fetch","Fetch a public HTTPS web page (or localhost HTTP) and extract clean readable text. Private/LAN addresses are blocked.",fetch_url,1);
+        {
+            J *fetch_props=get(get(get(at(tools,11),"function"),"parameters"),"properties");
+            J *maxb=obj();
+            put(maxb,"type",str("integer"));
+            put(maxb,"description",str("Optional maximum UTF-8 bytes to return (1000..120000, default 40000)."));
+            put(fetch_props,"max_bytes",maxb);
+        }
+        definition(tools,"desktop_screenshot","Capture a screenshot image of the active window or desktop for visual UI inspection.",nullptr,0);
+        {
+            J *shot_props=get(get(get(at(tools,12),"function"),"parameters"),"properties");
+            J *target=obj();
+            put(target,"type",str("string"));
+            put(target,"description",str("Optional application name; omit or empty for full screen."));
+            put(shot_props,"app",target);
+        }
+        definition(tools,"multi_edit","Apply multiple exact text replacements atomically in one UTF-8 file (up to 4 MB) under a single expected_sha256 check, one diff preview, and one backup.",multi_edit_req,2);
+        {
+            J *me_param=get(get(at(tools,13),"function"),"parameters");
+            J *me_props=get(me_param,"properties"),*me_req=get(me_param,"required");
+            J *edits_arr=obj(),*item_obj=obj(),*item_props=obj(),*item_req=arr(),*ot=obj(),*nt=obj();
+            put(ot,"type",str("string"));
+            put(ot,"description",str("Exact original text for this hunk (must occur once)."));
+            put(nt,"type",str("string"));
+            put(nt,"description",str("Replacement text for this hunk."));
+            put(item_props,"old_text",ot);
+            put(item_props,"new_text",nt);
+            add(item_req,str("old_text"));
+            add(item_req,str("new_text"));
+            put(item_obj,"type",str("object"));
+            put(item_obj,"properties",item_props);
+            put(item_obj,"required",item_req);
+            put(item_obj,"additionalProperties",json_object_new_boolean(0));
+            put(edits_arr,"type",str("array"));
+            put(edits_arr,"description",str("Ordered list of 1..20 {old_text, new_text} hunks applied atomically."));
+            put(edits_arr,"items",item_obj);
+            put(me_props,"edits",edits_arr);
+            add(me_req,str("edits"));
+        }
+        definition(tools,"web_search","Search the web by keywords and return titles, URLs, and snippets. Follow up with web_fetch to read a relevant URL in full.",web_q,1);
+        {
+            J *ws_props=get(get(get(at(tools,14),"function"),"parameters"),"properties");
+            J *maxr=obj();
+            put(maxr,"type",str("integer"));
+            put(maxr,"description",str("Optional maximum search results to return (1..10, default 5)."));
+            put(ws_props,"max_results",maxr);
         }
         return tools;
     }());
@@ -714,6 +944,24 @@ J *tool_call(App *a,const char *name,J *args){
         }else if(!strcmp(kind,"boolean")){
             if(value==NULL){if(req)valid=false;}
             else if(!json_object_is_type(value,json_type_boolean))valid=false;
+        }else if(!strcmp(kind,"array")){
+            if(value==NULL){if(req)valid=false;}
+            else if(!json_object_is_type(value,json_type_array))valid=false;
+            else{
+                J *item_spec=get(description,"items"),*item_props=get(item_spec,"properties"),*item_req=get(item_spec,"required");
+                if(item_props){
+                    for(size_t ai=0;ai<alen(value)&&valid;ai++){
+                        J *elem=at(value,ai);
+                        if(!json_object_is_type(elem,json_type_object)){valid=false;break;}
+                        for(size_t ri=0;ri<alen(item_req);ri++)
+                            if(!json_object_object_get_ex(elem,json_object_get_string(at(item_req,ri)),NULL))valid=false;
+                        json_object_object_foreach(elem,ek,ev){
+                            if(!json_object_object_get_ex(item_props,ek,NULL)||!json_object_is_type(ev,json_type_string)
+                               ||(size_t)json_object_get_string_len(ev)!=strlen(json_object_get_string(ev)))valid=false;
+                        }
+                    }
+                }
+            }
         }else{
             if(!json_object_is_type(value,json_type_string)&&!(value==NULL&&nullable))valid=false;
             if(json_object_is_type(value,json_type_string)&&(size_t)json_object_get_string_len(value)!=strlen(json_object_get_string(value)))valid=false;
@@ -721,7 +969,7 @@ J *tool_call(App *a,const char *name,J *args){
     }
     if(!valid)return err(tr("工具参数缺失、多余或类型不正确。"));
     std::unique_ptr<ResourceLock> lock;
-    if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"run_shell")){
+    if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit")||!strcmp(name,"run_shell")){
         lock=std::make_unique<ResourceLock>(*a,false);
         if(!lock->acquired()||interrupted)return err(interrupted?tr("资源等待已取消。"):tr("工作目录被占用或无法加锁，未执行操作；请返回对应对话处理待批准操作。"));
     }
@@ -730,7 +978,10 @@ J *tool_call(App *a,const char *name,J *args){
     if(!strcmp(name,"search_text"))return file_search(a,args);
     if(!strcmp(name,"code_outline"))return tool_code_outline(a,args);
     if(!strcmp(name,"delegate_research"))return tool_delegate_research(a,args);
+    if(!strcmp(name,"web_fetch"))return tool_web_fetch(a,args);
+    if(!strcmp(name,"web_search"))return tool_web_search(a,args);
     if(!strcmp(name,"edit_file"))return file_edit(a,args);
+    if(!strcmp(name,"multi_edit"))return file_multi_edit(a,args);
     if(!strcmp(name,"write_file"))return file_write(a,args);
     if(!strcmp(name,"run_shell")){
         int timeout_ms=30000;
@@ -739,14 +990,19 @@ J *tool_call(App *a,const char *name,J *args){
             if(requested<1000||requested>300000)return err(tr("命令超时设置无效。"));
             timeout_ms=static_cast<int>(requested);
         }
-        if(!approve(a,sget(args,"command"),Operation::Other,tr("执行命令"))){
+        const char *cmd=sget(args,"command");
+        std::string hook_err;
+        if(!run_pre_shell_hook(*a,cmd,hook_err))return err(hook_err.c_str());
+        const bool auto_safe=(a->auto_edit&&safe_readonly_command(cmd))||command_allowed_in_session(*a,cmd);
+        if(!auto_safe&&!approve(a,cmd,Operation::Shell,tr("执行命令"))){
             J *r=err(tr("用户拒绝执行，不要绕过。"));
             put(r,"denied",json_object_new_boolean(1));
             return r;
         }
-        return run_command(a,sget(args,"command"),timeout_ms);
+        return run_command(a,cmd,timeout_ms);
     }
-    if(!strcmp(name,"desktop_snapshot"))return desktop_snapshot(a,sget(args,"app"));
+    if(!strcmp(name,"desktop_snapshot"))return desktop_snapshot(a,sget(args,"app"),sget(args,"filter"));
+    if(!strcmp(name,"desktop_screenshot"))return tool_desktop_screenshot(a,args);
     if(!approve(a,json_object_to_json_string_ext(args,JSON_C_TO_STRING_PLAIN),Operation::Other,tr("操作桌面"))){
         J *r=err(tr("用户拒绝桌面操作，不要绕过。"));
         put(r,"denied",json_object_new_boolean(1));

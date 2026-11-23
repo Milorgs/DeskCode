@@ -6,9 +6,9 @@
 
 I built `DeskCode`, a terminal AI assistant. I use it to edit local files, run terminal tasks, control desktop applications, and keep multiple conversations running at the same time.
 
-支持 Linux x86_64 和 Windows 10/11 x64。模型接口支持 OpenAI 兼容接口和 Anthropic 原生接口，也支持导入 MCP 工具。
+支持 Linux x86_64、Windows 10/11 x64 与 macOS 源码构建。模型接口支持 OpenAI 兼容接口和 Anthropic 原生接口（含自动 `cache_control` 提示词缓存断点），也支持导入 MCP 工具、项目约定 `DESKCODE.md`、生命周期钩子（`hooks.json`）与自定义斜杠指令（`.deskcode/commands/*.md`）。
 
-It supports Linux x86_64 and Windows 10/11 x64, OpenAI-compatible APIs, the native Anthropic API, and imported MCP tools.
+It supports Linux x86_64, Windows 10/11 x64, and macOS source builds, OpenAI-compatible APIs, the native Anthropic API (with automatic `cache_control` prompt caching), imported MCP tools, `DESKCODE.md` project instructions, lifecycle hooks (`hooks.json`), and custom slash commands (`.deskcode/commands/*.md`).
 
 ## 一行安装 / One-line install
 
@@ -54,24 +54,24 @@ API keys stay in the local user configuration directory where I run `desk`. They
 
 ## 我能做什么 / What I can do
 
-- 用自然语言读取、搜索、编辑工作目录内的文件；改动前在审批面板里看到带颜色的 diff。
-- 用 `code_outline` 提取源码符号与行号大纲，用 `delegate_research` 发起只读子任务调研，自动加载项目根目录的 `AGENTS.md` / `CLAUDE.md` 约定。
-- 输入 `@关键词` 按 `Tab` 模糊补全文件，发送 `@文件` 或 `@文件:起-止` 直接附带文件/图片内容；用 `/paste` 附带剪贴板图片，多行粘贴自动折叠不误提交。
-- 执行终端命令，并在需要时请求批准。
-- 通过 Linux AT-SPI 或 Windows UI Automation 操作支持标准控件的桌面应用。
+- 用自然语言读取、搜索、编辑工作目录内的文件（`edit_file` 与单次多处原子替换的 `multi_edit` 支持最大 4 MB 源码文件）；改动前在审批面板里看到带颜色的 diff，随时输入 `/undo` 一键撤回上一轮修改与新建文件。
+- 用 `code_outline` 提取源码符号与行号大纲，用支持正则、`file_pattern` 通配符与 `.gitignore` 过滤的 `search_text` 精准搜索，用 `delegate_research` 发起只读子任务调研，用 `web_search` 与 `web_fetch` 联网检索并读取网页，自动加载项目根目录的 `DESKCODE.md` / `deskcode.md`（兼容 `AGENTS.md`）、生命周期钩子（`post_edit` / `pre_shell`）与自定义斜杠指令。
+- 输入 `@关键词` 按 `Tab` 模糊补全文件，发送 `@文件` 或 `@文件:起-止` 直接附带文件/图片内容；用 `/paste` 附带剪贴板图片，多行粘贴自动折叠不误提交；用 `/compact` 主动将长对话提炼为高密度续接摘要。
+- 执行终端命令并实时显示最新输出行进度；Linux 下默认启用 **Landlock 内核级文件系统沙箱**禁止命令修改工作目录外的宿主文件，「帮我批准」模式下自动放行安全的只读检查命令，命令审批时可选「本对话允许同类」。
+- 通过 Linux AT-SPI、Windows UI Automation 或 macOS System Events 操作桌面应用（支持最多 500 个节点与 `filter` 过滤），并支持 `desktop_screenshot` 桌面多模态视觉截图。
 - 使用多个模型配置，选择后会成为下次启动的默认模型。
 - 在对话列表中切换对话；按 `Ctrl+D` 返回列表，任务会继续在后台运行。`desk -c` 直接继续最近的对话。
-- 导入本地 stdio 或远程 Streamable HTTP MCP 服务。
+- 在 Linux、Windows 和 macOS 上均可导入本地 stdio 或远程 Streamable HTTP MCP 服务。
 - 回复按 Markdown 排版，代码块、列表和标题在终端里清晰可读。
 
-- Read, search, and edit files inside the workspace with natural language, and review a coloured diff before each change.
-- Map source symbols and line numbers with `code_outline`, delegate multi-file investigation with read-only `delegate_research`, and load workspace `AGENTS.md` / `CLAUDE.md` automatically.
-- Type `@query` + `Tab` to fuzzy-complete workspace files, attach `@file` or `@file:start-end` slices and images inline, run `/paste` to attach clipboard images, and paste multiline snippets safely without premature submission.
-- Run terminal commands and ask for approval when needed.
-- Control desktop applications through Linux AT-SPI or Windows UI Automation.
+- Read, search, and edit files inside the workspace (`edit_file` and multi-hunk atomic `multi_edit` support files up to 4 MB), review a coloured diff before each change, and run `/undo` to revert the last turn's file edits and newly created files in one step.
+- Map source symbols and line numbers with `code_outline`, search with regex, `file_pattern` globs, and `.gitignore` awareness in `search_text`, delegate multi-file investigation with read-only `delegate_research`, search and fetch documentation pages with `web_search` + `web_fetch`, and load workspace `DESKCODE.md` / `deskcode.md` (compatible with `AGENTS.md`), `post_edit` / `pre_shell` hooks, and custom slash commands automatically.
+- Type `@query` + `Tab` to fuzzy-complete workspace files, attach `@file` or `@file:start-end` slices and images inline, run `/paste` to attach clipboard images, paste multiline snippets safely without premature submission, and run `/compact` to condense long conversations into a dense continuation summary.
+- Run terminal commands with live latest-line progress; on Linux, the **Landlock kernel sandbox** restricts shell writes to the workspace and `/tmp` by default, auto-edit mode lets verified read-only inspection commands run without friction, and shell approvals include an `Allow similar` option for the current chat.
+- Control desktop applications through Linux AT-SPI, Windows UI Automation, or macOS System Events (up to 500 controls with `filter` support) and inspect UI state visually with `desktop_screenshot`.
 - Keep multiple model profiles; the selected profile becomes the default on the next launch.
 - Switch conversations; `Ctrl+D` returns to the list while tasks keep running in the background. `desk -c` resumes the latest one.
-- Import local stdio or remote Streamable HTTP MCP servers.
+- Import local stdio or remote Streamable HTTP MCP servers on Linux, Windows, and macOS.
 - Replies render as Markdown, so code blocks, lists and headings stay readable in the terminal.
 
 MCP 菜单支持从文件导入、直接粘贴多行 JSON，以及查看或保存配置示例。也可以直接填写远程 MCP 地址。
@@ -120,9 +120,9 @@ In a chat, press `/` for the command palette (model, reasoning, approval, new ch
 
 ## 安装包和源码 / Packages and source
 
-最新版本：**1.12.0**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64。
+最新版本：**1.14.1**。Linux 包基于 Ubuntu 22.04 构建，需要 glibc 2.35+ 及系统运行库；Windows 包面向 Windows 10/11 x64；macOS 支持直接从源码构建。
 
-Latest version: **1.12.0**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries. The Windows package targets Windows 10/11 x64.
+Latest version: **1.14.1**. The Linux package is built on Ubuntu 22.04 and requires glibc 2.35+ plus system runtime libraries; the Windows package targets Windows 10/11 x64; macOS builds directly from source.
 
 也可以直接进入对话或执行一次请求：
 

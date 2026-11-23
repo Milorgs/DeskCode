@@ -8,7 +8,10 @@ LDLIBS += $(shell pkg-config --libs $(PKGS) $(ATSPI))
 ifneq ($(ATSPI),)
 CPPFLAGS += -DWITH_ATSPI
 endif
-CORE = src/history.cpp src/mcp.cpp src/common.cpp src/platform.cpp src/ui.cpp src/tasks_ui.cpp src/util.cpp src/config.cpp src/api.cpp src/files.cpp src/workspace.cpp src/process.cpp src/desktop.cpp src/agent.cpp src/tasks.cpp src/i18n.cpp
+ifneq ($(shell uname -s),Darwin)
+PTYLIB = -lutil
+endif
+CORE = src/history.cpp src/mcp.cpp src/common.cpp src/platform.cpp src/ui.cpp src/tasks_ui.cpp src/util.cpp src/config.cpp src/api.cpp src/files.cpp src/workspace.cpp src/tools_ext.cpp src/process.cpp src/desktop.cpp src/agent.cpp src/tasks.cpp src/i18n.cpp
 CORE_OBJ = $(CORE:%.cpp=build/obj/%.o)
 APP_OBJ = build/obj/src/main.o
 TEST_OBJ = build/obj/tests/test.o
@@ -22,9 +25,9 @@ build/obj/%.o: %.cpp
 	mkdir -p $(dir $@)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(WARN) -MMD -MP -c $< -o $@
 build/desk: $(CORE_OBJ) $(APP_OBJ) | build
-	$(CXX) $(CXXFLAGS) $(WARN) $^ $(LDFLAGS) $(LDLIBS) -lutil -o $@
+	$(CXX) $(CXXFLAGS) $(WARN) $^ $(LDFLAGS) $(LDLIBS) $(PTYLIB) -o $@
 build/test: $(CORE_OBJ) $(TEST_OBJ) | build
-	$(CXX) $(CXXFLAGS) $(WARN) $^ $(LDFLAGS) $(LDLIBS) -lutil -o $@
+	$(CXX) $(CXXFLAGS) $(WARN) $^ $(LDFLAGS) $(LDLIBS) $(PTYLIB) -o $@
 test: build/desk build/test
 	DESK_NO_ARROW=1 ./build/test < /dev/null
 test-mcp-http: build/desk

@@ -19,11 +19,12 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.12.0"
+#define VERSION "1.14.1"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
 #define FILE_LIMIT 262144
+#define EDIT_FILE_LIMIT (4*1024*1024)
 #define SLICED_FILE_LIMIT (16*1024*1024)
 #define COMMAND_OUTPUT_LIMIT (8*1024*1024)
 #define RESPONSE_LIMIT 32000000
@@ -68,6 +69,10 @@ struct App {
     bool approval_unavailable=false;
     // True inside delegate_research so only read-only tools are exposed.
     bool subagent=false;
+    bool sandbox=true;
+    bool workspace_hooks_approved=false;
+    std::string turn_id{};
+    std::vector<std::string> allowed_commands{};
 };
 extern std::atomic<int> interrupted;
 extern std::atomic<bool> input_closed;
@@ -115,7 +120,7 @@ int atomic_file(const char *path,const void *data,size_t len,unsigned int mode);
 std::optional<int> terminal_choice(const std::vector<std::string> &items,int initial,int top,
                                    const std::function<void()> &idle={},bool transient=false,bool inline_row=false,
                                    bool allow_escape=false,const std::function<void()> &on_resize={});
-std::vector<std::string> approval_choices(bool preview);
+std::vector<std::string> approval_choices(bool preview,bool allow_session_rule=false);
 char *input(const char *prompt,const char *fallback,bool secret);
 void terminal_message(const std::string &text);
 void terminal_activity(const std::string &text);
@@ -158,7 +163,31 @@ std::string user_message_text(J *message);
 std::string load_project_guide(const App &app);
 J *tool_code_outline(App *app,J *args);
 J *tool_delegate_research(App *app,J *args);
-enum class Operation { Other, FileEdit };
+void record_file_change(App *app,const char *rel_path,const char *backup_path,bool existed_before,unsigned int mode_before);
+bool undo_last_turn(App &app,std::string &summary);
+void prune_workspace_cache(const App &app);
+bool glob_match(std::string_view pattern,std::string_view text,bool case_insensitive=false);
+struct GitIgnore {
+    std::vector<std::string> rules;
+    void load(const char *root);
+    bool ignored(std::string_view rel_path,bool is_dir) const;
+};
+bool safe_readonly_command(std::string_view command);
+bool command_allowed_in_session(const App &app,std::string_view command);
+void remember_allowed_command(App &app,std::string_view command);
+J *tool_web_fetch(App *app,J *args);
+J *tool_web_search(App *app,J *args);
+J *tool_desktop_screenshot(App *app,J *args);
+bool compact_conversation(App &app,std::string &summary);
+bool sandbox_supported(void);
+bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason);
+void run_post_edit_hook(App &app,const char *rel_path,J *result);
+struct CustomCommand {
+    std::string name,scope,summary;
+};
+std::vector<CustomCommand> list_custom_commands(const App &app);
+bool expand_custom_command(const App &app,std::string_view input,std::string &expanded,std::string &label);
+enum class Operation { Other, FileEdit, Shell };
 bool approval_required(const App &app,Operation operation=Operation::Other);
 const char *permission_name(const App &app);
 const char *reasoning_name(const char *effort);
@@ -184,7 +213,7 @@ J *parse_tool_arguments(const char *text);
 J *api_complete(App *a,J *config,J *messages,J *tools);
 // Filled with streamed assistant text as it arrives; empty means wait for the
 // complete response.
-J *native_payload(J *config,J *messages,J *tools);
+J *native_payload(J *config,J *messages,J *tools,bool prompt_cache=false);
 J *native_response(App *a,J *data);
 J *api_request(App *a,J *config,const char *endpoint,J *payload,void *stream=nullptr);
 J *schemas(App *a);
@@ -192,7 +221,7 @@ J *tool_call(App *a,const char *name,J *arguments);
 J *run_command(App *a,const char *command,int timeout_ms);
 int resolve_file(App *a,const char *path,char out[PATH_MAX]);
 char *sha256(const void *bytes,size_t len);
-J *desktop_snapshot(App *a,const char *app);
+J *desktop_snapshot(App *a,const char *app,const char *filter=nullptr);
 J *desktop_act(App *a,const char *ref,const char *action,const char *text);
 void desktop_clear(App *a);
 void desktop_destroy(App *a);
