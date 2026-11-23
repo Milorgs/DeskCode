@@ -1,9 +1,8 @@
-DeskCode for macOS (Apple Silicon arm64)
+DeskCode for macOS (Universal: Apple Silicon arm64 & Intel x86_64)
 
-Self-contained arm64 binary statically linked against json-c, OpenSSL 3, and
-GNU Readline 8; depends only on standard macOS system libraries (libcurl,
-libncurses, libc++, libSystem). Intel (x86_64) Macs can build directly from
-source following README.md.
+Self-contained Universal 2 binary statically linked against json-c, OpenSSL 3,
+and GNU Readline 8; depends only on standard macOS system libraries (libcurl,
+libncurses, libc++, libSystem).
 
 One-line installation for the latest release:
   curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos.sh | sh

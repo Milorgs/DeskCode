@@ -42,18 +42,13 @@ irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 
 
 Downloads the latest Windows x64 package to your user profile directory and adds it to your user `PATH`. Open a new PowerShell window and run `desk`.
 
-### macOS (Apple Silicon arm64 & Intel Source Build)
+### macOS (Apple Silicon & Intel Universal)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos.sh | sh
 ```
 
-On Apple Silicon (`arm64`) Macs, this downloads the pre-built self-contained binary (statically linked—no Homebrew runtime required) to `~/.local/bin/desk`. On Intel (`x86_64`) Macs, build directly from source:
-
-```sh
-brew install json-c openssl@3 readline pkg-config
-make -j"$(sysctl -n hw.ncpu)" && ./install.sh --setup-path
-```
+Downloads the Universal 2 (`arm64` + `x86_64`) self-contained release binary (statically linked—no Homebrew runtime required) to `~/.local/bin/desk` and adds it to your user `PATH` when needed. Open a new terminal and run `desk`.
 
 ---
 

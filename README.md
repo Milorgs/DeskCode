@@ -42,18 +42,13 @@ irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 
 
 脚本自动下载最新 Windows 发行包到当前用户目录并加入用户 `PATH`。重新打开 PowerShell 后输入 `desk` 即可启动。
 
-### macOS (Apple Silicon arm64 / Intel 源码构建)
+### macOS (Apple Silicon & Intel Universal)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos.sh | sh
 ```
 
-Apple Silicon（`arm64`）Mac 自动下载预编译独立二进制（已静态链接依赖，无需安装 Homebrew 运行库）并安装至 `~/.local/bin/desk`。Intel（`x86_64`）Mac 可直接从源码安装：
-
-```sh
-brew install json-c openssl@3 readline pkg-config
-make -j"$(sysctl -n hw.ncpu)" && ./install.sh --setup-path
-```
+脚本自动下载通用（`arm64` + `x86_64` Universal 2）独立发行包（已静态链接依赖，无需安装 Homebrew 运行库）并安装至 `~/.local/bin/desk`。重新打开终端后输入 `desk` 即可启动。
 
 ---
 

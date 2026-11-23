@@ -2,27 +2,17 @@
 set -eu
 
 repo='Milorgs/DeskCode'
+pkg_name='desk-agent-macos-universal'
+asset="https://github.com/$repo/releases/latest/download/$pkg_name.tar.gz"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/desk-agent-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 
 [ "$(uname -s)" = "Darwin" ] || { echo 'This installer is for macOS.' >&2; exit 1; }
 
 case "$(uname -m)" in
-    arm64|aarch64)
-        pkg_name='desk-agent-macos-arm64'
-        ;;
-    x86_64)
-        echo 'Prebuilt macOS packages currently target Apple Silicon (arm64).' >&2
-        echo 'On Intel Macs, install dependencies via Homebrew and run: make && ./install.sh --setup-path' >&2
-        exit 1
-        ;;
-    *)
-        echo "Unsupported macOS architecture: $(uname -m)" >&2
-        exit 1
-        ;;
+    arm64|aarch64|x86_64) ;;
+    *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-
-asset="https://github.com/$repo/releases/latest/download/$pkg_name.tar.gz"
 
 download() {
     if command -v curl >/dev/null 2>&1; then

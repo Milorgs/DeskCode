@@ -117,8 +117,8 @@ jobs:
           key: windows-x64-static-${{ hashFiles('vcpkg.json') }}
 
   macos:
-    runs-on: macos-latest
-    timeout-minutes: 8
+    runs-on: macos-15-intel
+    timeout-minutes: 10
     env:
       DESK_NO_ARROW: 1
       DESK_VERBOSE_TEST: 1
@@ -132,37 +132,73 @@ jobs:
           make -j4 test
           make test-mcp-http
           ./build/desk --version
-      - name: Package macOS arm64 executable
+      - name: Package Universal macOS (arm64 + x86_64) executable
         run: |
           JSONC_DIR="$(brew --prefix json-c)"
           OSSL_DIR="$(brew --prefix openssl@3)"
           RL_DIR="$(brew --prefix readline)"
-          rm -rf build
+          INC_FLAGS="-isystem $JSONC_DIR/include -isystem $JSONC_DIR/include/json-c -isystem $OSSL_DIR/include -isystem $RL_DIR/include -Isrc"
+
+          rm -rf build build-x64
           make -j4 build/desk \
-            CPPFLAGS="-isystem $JSONC_DIR/include -isystem $JSONC_DIR/include/json-c -isystem $OSSL_DIR/include -isystem $RL_DIR/include -Isrc" \
+            CXXFLAGS="-O2 -g -arch x86_64" \
+            CPPFLAGS="$INC_FLAGS" \
             LDLIBS="$JSONC_DIR/lib/libjson-c.a $OSSL_DIR/lib/libssl.a $OSSL_DIR/lib/libcrypto.a $RL_DIR/lib/libreadline.a $RL_DIR/lib/libhistory.a -lcurl -lncurses"
-          mkdir -p dist/desk-agent-macos-arm64
-          install -m 755 build/desk dist/desk-agent-macos-arm64/desk
-          strip -x dist/desk-agent-macos-arm64/desk
-          otool -L dist/desk-agent-macos-arm64/desk | tee dist/desk-agent-macos-arm64/DEPENDENCIES.txt
-          if grep -E '/opt/homebrew|/usr/local' dist/desk-agent-macos-arm64/DEPENDENCIES.txt; then
+          mkdir -p build-x64 && cp build/desk build-x64/desk
+
+          fetch_arm64_lib() {
+            pkg="$1"
+            dest="$RUNNER_TEMP/arm64-bottles/$pkg"
+            mkdir -p "$dest"
+            for tag in arm64_sequoia arm64_sonoma arm64_ventura; do
+              if brew fetch --force --bottle-tag="$tag" "$pkg" >/dev/null 2>&1; then
+                bottle="$(brew --cache --bottle-tag="$tag" "$pkg")"
+                if [ -f "$bottle" ]; then
+                  tar -xzf "$bottle" -C "$dest"
+                  find "$dest" -type d -name lib | head -n1
+                  return 0
+                fi
+              fi
+            done
+            return 1
+          }
+          ARM_JSONC_LIB="$(fetch_arm64_lib json-c)"
+          ARM_OSSL_LIB="$(fetch_arm64_lib openssl@3)"
+          ARM_RL_LIB="$(fetch_arm64_lib readline)"
+
+          rm -rf build build-arm64
+          make -j4 build/desk \
+            CXXFLAGS="-O2 -g -arch arm64" \
+            CPPFLAGS="$INC_FLAGS" \
+            LDLIBS="$ARM_JSONC_LIB/libjson-c.a $ARM_OSSL_LIB/libssl.a $ARM_OSSL_LIB/libcrypto.a $ARM_RL_LIB/libreadline.a $ARM_RL_LIB/libhistory.a -lcurl -lncurses"
+          mkdir -p build-arm64 && cp build/desk build-arm64/desk
+
+          mkdir -p dist/desk-agent-macos-universal
+          lipo -create -output dist/desk-agent-macos-universal/desk build-x64/desk build-arm64/desk
+          chmod 755 dist/desk-agent-macos-universal/desk
+          strip -x dist/desk-agent-macos-universal/desk
+          archs="$(lipo -archs dist/desk-agent-macos-universal/desk)"
+          echo "Universal archs: $archs"
+          case "$archs" in *x86_64*arm64*|*arm64*x86_64*) ;; *) echo "Missing slice: $archs" >&2; exit 1 ;; esac
+          otool -arch all -L dist/desk-agent-macos-universal/desk | tee dist/desk-agent-macos-universal/DEPENDENCIES.txt
+          if grep -E '/opt/homebrew|/usr/local' dist/desk-agent-macos-universal/DEPENDENCIES.txt; then
             echo "Unexpected non-system dylib dependency on macOS binary" >&2
             exit 1
           fi
-          install -m 755 macos/install.sh dist/desk-agent-macos-arm64/install.sh
-          cp macos/README.txt dist/desk-agent-macos-arm64/
-          tar -C dist -czf dist/desk-agent-macos-arm64.tar.gz desk-agent-macos-arm64
-          (cd dist && shasum -a 256 desk-agent-macos-arm64.tar.gz > SHA256SUMS-macos.txt)
+          install -m 755 macos/install.sh dist/desk-agent-macos-universal/install.sh
+          cp macos/README.txt dist/desk-agent-macos-universal/
+          tar -C dist -czf dist/desk-agent-macos-universal.tar.gz desk-agent-macos-universal
+          (cd dist && shasum -a 256 desk-agent-macos-universal.tar.gz > SHA256SUMS-macos.txt)
           mkdir -p "$RUNNER_TEMP/desk-package-check"
-          tar -xzf dist/desk-agent-macos-arm64.tar.gz -C "$RUNNER_TEMP/desk-package-check"
-          sh "$RUNNER_TEMP/desk-package-check/desk-agent-macos-arm64/install.sh" --prefix "$RUNNER_TEMP/desk-binary-install"
+          tar -xzf dist/desk-agent-macos-universal.tar.gz -C "$RUNNER_TEMP/desk-package-check"
+          sh "$RUNNER_TEMP/desk-package-check/desk-agent-macos-universal/install.sh" --prefix "$RUNNER_TEMP/desk-binary-install"
           "$RUNNER_TEMP/desk-binary-install/bin/desk" --version
       - uses: actions/upload-artifact@v4
         with:
-          name: desk-agent-macos-arm64
+          name: desk-agent-macos-universal
           if-no-files-found: error
           path: |
-            dist/desk-agent-macos-arm64.tar.gz
+            dist/desk-agent-macos-universal.tar.gz
             dist/SHA256SUMS-macos.txt
 
   release:
@@ -190,5 +226,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists; keeping the published package."
           else
-            gh release create "$tag" dist/desk-agent-windows-x64.zip dist/desk-agent-linux-x64.tar.gz dist/desk-agent-macos-arm64.tar.gz dist/SHA256SUMS.txt --target "$GITHUB_SHA" --title "DeskCode $DESK_VERSION — Windows / Linux / macOS" --notes-file "docs/releases/$tag.md"
+            gh release create "$tag" dist/desk-agent-windows-x64.zip dist/desk-agent-linux-x64.tar.gz dist/desk-agent-macos-universal.tar.gz dist/SHA256SUMS.txt --target "$GITHUB_SHA" --title "DeskCode $DESK_VERSION — Windows / Linux / macOS" --notes-file "docs/releases/$tag.md"
           fi
