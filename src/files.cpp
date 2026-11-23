@@ -805,6 +805,8 @@ static J *builtin_tools(){
         definition(tools,"run_shell",
 #ifdef _WIN32
             "Execute noninteractive Windows PowerShell in the workspace (default 30s timeout, configurable up to 300s via timeout_ms). Use PowerShell syntax, not bash. There is no sandbox. Calls do not share variables or working-directory changes. Do not start persistent/background services. Inspect exit_code, timed_out and output to verify the result.",
+#elif defined(__linux__)
+            "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms; Landlock restricts writes to workspace and /tmp when enabled). Do not start persistent/background services. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
 #else
             "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms), no sandbox. Do not start persistent/background services. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
 #endif

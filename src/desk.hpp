@@ -19,7 +19,7 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.14.1"
+#define VERSION "1.14.2"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
