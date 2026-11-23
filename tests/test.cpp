@@ -659,9 +659,16 @@ static J *capture(App *a,int i){
     return j;
 }
 static void server_done(pid_t child){
-    int status;
-    CHECK(waitpid(child,&status,0)==child);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    int status=0;
+    pid_t ended=0;
+    double until=monotime()+15;
+    while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(5000);
+    if(ended!=child){
+        fprintf(stderr,"server_done timeout waiting for fake_server pid %ld\n",static_cast<long>(child));
+        kill(child,SIGKILL);
+        waitpid(child,&status,0);
+    }
+    CHECK(ended==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);
 }
 static void test_http_reuse(){
     App a=fresh();json_object_put(a.config);a.config=config("reuse","openai");
@@ -1121,6 +1128,46 @@ static bool terminal_until(int fd,std::string &output,const char *needle){
     }
     fprintf(stderr,"Terminal transcript:\n%s\n",output.c_str());return false;
 }
+static int reap_pty(int &master,pid_t child,std::string *tail=nullptr){
+    if(master>=0)fcntl(master,F_SETFL,fcntl(master,F_GETFL)|O_NONBLOCK);
+    int status=0;
+    pid_t ended=0;
+    double until=monotime()+12;
+    while(monotime()<until){
+        if(master>=0){
+            char buf[4096];
+            for(;;){
+                ssize_t n=read(master,buf,sizeof buf);
+                if(n>0){if(tail)tail->append(buf,static_cast<size_t>(n));}
+                else{
+                    if(n==0||(errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR)){close(master);master=-1;}
+                    break;
+                }
+            }
+        }
+        ended=waitpid(child,&status,WNOHANG);
+        if(ended==child)break;
+        usleep(10000);
+    }
+    if(ended!=child){
+        fprintf(stderr,"reap_pty timeout waiting for pid %ld\n",static_cast<long>(child));
+        kill(child,SIGKILL);
+        waitpid(child,&status,0);
+        if(master>=0){close(master);master=-1;}
+        return -1;
+    }
+    if(master>=0){
+        char buf[4096];
+        while(ssize_t n=read(master,buf,sizeof buf)){
+            if(n>0){if(tail)tail->append(buf,static_cast<size_t>(n));}
+            else break;
+        }
+        close(master);
+        master=-1;
+    }
+    CHECK(WIFEXITED(status));
+    return WEXITSTATUS(status);
+}
 static void test_task_switch_approval(bool allow=true){
     App a=fresh();json_object_put(a.config);a.config=config("switch","openai");
     J *write=args("confirmed.txt");put(write,"content",str("user approved"));put(write,"expected_sha256",nullptr);
@@ -1194,9 +1241,12 @@ static void test_english_menu(void){
     CHECK(terminal_until(master,output,"[3] Add model"));CHECK(output.find("[2] Select model")!=std::string::npos);
     CHECK(write(master,"3\n",2)==2);CHECK(terminal_until(master,output,"[1] OpenAI API"));
     CHECK(terminal_until(master,output,"[2] Anthropic API"));
-    const char *quit="0\n5\n1\n1\n0\n\x04";CHECK(write(master,quit,strlen(quit))==static_cast<ssize_t>(strlen(quit)));
+    const char *switch_zh="0\n5\n1\n1\n0\n";CHECK(write(master,switch_zh,strlen(switch_zh))==static_cast<ssize_t>(strlen(switch_zh)));
     CHECK(terminal_until(master,output,"[1] 开始对话"));
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    auto zh_tail=output.substr(output.rfind("[1] 开始对话"));
+    CHECK(terminal_until(master,zh_tail,"请选择编号："));
+    CHECK(write(master,"\x04",1)==1);
+    CHECK(reap_pty(master,child)==0);
     app_cleanup(&a);
 }
 static void test_no_extra_model_prompts(void){
@@ -1222,6 +1272,8 @@ static void leave_chat_and_exit(int master,bool english=true){
     output.clear();
     CHECK(write(master,"0\n",2)==2);
     CHECK(terminal_until(master,output,english?"[1] Start chat":"[1] 开始对话"));
+    output.erase(0,output.find(english?"[1] Start chat":"[1] 开始对话"));
+    CHECK(terminal_until(master,output,english?"Select a number:":"请选择编号："));
     CHECK(write(master,"0\n",2)==2);
 }
 static void test_numeric_request(void){
@@ -1235,7 +1287,7 @@ static void test_numeric_request(void){
     const char *keys="1\n1\n1\n";CHECK(write(master,keys,strlen(keys))==static_cast<ssize_t>(strlen(keys)));
     std::string output;CHECK(terminal_until(master,output,"数字需求已收到"));
     CHECK(write(master,"0\n",2)==2);CHECK(terminal_until(master,output,"零也是需求"));
-    wait_for_chat_prompt(master,output,"零也是需求");leave_chat_and_exit(master,false);int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    wait_for_chat_prompt(master,output,"零也是需求");leave_chat_and_exit(master,false);CHECK(reap_pty(master,child)==0);
     server_done(server);JsonPtr request(capture(&a,0));J *messages=get(get(request.get(),"body"),"messages");
     CHECK(alen(messages)==1&&!strcmp(sget(at(messages,0),"role"),"user"));CHECK(!strcmp(sget(at(messages,0),"content"),"1"));
     CHECK(output.find("[y/N]")==std::string::npos&&output.find("/help")==std::string::npos);
@@ -1247,8 +1299,8 @@ static void test_numeric_settings(void){
     if(!child){execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
     const char *keys="5\n2\n1\n3\n2\n0\n0\n";CHECK(write(master,keys,strlen(keys))==static_cast<ssize_t>(strlen(keys)));
     std::string output;CHECK(terminal_until(master,output,"Approve file edits (this run)"));
+    CHECK(reap_pty(master,child,&output)==0);
     CHECK(output.find("[6] View status")==std::string::npos);CHECK(output.find("[5] Settings")!=std::string::npos);CHECK(output.find("[4] Tasks")==std::string::npos);
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
     CHECK(output.find("/desktop")==std::string::npos&&output.find("/permissions")==std::string::npos);
     CHECK(output.find("\n  Task:")==std::string::npos&&output.find("\n  Desktop:")==std::string::npos);
     char path[PATH_MAX];CHECK(!path_suffix(path,a.config_dir,"/settings.json"));CHECK(access(path,F_OK)!=0);
@@ -1440,10 +1492,7 @@ static void test_chat_mode_menu(void){
     };
     auto finish=[&](pid_t child){
         leave_chat_and_exit(master);
-        int status=0;
-        CHECK(waitpid(child,&status,0)==child);
-        close(master);
-        CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+        CHECK(reap_pty(master,child)==0);
     };
     std::string output;
     auto picker=[&]{
@@ -1692,16 +1741,7 @@ static void test_chat_history_scroll(){
     CHECK(terminal_until(master,output,full_rule.c_str()));
     CHECK(output.substr(output.rfind("\033[29;1H\033[2K")).find("more · PgDn")==std::string::npos);
     leave_chat_and_exit(master);
-    int status=0;
-    CHECK(waitpid(child,&status,0)==child);
-    if(!WIFEXITED(status)||WEXITSTATUS(status)!=0){
-        fprintf(stderr,"Chat process exited with status %d. Remaining terminal output:\n",status);
-        char bytes[4096];
-        ssize_t count;
-        while((count=read(master,bytes,sizeof bytes))>0)fwrite(bytes,1,static_cast<size_t>(count),stderr);
-    }
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     // Legacy native-selection settings must not disable scrollbar dragging.
     // Up/Down remain available for keyboard scrolling.
     child=forkpty(&master,nullptr,nullptr,&window);
@@ -1731,9 +1771,7 @@ static void test_chat_history_scroll(){
     for(int i=0;i<60;i++)type_terminal(master,output,"\033[B");
     CHECK(terminal_until(master,output,"NEWEST_SCROLL_LINE"));
     leave_chat_and_exit(master);
-    CHECK(waitpid(child,&status,0)==child);
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     // Inline approval row: wheel scrolling reviews the diff/transcript above
     // the choices without shifting focus away from Cancel (choice 0).
     for(bool native_select:{false,true}){
@@ -1766,9 +1804,7 @@ static void test_chat_history_scroll(){
         output.clear();
         type_terminal(master,output,"\n");
         CHECK(terminal_until(master,output,"INLINE_PICK=0"));
-        CHECK(waitpid(child,&status,0)==child);
-        close(master);
-        CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+        CHECK(reap_pty(master,child)==0);
     }
     app_cleanup(&a);
 }
@@ -1845,10 +1881,7 @@ static void test_prompt_recall_and_context(){
     CHECK(replies==1);
     CHECK(output.find("Worked for")==std::string::npos);
     leave_chat_and_exit(master);
-    int status=0;
-    CHECK(waitpid(child,&status,0)==child);
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     server_done(server);
     JsonPtr request(capture(&a,0));
     J *messages=get(get(request.get(),"body"),"messages");
@@ -2030,10 +2063,7 @@ static void test_chat_actions_layout(){
     type_terminal(master,output,"0\n");
     CHECK(terminal_until(master,output,"0. Exit"));
     type_terminal(master,output,"0\n");
-    int status=0;
-    CHECK(waitpid(child,&status,0)==child);
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     app_cleanup(&a);
 }
 static void test_menu_navigation_and_resize(){
@@ -2079,10 +2109,7 @@ static void test_menu_navigation_and_resize(){
     CHECK(output.find("unsafe\x1b[31m")==std::string::npos);
     output.clear();type_terminal(master,output,"12\n");
     CHECK(terminal_until(master,output,"RESULT=12 RESTORED=1"));
-    int status=0;
-    CHECK(waitpid(child,&status,0)==child);
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
 }
 static void test_persistent_conversations(){
     App a=fresh();
@@ -2104,12 +2131,11 @@ static void test_persistent_conversations(){
         }
         return child;
     };
-    auto close_app=[&](int master,pid_t child,std::string &output){
+    auto close_app=[&](int &master,pid_t child,std::string &output){
         output.clear();type_terminal(master,output,"0\n");
         CHECK(terminal_until(master,output,"\033[38;5;247m  [1]\033[0m\033[38;5;111m Start chat"));
         type_terminal(master,output,"0\n");
-        int status=0;CHECK(waitpid(child,&status,0)==child);close(master);
-        CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+        CHECK(reap_pty(master,child)==0);
     };
     int master=-1;pid_t child=launch(master);std::string output;
     type_terminal(master,output,"1\n1\npersist my work\n");
@@ -2221,10 +2247,7 @@ static void test_guided_approval(){
     type_terminal(master,output,"0\n");
     CHECK(terminal_until(master,output,"❯ 1. Start chat"));
     type_terminal(master,output,"0\n");
-    int status=0;
-    CHECK(waitpid(child,&status,0)==child);
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     server_done(server);
     JsonPtr request(capture(&a,2));
     J *messages=get(get(request.get(),"body"),"messages");
@@ -2256,7 +2279,7 @@ static void test_line_editing(void){
         output.clear();type_terminal(master,output,cases[i].first+"\n");std::string done="EDIT_DONE_"+std::to_string(i);CHECK(terminal_until(master,output,done.c_str()));wait_for_chat_prompt(master,output,done.c_str());
         JsonPtr request(capture(&a,static_cast<int>(i)));J *messages=get(get(request.get(),"body"),"messages");CHECK(cases[i].second==sget(at(messages,alen(messages)-1),"content"));CHECK(valid_utf8(sget(at(messages,alen(messages)-1),"content")));
     }
-    leave_chat_and_exit(master);int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);server_done(server);app_cleanup(&a);
+    leave_chat_and_exit(master);CHECK(reap_pty(master,child)==0);server_done(server);app_cleanup(&a);
 }
 static void test_queued_editing(void){
     App a=fresh();json_object_put(a.config);a.config=config("queued-edit","openai");
@@ -2267,7 +2290,7 @@ static void test_queued_editing(void){
     CHECK(write(master,"1\n1\nfirst\n",10)==10);std::string output;CHECK(terminal_until(master,output,"Running a command..."));
     std::string queued="排队😀\x7f下一句\n";type_terminal(master,output,queued);CHECK(terminal_until(master,output,"Queued. This will run after the current operation."));CHECK(terminal_until(master,output,"QUEUED_DONE"));wait_for_chat_prompt(master,output,"QUEUED_DONE");
     JsonPtr request(capture(&a,2));J *messages=get(get(request.get(),"body"),"messages");CHECK(!strcmp(sget(at(messages,alen(messages)-1),"content"),"排队下一句"));
-    leave_chat_and_exit(master);int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);server_done(server);app_cleanup(&a);
+    leave_chat_and_exit(master);CHECK(reap_pty(master,child)==0);server_done(server);app_cleanup(&a);
 }
 static void test_conversation_picker(void){
     App a=fresh();json_object_put(a.config);a.config=config("conversation-picker","openai");
@@ -2314,7 +2337,7 @@ static void test_conversation_picker(void){
     CHECK(terminal_until(master,output,"Conversation: 我的比赛笔记"));CHECK(terminal_until(master,output,"REPLY_RESUMED"));
     output.clear();type_terminal(master,output,"/\n4\n"+third+"\n");CHECK(terminal_until(master,output,"REPLY_FRESH"));wait_for_chat_prompt(master,output,"REPLY_FRESH");
     leave_chat_and_exit(master);
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     server_done(server);CHECK(access(state_path,F_OK)!=0);
     for(int i=0;i<4;i++){
         JsonPtr request(capture(&a,i));J *body=get(request.get(),"body"),*messages=get(body,"messages");
@@ -2334,7 +2357,7 @@ static void test_conversation_picker(void){
     CHECK(terminal_until(master,output,"Choose a conversation"));
     auto tail=output.substr(output.find("Choose a conversation"));
     CHECK(terminal_until(master,tail,"Select a number:"));CHECK(tail.find("我的比赛笔记")!=std::string::npos);
-    CHECK(write(master,"\x04",1)==1);CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(write(master,"\x04",1)==1);CHECK(reap_pty(master,child)==0);
     app_cleanup(&a);
 }
 
@@ -2388,8 +2411,7 @@ static void test_thinking_timer(){
         CHECK(terminal_until(master,output,"Thinking... 1s"));
         CHECK(terminal_until(master,output,"TIMER_SECOND_DONE"));
         if(interactive)leave_chat_and_exit(master);
-        int status=0;CHECK(waitpid(child,&status,0)==child);close(master);
-        CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);server_done(server);
+        CHECK(reap_pty(master,child)==0);server_done(server);
         JsonPtr request(capture(&a,1));J *messages=get(get(request.get(),"body"),"messages");
         CHECK(!strcmp(sget(at(messages,0),"content"),"First timed request"));
         if(interactive)CHECK(!strcmp(sget(at(messages,alen(messages)-1),"content"),"second"));
@@ -2442,8 +2464,7 @@ static void test_background_conversations(){
     CHECK(output.find("\033[?1049l")==std::string::npos);
     CHECK(output.substr(output.rfind("[1] Start chat")).find("Conversation activity")==std::string::npos);
     CHECK(write(master,"0\n",2)==2);
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);server_done(server);
+    CHECK(reap_pty(master,child)==0);server_done(server);
     for(int i=0;i<3;i++){
         JsonPtr request(capture(&a,i));J *messages=get(get(request.get(),"body"),"messages");
         CHECK(alen(messages)==(i==2?3u:1u));
@@ -2489,7 +2510,7 @@ static void test_picker_approval_status(){
     CHECK(output.find("fake-test-key")==std::string::npos);
     output.clear();type_terminal(master,output,"0\n");CHECK(terminal_until(master,output,"\033[38;5;247m  [1]\033[0m\033[38;5;111m 开始对话"));
     CHECK(output.find("对话运行状态")==std::string::npos);CHECK(::write(master,"0\n",2)==2);
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     server_done(server);char *content=read_bytes(path.c_str(),100,nullptr);CHECK(content&&!strcmp(content,"approved"));free(content);app_cleanup(&a);
 }
 static void test_picker_failed_status(){
@@ -2502,7 +2523,7 @@ static void test_picker_failed_status(){
     output.clear();CHECK(write(master,"\x04",1)==1);CHECK(terminal_until(master,output,"Choose a conversation"));
     CHECK(terminal_until(master,output,"[1] Failed · Rejected task"));
     output.clear();type_terminal(master,output,"0\n");CHECK(terminal_until(master,output,"[1] Start chat"));CHECK(write(master,"0\n",2)==2);
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);server_done(server);app_cleanup(&a);
+    CHECK(reap_pty(master,child)==0);server_done(server);app_cleanup(&a);
 }
 static void test_model_switch_requests(){
     App a=fresh();json_object_put(a.config);a.config=config("original","openai");
@@ -2529,13 +2550,13 @@ static void test_model_switch_requests(){
     output.clear();CHECK(write(master,"\x04",1)==1);CHECK(terminal_until(master,output,"Choose a conversation"));
     output.clear();type_terminal(master,output,"1\n/\n1\n2\nfollow work\n");
     CHECK(terminal_until(master,output,"FOLLOW_ON_SELECTED"));wait_for_chat_prompt(master,output,"FOLLOW_ON_SELECTED");
-    leave_chat_and_exit(master);int status=0;CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    leave_chat_and_exit(master);CHECK(reap_pty(master,child)==0);
     child=forkpty(&master,nullptr,nullptr,&window);CHECK(child>=0);
     if(!child){setenv("TERM","xterm-256color",1);setenv("NO_COLOR","1",1);execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
     output.clear();CHECK(terminal_until(master,output,"selected-model · "));
     CHECK(output.find("selected-model · ")!=std::string::npos&&output.find(" Token · Current")!=std::string::npos);
     type_terminal(master,output,"1\n1\nrestart work\n");CHECK(terminal_until(master,output,"RESTART_ON_SELECTED"));wait_for_chat_prompt(master,output,"RESTART_ON_SELECTED");
-    leave_chat_and_exit(master);CHECK(waitpid(child,&status,0)==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    leave_chat_and_exit(master);CHECK(reap_pty(master,child)==0);
     server_done(old_server);server_done(new_server);
     JsonPtr old_request(capture(&a,0));CHECK(!strcmp(sget(old_request.get(),"path"),"/v1/chat/completions"));CHECK(strstr(sget(old_request.get(),"authorization"),"original-test-key"));
     const char *expected[]={"pending work","pending follow","follow work","restart work"};
@@ -2798,7 +2819,11 @@ static Captured run_desk(const std::vector<std::string> &arguments,const std::ve
     }
     close(out[0]);close(errs[0]);
     int status=0;
-    CHECK(waitpid(child,&status,0)==child);
+    pid_t ended=0;
+    double wuntil=monotime()+10;
+    while(monotime()<wuntil&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(5000);
+    if(ended!=child){kill(child,SIGKILL);waitpid(child,&status,0);}
+    CHECK(ended==child);
     result.status=WIFEXITED(status)?WEXITSTATUS(status):-1;
     return result;
 }
@@ -2911,8 +2936,7 @@ static void test_provider_presets(){
     CHECK(terminal_until(master,output,"Saved and selected this model."));
     CHECK(terminal_until(master,output,"Select a number:"));
     type_terminal(master,output,"0\n");
-    int status=0;CHECK(waitpid(child,&status,0)==child);close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child,&output)==0);
     server_done(server);
     App saved{};CHECK(!store_load(&saved));
     J *profile=get(get(saved.store,"profiles"),"model-1");
@@ -3140,10 +3164,7 @@ static void test_mentions_paste_and_multimodal(){
     type_terminal(master,output,"0\r");
     CHECK(terminal_until(master,output,"0. Exit"));
     type_terminal(master,output,"0\r");
-    int status=0;
-    CHECK(waitpid(child,&status,0)==child);
-    close(master);
-    CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+    CHECK(reap_pty(master,child)==0);
     server_done(srv);
 
     JsonPtr cap(capture(&a,0));
@@ -3591,67 +3612,74 @@ int main(int argc,char **argv){
     char directory[]="/tmp/desk-c-test-XXXXXX";
     CHECK(mkdtemp(directory));
     CHECK(realpath(directory,sandbox));
-    test_layout_and_markdown();
-    test_diff_preview();
-    test_headless();
-    test_provider_presets();
-    test_mcp();
-    test_http_reuse();
-    test_tool_configuration();
-    test_approval_modes();
-    test_streaming();
-    test_streamed_tools();
-    test_reasoning_modes();
-    test_assisted_worker();
-    test_chat_mode_menu();
-    test_chat_exit_paths();
-    test_compact_output();
-    test_exit_during_work();
-    test_compact_approval();
-    test_chat_history_scroll();
-    test_prompt_recall_and_context();
-    test_stream_usage_and_tail_utf8();
-    test_code_outline_and_project_guide();
-    test_mentions_paste_and_multimodal();
-    test_v1_13_features();
-    test_v1_14_features();
-    test_chat_actions_layout();
-    test_menu_navigation_and_resize();
-    test_persistent_conversations();
-    test_guided_approval();
-    test_line_editing();
-    test_queued_editing();
-    test_conversation_picker();
-    test_thinking_timer();
-    test_background_conversations();
-    test_picker_approval_status();
-    test_picker_failed_status();
-    test_model_switch_requests();
-    test_utf8();
-    test_files();
-    test_search_and_edit();
-    test_config();
-    test_migration();
-    test_process();
-    test_context_and_validation();
-    test_openai_loop();
-    test_anthropic_loop();
-    test_failed_task();
-    test_edit_workflow();
-    test_recovery_and_loops();
-    test_native_error_flags();
-    test_menu();
-    test_parallel_tasks();
-    test_removed_tasks();
-    test_parallel_resources();
-    test_task_switch_approval();
-    test_task_switch_approval(false);
-    test_language_preferences();
-    test_english_menu();
-    test_no_extra_model_prompts();
-    test_numeric_request();
-    test_numeric_settings();
-    test_settings_redraw();
+    const bool verbose_test=getenv("DESK_VERBOSE_TEST")!=nullptr;
+    auto run_step=[&](const char *label,const std::function<void()> &fn){
+        if(verbose_test){fprintf(stderr,"[test] %s\n",label);fflush(stderr);}
+        fn();
+    };
+#define RUN_STEP(call) run_step(#call,[&]{call;})
+    RUN_STEP(test_layout_and_markdown());
+    RUN_STEP(test_diff_preview());
+    RUN_STEP(test_headless());
+    RUN_STEP(test_provider_presets());
+    RUN_STEP(test_mcp());
+    RUN_STEP(test_http_reuse());
+    RUN_STEP(test_tool_configuration());
+    RUN_STEP(test_approval_modes());
+    RUN_STEP(test_streaming());
+    RUN_STEP(test_streamed_tools());
+    RUN_STEP(test_reasoning_modes());
+    RUN_STEP(test_assisted_worker());
+    RUN_STEP(test_chat_mode_menu());
+    RUN_STEP(test_chat_exit_paths());
+    RUN_STEP(test_compact_output());
+    RUN_STEP(test_exit_during_work());
+    RUN_STEP(test_compact_approval());
+    RUN_STEP(test_chat_history_scroll());
+    RUN_STEP(test_prompt_recall_and_context());
+    RUN_STEP(test_stream_usage_and_tail_utf8());
+    RUN_STEP(test_code_outline_and_project_guide());
+    RUN_STEP(test_mentions_paste_and_multimodal());
+    RUN_STEP(test_v1_13_features());
+    RUN_STEP(test_v1_14_features());
+    RUN_STEP(test_chat_actions_layout());
+    RUN_STEP(test_menu_navigation_and_resize());
+    RUN_STEP(test_persistent_conversations());
+    RUN_STEP(test_guided_approval());
+    RUN_STEP(test_line_editing());
+    RUN_STEP(test_queued_editing());
+    RUN_STEP(test_conversation_picker());
+    RUN_STEP(test_thinking_timer());
+    RUN_STEP(test_background_conversations());
+    RUN_STEP(test_picker_approval_status());
+    RUN_STEP(test_picker_failed_status());
+    RUN_STEP(test_model_switch_requests());
+    RUN_STEP(test_utf8());
+    RUN_STEP(test_files());
+    RUN_STEP(test_search_and_edit());
+    RUN_STEP(test_config());
+    RUN_STEP(test_migration());
+    RUN_STEP(test_process());
+    RUN_STEP(test_context_and_validation());
+    RUN_STEP(test_openai_loop());
+    RUN_STEP(test_anthropic_loop());
+    RUN_STEP(test_failed_task());
+    RUN_STEP(test_edit_workflow());
+    RUN_STEP(test_recovery_and_loops());
+    RUN_STEP(test_native_error_flags());
+    RUN_STEP(test_menu());
+    RUN_STEP(test_parallel_tasks());
+    RUN_STEP(test_removed_tasks());
+    RUN_STEP(test_parallel_resources());
+    RUN_STEP(test_task_switch_approval());
+    RUN_STEP(test_task_switch_approval(false));
+    RUN_STEP(test_language_preferences());
+    RUN_STEP(test_english_menu());
+    RUN_STEP(test_no_extra_model_prompts());
+    RUN_STEP(test_numeric_request());
+    RUN_STEP(test_numeric_settings());
+    RUN_STEP(test_settings_redraw());
+#undef RUN_STEP
     curl_global_cleanup();
     // Keep the sandbox after a failure for inspection; a passing run cleans up
     // so repeated runs do not pile up /tmp/desk-c-test-* directories.

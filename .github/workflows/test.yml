@@ -118,8 +118,10 @@ jobs:
 
   macos:
     runs-on: macos-latest
+    timeout-minutes: 8
     env:
       DESK_NO_ARROW: 1
+      DESK_VERBOSE_TEST: 1
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
