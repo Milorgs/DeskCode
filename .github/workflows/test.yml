@@ -137,7 +137,7 @@ jobs:
           RL_DIR="$(brew --prefix readline)"
           rm -rf build
           make -j4 build/desk \
-            CPPFLAGS="-I$JSONC_DIR/include -I$JSONC_DIR/include/json-c -I$OSSL_DIR/include -I$RL_DIR/include -Isrc" \
+            CPPFLAGS="-isystem $JSONC_DIR/include -isystem $JSONC_DIR/include/json-c -isystem $OSSL_DIR/include -isystem $RL_DIR/include -Isrc" \
             LDLIBS="$JSONC_DIR/lib/libjson-c.a $OSSL_DIR/lib/libssl.a $OSSL_DIR/lib/libcrypto.a $RL_DIR/lib/libreadline.a $RL_DIR/lib/libhistory.a -lcurl -lncurses"
           mkdir -p dist/desk-agent-macos-arm64
           install -m 755 build/desk dist/desk-agent-macos-arm64/desk

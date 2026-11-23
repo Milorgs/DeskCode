@@ -11,7 +11,7 @@ PTYLIB = -lutil
 endif
 PKGS = libcurl json-c openssl readline
 ATSPI := $(shell $(PKG_ENV) pkg-config --exists atspi-2 gobject-2.0 && echo atspi-2 gobject-2.0)
-PKG_CFLAGS := $(shell $(PKG_ENV) pkg-config --cflags $(PKGS) $(ATSPI))
+PKG_CFLAGS := $(patsubst -I%,-isystem %,$(shell $(PKG_ENV) pkg-config --cflags $(PKGS) $(ATSPI)))
 PKG_LIBS := $(shell $(PKG_ENV) pkg-config --libs $(PKGS) $(ATSPI))
 CPPFLAGS += $(PKG_CFLAGS) -Isrc
 LDLIBS += $(PKG_LIBS)
