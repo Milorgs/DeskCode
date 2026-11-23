@@ -139,15 +139,16 @@ jobs:
           RL_DIR="$(brew --prefix readline)"
           INC_FLAGS="-isystem $JSONC_DIR/include -isystem $JSONC_DIR/include/json-c -isystem $OSSL_DIR/include -isystem $RL_DIR/include -Isrc"
 
-          rm -rf build build-x64
+          rm -rf build "$RUNNER_TEMP/build-x64" "$RUNNER_TEMP/build-arm64"
           make -j4 build/desk \
             CXXFLAGS="-O2 -g -arch x86_64" \
             CPPFLAGS="$INC_FLAGS" \
             LDLIBS="$JSONC_DIR/lib/libjson-c.a $OSSL_DIR/lib/libssl.a $OSSL_DIR/lib/libcrypto.a $RL_DIR/lib/libreadline.a $RL_DIR/lib/libhistory.a -lcurl -lncurses"
-          mkdir -p build-x64 && cp build/desk build-x64/desk
+          mkdir -p "$RUNNER_TEMP/build-x64" && cp build/desk "$RUNNER_TEMP/build-x64/desk"
 
           fetch_arm64_lib() {
             pkg="$1"
+            archive="$2"
             dest="$RUNNER_TEMP/arm64-bottles/$pkg"
             mkdir -p "$dest"
             for tag in arm64_sequoia arm64_sonoma arm64_ventura; do
@@ -155,28 +156,34 @@ jobs:
                 bottle="$(brew --cache --bottle-tag="$tag" "$pkg")"
                 if [ -f "$bottle" ]; then
                   tar -xzf "$bottle" -C "$dest"
-                  find "$dest" -type d -name lib | head -n1
-                  return 0
+                  found="$(find "$dest" -name "$archive" | head -n1)"
+                  if [ -n "$found" ]; then
+                    dirname "$found"
+                    return 0
+                  fi
                 fi
               fi
             done
+            echo "Failed to fetch arm64 bottle for $pkg ($archive)" >&2
             return 1
           }
-          ARM_JSONC_LIB="$(fetch_arm64_lib json-c)"
-          ARM_OSSL_LIB="$(fetch_arm64_lib openssl@3)"
-          ARM_RL_LIB="$(fetch_arm64_lib readline)"
+          ARM_JSONC_LIB="$(fetch_arm64_lib json-c libjson-c.a)"
+          ARM_OSSL_LIB="$(fetch_arm64_lib openssl@3 libssl.a)"
+          ARM_RL_LIB="$(fetch_arm64_lib readline libreadline.a)"
 
-          rm -rf build build-arm64
+          rm -rf build
           make -j4 build/desk \
             CXXFLAGS="-O2 -g -arch arm64" \
             CPPFLAGS="$INC_FLAGS" \
             LDLIBS="$ARM_JSONC_LIB/libjson-c.a $ARM_OSSL_LIB/libssl.a $ARM_OSSL_LIB/libcrypto.a $ARM_RL_LIB/libreadline.a $ARM_RL_LIB/libhistory.a -lcurl -lncurses"
-          mkdir -p build-arm64 && cp build/desk build-arm64/desk
+          mkdir -p "$RUNNER_TEMP/build-arm64" && cp build/desk "$RUNNER_TEMP/build-arm64/desk"
 
           mkdir -p dist/desk-agent-macos-universal
-          lipo -create -output dist/desk-agent-macos-universal/desk build-x64/desk build-arm64/desk
+          lipo -create -output dist/desk-agent-macos-universal/desk "$RUNNER_TEMP/build-x64/desk" "$RUNNER_TEMP/build-arm64/desk"
           chmod 755 dist/desk-agent-macos-universal/desk
           strip -x dist/desk-agent-macos-universal/desk
+          codesign --force --sign - dist/desk-agent-macos-universal/desk
+          codesign --verify --verbose=2 dist/desk-agent-macos-universal/desk
           archs="$(lipo -archs dist/desk-agent-macos-universal/desk)"
           echo "Universal archs: $archs"
           case "$archs" in *x86_64*arm64*|*arm64*x86_64*) ;; *) echo "Missing slice: $archs" >&2; exit 1 ;; esac

@@ -1168,6 +1168,24 @@ static int reap_pty(int &master,pid_t child,std::string *tail=nullptr){
     CHECK(WIFEXITED(status));
     return WEXITSTATUS(status);
 }
+static void wait_for_chat_prompt(int master,const std::string &output,const char *after){
+    auto offset=output.rfind(after);CHECK(offset!=std::string::npos);
+    auto tail=output.substr(offset+strlen(after));
+    CHECK(terminal_until(master,tail,"\r\n❯ "));
+}
+static void leave_chat_and_exit(int master,bool english=true){
+    CHECK(write(master,"\x04",1)==1);
+    const char *picker=english?"Choose a conversation":"选择对话";
+    std::string output;CHECK(terminal_until(master,output,picker));
+    output.erase(0,output.find(picker));
+    CHECK(terminal_until(master,output,english?"Select a number:":"请选择编号："));
+    output.clear();
+    CHECK(write(master,"0\n",2)==2);
+    CHECK(terminal_until(master,output,english?"[1] Start chat":"[1] 开始对话"));
+    output.erase(0,output.find(english?"[1] Start chat":"[1] 开始对话"));
+    CHECK(terminal_until(master,output,english?"Select a number:":"请选择编号："));
+    CHECK(write(master,"0\n",2)==2);
+}
 static void test_task_switch_approval(bool allow=true){
     App a=fresh();json_object_put(a.config);a.config=config("switch","openai");
     J *write=args("confirmed.txt");put(write,"content",str("user approved"));put(write,"expected_sha256",nullptr);
@@ -1195,15 +1213,8 @@ static void test_task_switch_approval(bool allow=true){
     }
     CHECK(output.find("任务管理")==std::string::npos);
     CHECK(output.find("fake-test-key")==std::string::npos);
-    output.clear();CHECK(::write(master,"\x04",1)==1);
-    CHECK(terminal_until(master,output,"选择对话"));
-    CHECK(::write(master,"0\n",2)==2);
-    CHECK(terminal_until(master,output,"[1] 开始对话"));
-    CHECK(::write(master,"0\n",2)==2);
-    int status=0;double until=monotime()+5;pid_t ended=0;
-    while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(10000);
-    if(!ended){kill(child,SIGKILL);waitpid(child,&status,0);}
-    CHECK(ended==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);close(master);
+    output.clear();leave_chat_and_exit(master,false);
+    CHECK(reap_pty(master,child,&output)==0);
     char *text=read_bytes(path,100,nullptr);CHECK(allow?(text&&!strcmp(text,"user approved")):!text);free(text);
     CHECK(output.find("fake-test-key")==std::string::npos);
     server_done(server);app_cleanup(&a);
@@ -1257,24 +1268,6 @@ static void test_no_extra_model_prompts(void){
     CHECK(!strcmp(sget(at(messages,0),"role"),"user"));CHECK(!strcmp(sget(at(messages,0),"content"),"完成任务并检查实际结果"));
     CHECK(!get(body,"system"));CHECK(!strcmp(sget(at(a.messages,alen(a.messages)-1),"content"),"Provider reply, unchanged."));
     CHECK(set_language("zh"));app_cleanup(&a);
-}
-static void wait_for_chat_prompt(int master,const std::string &output,const char *after){
-    auto offset=output.rfind(after);CHECK(offset!=std::string::npos);
-    auto tail=output.substr(offset+strlen(after));
-    CHECK(terminal_until(master,tail,"\r\n❯ "));
-}
-static void leave_chat_and_exit(int master,bool english=true){
-    CHECK(write(master,"\x04",1)==1);
-    const char *picker=english?"Choose a conversation":"选择对话";
-    std::string output;CHECK(terminal_until(master,output,picker));
-    output.erase(0,output.find(picker));
-    CHECK(terminal_until(master,output,english?"Select a number:":"请选择编号："));
-    output.clear();
-    CHECK(write(master,"0\n",2)==2);
-    CHECK(terminal_until(master,output,english?"[1] Start chat":"[1] 开始对话"));
-    output.erase(0,output.find(english?"[1] Start chat":"[1] 开始对话"));
-    CHECK(terminal_until(master,output,english?"Select a number:":"请选择编号："));
-    CHECK(write(master,"0\n",2)==2);
 }
 static void test_numeric_request(void){
     App a=fresh();json_object_put(a.config);a.config=config("numeric","openai");
@@ -1335,9 +1328,7 @@ static void test_settings_redraw(){
     // Wait for the input prompt before sending the EOF key.
     CHECK(terminal_until(master,output,"Select a number:"));
     CHECK(write(master,"\x04",1)==1);
-    int status=0;double until=monotime()+3;pid_t ended=0;
-    while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(10000);
-    CHECK(ended==child);close(master);CHECK(WIFEXITED(status)&&WEXITSTATUS(status)==0);app_cleanup(&a);
+    CHECK(reap_pty(master,child)==0);app_cleanup(&a);
 }
 static void test_approval_modes(void){
     App a=fresh();a.yes=false;
@@ -1559,10 +1550,7 @@ static void test_chat_exit_paths(void){
         CHECK(kill(child,0)==0);
         if(route==4){CHECK(terminal_until(master,output,"Select a number:"));CHECK(write(master,"0\n",2)==2);}
         else{if(route==3){output.erase(0,output.find("[7] Restore provider default"));CHECK(terminal_until(master,output,"Select a number:"));}leave_chat_and_exit(master);}
-        int status=0;pid_t ended=0;double until=monotime()+5;
-        while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(10000);
-        if(!ended){kill(child,SIGKILL);waitpid(child,&status,0);}
-        close(master);CHECK(ended==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);CHECK(output.find("Thinking...")==std::string::npos);app_cleanup(&a);
+        CHECK(reap_pty(master,child)==0);CHECK(output.find("Thinking...")==std::string::npos);app_cleanup(&a);
     }
 }
 static void test_compact_output(void){
@@ -1634,13 +1622,11 @@ static void test_exit_during_work(void){
         std::string output;CHECK(terminal_until(master,output,command_running?"Running a command...":"Thinking..."));
         char path[PATH_MAX];CHECK(!path_suffix(path,a.root,command_running?"/running.pid":"/request-0.json"));double until=monotime()+5;while(access(path,F_OK)&&monotime()<until)usleep(10000);CHECK(access(path,F_OK)==0);
         pid_t process=-1;if(command_running){char *id=read_bytes(path,100,nullptr);CHECK(id);process=static_cast<pid_t>(strtol(id,nullptr,10));free(id);}
-        double exit_started=monotime();leave_chat_and_exit(master);CHECK(monotime()-exit_started<4);int status=0;pid_t ended=0;until=monotime()+4;
-        while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(10000);
-        if(!ended){kill(child,SIGKILL);waitpid(child,&status,0);}
-        close(master);
+        double exit_started=monotime();leave_chat_and_exit(master);CHECK(monotime()-exit_started<4);
+        const int exit_code=reap_pty(master,child);
         if(command_running){server_done(server);until=monotime()+2;while(alive(process)&&monotime()<until)usleep(10000);CHECK(!alive(process));}
         else{kill(server,SIGKILL);waitpid(server,nullptr,0);}
-        CHECK(ended==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);app_cleanup(&a);
+        CHECK(exit_code==0);app_cleanup(&a);
     }
 }
 static void test_compact_approval(void){
@@ -1653,10 +1639,8 @@ static void test_compact_approval(void){
         const char *keys="1\n1\ncreate a file\n";CHECK(::write(master,keys,strlen(keys))==static_cast<ssize_t>(strlen(keys)));std::string output;
         CHECK(terminal_until(master,output,"[3] Show full operation [0] Cancel: "));CHECK(output.find("hidden-preview-body")==std::string::npos);CHECK(output.find("review.txt")!=std::string::npos);
         if(expand){CHECK(::write(master,"3\n",2)==2);CHECK(terminal_until(master,output,"hidden-preview-body"));CHECK(::write(master,"2\n",2)==2);CHECK(terminal_until(master,output,"Operation cancelled."));wait_for_chat_prompt(master,output,"Operation cancelled.");}
-        leave_chat_and_exit(master);int status=0;pid_t ended=0;double until=monotime()+5;
-        while(monotime()<until&&(ended=waitpid(child,&status,WNOHANG))==0)usleep(10000);
-        if(!ended){kill(child,SIGKILL);waitpid(child,&status,0);}
-        close(master);CHECK(ended==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);char path[PATH_MAX];CHECK(!path_suffix(path,a.root,"/review.txt"));CHECK(access(path,F_OK)!=0);server_done(server);app_cleanup(&a);
+        leave_chat_and_exit(master);
+        CHECK(reap_pty(master,child)==0);char path[PATH_MAX];CHECK(!path_suffix(path,a.root,"/review.txt"));CHECK(access(path,F_OK)!=0);server_done(server);app_cleanup(&a);
     }
 }
 static void type_terminal(int fd,std::string &output,const std::string &text){

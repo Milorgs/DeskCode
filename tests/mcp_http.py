@@ -71,7 +71,8 @@ class Handler(BaseHTTPRequestHandler):
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 for native,source in ((False,'file'),(True,'url'),(False,'paste')):
-    with tempfile.TemporaryDirectory() as root:
+    with tempfile.TemporaryDirectory() as raw_root:
+        root=os.path.realpath(raw_root)
         config=Path(root)/'import.json';config.write_text(json.dumps({'mcpServers':{'remote':{'url':f'http://127.0.0.1:{server.server_port}/mcp','headers':{'Authorization':'Bearer mcp-test-secret'}}}}))
         pid,fd=pty.fork()
         if pid==0:
@@ -127,10 +128,23 @@ for native,source in ((False,'file'),(True,'url'),(False,'paste')):
             while b'\x1b[?2004h' not in page:
                 assert time.monotonic()<deadline,(page[-4000:].decode(errors='replace'),state)
                 assert read(),(page[-4000:].decode(errors='replace'),state)
-            send('\x04');until('0. Main menu');send('0\n0\n')
-            deadline=time.monotonic()+8
-            while read(): assert time.monotonic()<deadline
-            _,status=os.waitpid(pid,0);pid=0;assert os.waitstatus_to_exitcode(status)==0
+            send('\x04');until('0. Main menu');send('0\n');until('0. Exit');send('0\n')
+            fcntl.fcntl(fd,fcntl.F_SETFL,fcntl.fcntl(fd,fcntl.F_GETFL)|os.O_NONBLOCK)
+            deadline=time.monotonic()+8;status=0
+            while True:
+                assert time.monotonic()<deadline,(page[-4000:].decode(errors='replace'),state)
+                while True:
+                    try:
+                        chunk=os.read(fd,8192)
+                        if not chunk: break
+                        page.extend(chunk);output.extend(chunk)
+                    except OSError as e:
+                        if e.errno in (errno.EAGAIN,errno.EWOULDBLOCK,errno.EIO): break
+                        raise
+                done,status=os.waitpid(pid,os.WNOHANG)
+                if done==pid: pid=0;break
+                time.sleep(0.01)
+            assert os.waitstatus_to_exitcode(status)==0
             # Pasted JSON is echoed by the input editor. Subsequent output must not expose it.
             assert b'mcp-test-secret' not in (output[import_end:] if source=='paste' else output)
             print('PASS:', 'Anthropic / URL entry' if native else 'OpenAI / '+source, 'MCP discovery, SSE ping, pagination, session auth, nested tool call, result, cleanup')
