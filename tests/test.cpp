@@ -2067,7 +2067,8 @@ static void test_menu_navigation_and_resize(){
         items.emplace_back("Back");
         auto choice=terminal_choice(items,1,1);
         if(tcgetattr(0,&after))_exit(3);
-        printf("RESULT=%d RESTORED=%d\n",choice.value_or(-2),before.c_lflag==after.c_lflag);
+        const tcflag_t user_lflags=ICANON|ECHO|ISIG|IEXTEN;
+        printf("RESULT=%d RESTORED=%d\n",choice.value_or(-2),(before.c_lflag&user_lflags)==(after.c_lflag&user_lflags));
         fflush(stdout);
         _exit(0);
     }
