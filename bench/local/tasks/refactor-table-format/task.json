@@ -1,0 +1,8 @@
+{
+  "id": "refactor-table-format",
+  "title": "Extract duplicated table formatting into a shared module, keeping tests green",
+  "category": "refactor",
+  "difficulty": "medium",
+  "timeout_seconds": 900,
+  "max_steps": 40
+}

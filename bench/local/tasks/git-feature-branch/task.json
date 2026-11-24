@@ -1,0 +1,8 @@
+{
+  "id": "git-feature-branch",
+  "title": "Make a change on a new git branch with a single well-formed commit",
+  "category": "git",
+  "difficulty": "medium",
+  "timeout_seconds": 600,
+  "max_steps": 30
+}

@@ -1,5 +1,6 @@
 #include "desk.hpp"
 #include "tasks.hpp"
+#include "ui.hpp"
 #include <curl/curl.h>
 #include <openssl/evp.h>
 #include <algorithm>
@@ -378,23 +379,15 @@ void record_file_change(App *app,const char *rel_path,const char *backup_path,bo
     write_undo_journal(app->root,doc.get());
 }
 
-bool undo_last_turn(App &app,std::string &summary){
-    summary.clear();
-    ResourceLock lock(app,false);
-    if(!lock.acquired()){
-        seterr(&app,tr("工作目录正在执行操作，请等待结束或停止后再撤回。"));
-        return false;
-    }
-    JsonPtr doc=read_undo_journal(app.root);
+// Restore journal turns from the newest back to `first`, newest first, so a
+// file touched by several turns ends in its state before the earliest one.
+// A turn that cannot be fully restored stays in the journal with its failed
+// entries, and older turns are left untouched for a retry.
+static bool undo_journal_from(App &app,JsonPtr &doc,size_t first,std::string &summary,size_t &turns_done){
     J *turns=get(doc.get(),"turns");
-    if(!turns||alen(turns)==0){
-        seterr(&app,tr("没有可撤回的文件修改记录。"));
-        return false;
-    }
-    J *last=at(turns,alen(turns)-1);
-    J *files=get(last,"files");
     size_t restored=0,removed=0;
     std::vector<std::string> touched,backups,failed;
+    turns_done=0;
 
     auto restore=[&](J *entry,const char *rel){
         char full[PATH_MAX];
@@ -422,17 +415,24 @@ bool undo_last_turn(App &app,std::string &summary){
             if(ec||!fs::is_regular_file(status)||!fs::remove(target,ec)||ec)return false;
             removed++;
         }
-        touched.emplace_back(rel);
+        if(std::find(touched.begin(),touched.end(),rel)==touched.end())touched.emplace_back(rel);
         return true;
     };
 
-    for(size_t k=alen(files);k>0;--k){
-        J *entry=at(files,k-1);
-        const char *rel=sget(entry,"path");
-        if(restore(entry,rel))json_object_array_del_idx(files,k-1,1);
-        else failed.emplace_back(rel);
+    for(size_t index=alen(turns);index>first&&failed.empty();--index){
+        J *turn=at(turns,index-1);
+        J *files=get(turn,"files");
+        for(size_t k=alen(files);k>0;--k){
+            J *entry=at(files,k-1);
+            const char *rel=sget(entry,"path");
+            if(restore(entry,rel))json_object_array_del_idx(files,k-1,1);
+            else failed.emplace_back(rel);
+        }
+        if(failed.empty()){
+            json_object_array_del_idx(turns,index-1,1);
+            turns_done++;
+        }
     }
-    if(failed.empty())json_object_array_del_idx(turns,alen(turns)-1,1);
     if(!write_undo_journal(app.root,doc.get())){
         seterr(&app,tr("无法保存撤回进度，请先检查工作区文件和权限。"));
         return false;
@@ -449,13 +449,119 @@ bool undo_last_turn(App &app,std::string &summary){
     }
     app.error[0]=0;
     char head[256];
-    snprintf(head,sizeof head,tr("已撤回上一轮改动（恢复 %zu 个文件，移除 %zu 个新建文件）："),restored,removed);
+    if(turns_done>1)snprintf(head,sizeof head,tr("已回退 %zu 轮的文件改动（恢复 %zu 个文件，移除 %zu 个新建文件）："),turns_done,restored,removed);
+    else snprintf(head,sizeof head,tr("已撤回上一轮改动（恢复 %zu 个文件，移除 %zu 个新建文件）："),restored,removed);
     summary=head;
     for(size_t i=0;i<std::min<size_t>(touched.size(),6);i++){
         summary+=(i?", ":" ")+touched[i];
     }
     if(touched.size()>6)summary+=" …";
     return true;
+}
+
+bool undo_last_turn(App &app,std::string &summary){
+    summary.clear();
+    ResourceLock lock(app,false);
+    if(!lock.acquired()){
+        seterr(&app,tr("工作目录正在执行操作，请等待结束或停止后再撤回。"));
+        return false;
+    }
+    JsonPtr doc=read_undo_journal(app.root);
+    J *turns=get(doc.get(),"turns");
+    if(!turns||alen(turns)==0){
+        seterr(&app,tr("没有可撤回的文件修改记录。"));
+        return false;
+    }
+    size_t done=0;
+    return undo_journal_from(app,doc,alen(turns)-1,summary,done);
+}
+
+bool undo_turns(App &app,const std::vector<std::string> &turn_ids,std::string &summary){
+    summary.clear();
+    ResourceLock lock(app,false);
+    if(!lock.acquired()){
+        seterr(&app,tr("工作目录正在执行操作，请等待结束或停止后再撤回。"));
+        return false;
+    }
+    JsonPtr doc=read_undo_journal(app.root);
+    J *turns=get(doc.get(),"turns");
+    std::set<std::string> wanted(turn_ids.begin(),turn_ids.end());
+    size_t first=alen(turns);
+    for(size_t i=0;i<alen(turns);i++)if(wanted.contains(sget(at(turns,i),"id"))){first=i;break;}
+    if(first==alen(turns)){
+        summary=tr("这些轮次没有记录文件修改，文件保持不变。");
+        return true;
+    }
+    // The journal is shared by every conversation in this workspace. Restoring
+    // past another conversation's later edits would silently overwrite them.
+    for(size_t i=first;i<alen(turns);i++){
+        if(!wanted.contains(sget(at(turns,i),"id"))){
+            seterr(&app,tr("这之后工作区还有其他对话的文件修改；为避免覆盖，文件未回退。"));
+            return false;
+        }
+    }
+    size_t done=0;
+    return undo_journal_from(app,doc,first,summary,done);
+}
+
+namespace {
+const char *todo_mark(std::string_view status){
+    return status=="completed"?"[x]":status=="in_progress"?"[~]":"[ ]";
+}
+}
+J *tool_todo_write(App *app,J *args){
+    J *todos=get(args,"todos");
+    const size_t count=alen(todos);
+    if(count<1||count>50)return err(tr("任务清单须包含 1 到 50 项。"));
+    size_t completed=0,active=0;
+    JsonPtr clean(arr());
+    for(size_t i=0;i<count;i++){
+        J *item=at(todos,i);
+        std::string content=sget(item,"content");
+        const std::string_view status=sget(item,"status");
+        while(!content.empty()&&isspace(static_cast<unsigned char>(content.back())))content.pop_back();
+        content.erase(0,std::min(content.size(),content.find_first_not_of(" \t\r\n")));
+        if(content.empty()||content.size()>400||content.find('\n')!=std::string::npos)
+            return err(tr("每项任务须为 1–400 字节的单行文字。"));
+        if(status!="pending"&&status!="in_progress"&&status!="completed")
+            return err(tr("任务状态只能是 pending、in_progress 或 completed。"));
+        completed+=status=="completed";
+        active+=status=="in_progress";
+        J *entry=obj();
+        put(entry,"content",str(content.c_str()));
+        put(entry,"status",str(std::string(status).c_str()));
+        add(clean.get(),entry);
+    }
+    json_object_put(app->todos);
+    app->todos=clean.release();
+    J *r=obj();
+    put(r,"ok",json_object_new_boolean(1));
+    put(r,"total",json_object_new_int(static_cast<int>(count)));
+    put(r,"completed",json_object_new_int(static_cast<int>(completed)));
+    put(r,"in_progress",json_object_new_int(static_cast<int>(active)));
+    return r;
+}
+std::string todo_progress(J *todos){
+    size_t done=0;
+    for(size_t i=0;i<alen(todos);i++)done+=!strcmp(sget(at(todos,i),"status"),"completed");
+    return std::to_string(done)+"/"+std::to_string(alen(todos));
+}
+std::string todo_render(J *todos,bool color){
+    if(!alen(todos))return {};
+    const int width=std::max(24,terminal_columns()-8);
+    const std::string head=std::string(ui_bullet())+" "+tr("任务清单")+" "+todo_progress(todos);
+    std::string out="\n"+(color?ui_paint(Tone::Accent,head):head)+"\n";
+    for(size_t i=0;i<alen(todos);i++){
+        J *item=at(todos,i);
+        const std::string_view status=sget(item,"status");
+        const std::string line=std::string("  ")+todo_mark(status)+" "+ui_clip(sget(item,"content"),width);
+        if(!color)out+=line;
+        else if(status=="completed")out+=ui_paint(Tone::Dim,line);
+        else if(status=="in_progress")out+=ui_paint(Tone::Accent,line,true);
+        else out+=ui_paint(Tone::Plain,line);
+        out+='\n';
+    }
+    return out;
 }
 
 void prune_workspace_cache(const App &app){
@@ -1133,7 +1239,8 @@ std::vector<std::string> collect_hook_commands(App &app,const char *event_name,s
 bool builtin_slash_name(std::string_view name){
     static constexpr std::string_view reserved[]={
         "help","status","clear","undo","compact","paste","model",
-        "reasoning","approval","perm","mcp","new","commands","sandbox"
+        "reasoning","approval","perm","mcp","new","commands","sandbox",
+        "plan","go","rewind","cost","price","bg","todos"
     };
     for(auto r:reserved)if(name==r)return true;
     return false;

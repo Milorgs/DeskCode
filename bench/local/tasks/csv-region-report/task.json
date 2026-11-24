@@ -1,0 +1,8 @@
+{
+  "id": "csv-region-report",
+  "title": "Write a CSV summarising script that handles quoting and edge cases",
+  "category": "shell-data",
+  "difficulty": "medium",
+  "timeout_seconds": 600,
+  "max_steps": 30
+}

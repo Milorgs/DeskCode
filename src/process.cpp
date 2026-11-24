@@ -132,35 +132,32 @@ static std::string latest_output_line(std::string_view chunk){
     }
     return clean;
 }
-J *run_command(App *a,const char *command,int timeout_ms){
-    if(timeout_ms<1||timeout_ms>300000)return err(tr("命令超时设置无效。"));
+namespace {
+// Start bash for `command` in its own process group with stdout and stderr in
+// `output`. Returns the child pid, or -1 with a translated message in error.
+pid_t spawn_command(App *a,const char *command,FILE *output,const char *&error){
     int count=0;
     while(environ[count])count++;
     std::vector<char *> env;
     env.reserve(static_cast<size_t>(count)+1);
     for(int i=0;i<count;i++)if(!private_variable(environ[i]))env.push_back(environ[i]);
     env.push_back(nullptr);
-    FILE *output=tmpfile();
     int nullfd=open("/dev/null",O_RDONLY);
-    if(!output||nullfd<0){
-        if(output)fclose(output);
-        if(nullfd>=0)close(nullfd);
-        return err(tr("无法创建命令输出文件。"));
-    }
-    double start=monotime();
+    if(nullfd<0){error=tr("无法创建命令输出文件。");return -1;}
 #ifdef __linux__
     const bool use_sandbox=a->sandbox&&sandbox_supported();
     const std::string sandbox_error=std::string(tr("无法启用 Landlock 沙箱，命令未执行。"))+'\n';
 #endif
     pid_t child=fork();
     if(child<0){
-        fclose(output);
         close(nullfd);
-        return err(tr("无法启动命令。"));
+        error=tr("无法启动命令。");
+        return -1;
     }
     if(child==0){
         signal(SIGINT,SIG_DFL);
         signal(SIGTERM,SIG_DFL);
+        signal(SIGUSR1,SIG_DFL);
         if(setpgid(0,0)||chdir(a->root)||dup2(nullfd,0)<0||dup2(fileno(output),1)<0||dup2(fileno(output),2)<0)_exit(126);
         close(nullfd);
         if(fileno(output)>2)close(fileno(output));
@@ -182,8 +179,202 @@ J *run_command(App *a,const char *command,int timeout_ms){
         kill(child,SIGKILL);
         while(waitpid(child,NULL,0)<0&&errno==EINTR){
         }
+        error=tr("无法建立命令进程组。");
+        return -1;
+    }
+    return child;
+}
+// Invalid UTF-8 becomes U+FFFD so the text always fits in a JSON string.
+std::string utf8_text(std::string data){
+    if(valid_utf8(data))return data;
+    std::string safe;
+    const size_t len=data.size();
+    safe.reserve(len);
+    for(size_t i=0;i<len;){
+        unsigned char c=(unsigned char)data[i];
+        size_t width=c<0x80?1:(c>=0xc2&&c<=0xdf)?2:(c>=0xe0&&c<=0xef)?3:(c>=0xf0&&c<=0xf4)?4:0;
+        bool valid=width&&i+width<=len;
+        for(size_t k=1;valid&&k<width;k++)if(((unsigned char)data[i+k]&0xc0)!=0x80)valid=false;
+        if(valid&&width==3&&((c==0xe0&&(unsigned char)data[i+1]<0xa0)||(c==0xed&&(unsigned char)data[i+1]>=0xa0)))valid=false;
+        if(valid&&width==4&&((c==0xf0&&(unsigned char)data[i+1]<0x90)||(c==0xf4&&(unsigned char)data[i+1]>=0x90)))valid=false;
+        if(valid){safe.append(data.data()+i,width);i+=width;}
+        else{safe+="\xef\xbf\xbd";i++;}
+    }
+    return safe;
+}
+struct BackgroundShell {
+    std::string id,command;
+    pid_t pid=-1;
+    FILE *output=nullptr;
+    off_t shown=0;
+    double started=0;
+    bool finished=false,killed=false;
+    int exit_code=0;
+};
+struct Shells {
+    std::vector<BackgroundShell> list;
+    int next=1;
+};
+constexpr size_t MAX_BACKGROUND_SHELLS=8;
+constexpr off_t SHELL_OUTPUT_CHUNK=32768;
+Shells &shells(App *a){
+    if(!a->shell_data)a->shell_data=new Shells;
+    return *static_cast<Shells *>(a->shell_data);
+}
+void refresh_shell(BackgroundShell &shell){
+    if(shell.finished)return;
+    int status=0;
+    if(waitpid(shell.pid,&status,WNOHANG)==shell.pid){
+        shell.finished=true;
+        shell.exit_code=WIFEXITED(status)?WEXITSTATUS(status):-WTERMSIG(status);
+    }
+}
+size_t running_shells(Shells &all){
+    size_t running=0;
+    for(auto &shell:all.list){refresh_shell(shell);running+=!shell.finished;}
+    return running;
+}
+// New output since the last read, at most one chunk; older bytes beyond a
+// chunk are skipped and counted so the model knows output was dropped.
+J *shell_state(BackgroundShell &shell){
+    refresh_shell(shell);
+    J *r=obj();
+    put(r,"shell_id",str(shell.id.c_str()));
+    put(r,"command",str(shell.command.c_str()));
+    put(r,"running",json_object_new_boolean(!shell.finished));
+    if(shell.finished)put(r,"exit_code",json_object_new_int(shell.exit_code));
+    if(shell.killed)put(r,"killed",json_object_new_boolean(1));
+    put(r,"elapsed_seconds",json_object_new_double(static_cast<double>(static_cast<long long>((monotime()-shell.started)*10))/10));
+    struct stat info{};
+    off_t size=fstat(fileno(shell.output),&info)==0?info.st_size:shell.shown;
+    off_t from=shell.shown;
+    if(size-from>SHELL_OUTPUT_CHUNK){
+        put(r,"skipped_bytes",json_object_new_int64(static_cast<int64_t>(size-SHELL_OUTPUT_CHUNK-from)));
+        from=size-SHELL_OUTPUT_CHUNK;
+    }
+    std::string data(static_cast<size_t>(std::max<off_t>(0,size-from)),'\0');
+    ssize_t got=data.empty()?0:pread(fileno(shell.output),data.data(),data.size(),from);
+    data.resize(got>0?static_cast<size_t>(got):0);
+    // Hold back a partial UTF-8 character until the rest arrives.
+    size_t keep=data.size();
+    if(!shell.finished){
+        size_t tail=0;
+        while(tail<keep&&tail<3&&(static_cast<unsigned char>(data[keep-1-tail])&0xc0)==0x80)tail++;
+        if(tail<keep){
+            auto lead=static_cast<unsigned char>(data[keep-1-tail]);
+            size_t expected=lead<0x80?1:lead<0xe0?2:lead<0xf0?3:lead<0xf8?4:0;
+            if(expected>tail+1)keep-=tail+1;
+        }
+    }
+    data.resize(keep);
+    shell.shown=from+static_cast<off_t>(keep);
+    const std::string text=utf8_text(std::move(data));
+    put(r,"output",json_object_new_string_len(text.data(),static_cast<int>(text.size())));
+    return r;
+}
+J *register_shell(App *a,const char *command,pid_t child,FILE *output,double started){
+    auto &all=shells(a);
+    BackgroundShell shell;
+    shell.id="bash-"+std::to_string(all.next++);
+    shell.command=command;
+    shell.pid=child;
+    shell.output=output;
+    shell.started=started;
+    all.list.push_back(std::move(shell));
+    // Finished entries beyond the cap are dropped oldest first.
+    while(all.list.size()>MAX_BACKGROUND_SHELLS*2){
+        auto victim=std::find_if(all.list.begin(),all.list.end(),[](BackgroundShell &s){refresh_shell(s);return s.finished;});
+        if(victim==all.list.end())break;
+        fclose(victim->output);
+        all.list.erase(victim);
+    }
+    J *r=shell_state(all.list.back());
+    put(r,"note",str("Running in the background. Use shell_output to read new output and shell_kill to stop it; it stops when this conversation ends."));
+    return r;
+}
+}
+J *start_background_command(App *a,const char *command){
+    auto &all=shells(a);
+    if(running_shells(all)>=MAX_BACKGROUND_SHELLS)return err(tr("后台命令已达 8 个上限，请先用 shell_kill 停止不需要的命令。"));
+    FILE *output=tmpfile();
+    if(!output)return err(tr("无法创建命令输出文件。"));
+    const char *error=nullptr;
+    const double started=monotime();
+    pid_t child=spawn_command(a,command,output,error);
+    if(child<0){fclose(output);return err(error);}
+    // A command that fails at once (typo, missing program) reports like a
+    // normal one instead of leaving a dead background entry.
+    int status=0;
+    for(int i=0;i<40&&!interrupted;i++){
+        if(waitpid(child,&status,WNOHANG)==child){
+            BackgroundShell done;
+            done.id="";done.command=command;done.pid=child;done.output=output;done.started=started;
+            done.finished=true;done.exit_code=WIFEXITED(status)?WEXITSTATUS(status):-WTERMSIG(status);
+            J *r=shell_state(done);
+            json_object_object_del(r,"shell_id");
+            fclose(output);
+            return r;
+        }
+        usleep(25000);
+    }
+    return register_shell(a,command,child,output,started);
+}
+J *tool_shell_output(App *a,J *args){
+    auto &all=shells(a);
+    const char *id=sget(args,"shell_id");
+    for(auto &shell:all.list)if(shell.id==id)return shell_state(shell);
+    return err(tr("没有这个后台命令；shell_id 来自 run_shell 的返回结果。"));
+}
+J *tool_shell_kill(App *a,J *args){
+    auto &all=shells(a);
+    const char *id=sget(args,"shell_id");
+    for(auto &shell:all.list){
+        if(shell.id!=id)continue;
+        refresh_shell(shell);
+        if(!shell.finished){
+            kill(-shell.pid,SIGTERM);
+            for(int i=0;i<40;i++){refresh_shell(shell);if(shell.finished)break;usleep(25000);}
+            if(!shell.finished){
+                kill(-shell.pid,SIGKILL);
+                int status=0;
+                while(waitpid(shell.pid,&status,0)<0&&errno==EINTR){}
+                shell.finished=true;
+                shell.exit_code=WIFEXITED(status)?WEXITSTATUS(status):-WTERMSIG(status);
+            }
+            shell.killed=true;
+        }
+        // The group may still hold children after bash itself exits.
+        kill(-shell.pid,SIGKILL);
+        return shell_state(shell);
+    }
+    return err(tr("没有这个后台命令；shell_id 来自 run_shell 的返回结果。"));
+}
+size_t background_shell_count(App *a){
+    return a->shell_data?running_shells(shells(a)):0;
+}
+void shells_destroy(App *a){
+    if(!a->shell_data)return;
+    auto *all=static_cast<Shells *>(a->shell_data);
+    for(auto &shell:all->list){
+        refresh_shell(shell);
+        kill(-shell.pid,SIGKILL);
+        if(!shell.finished)while(waitpid(shell.pid,nullptr,0)<0&&errno==EINTR){}
+        fclose(shell.output);
+    }
+    delete all;
+    a->shell_data=nullptr;
+}
+J *run_command(App *a,const char *command,int timeout_ms){
+    if(timeout_ms<1||timeout_ms>300000)return err(tr("命令超时设置无效。"));
+    FILE *output=tmpfile();
+    if(!output)return err(tr("无法创建命令输出文件。"));
+    double start=monotime();
+    const char *spawn_error=nullptr;
+    background_requested=false;
+    pid_t child=spawn_command(a,command,output,spawn_error);
+    if(child<0){
         fclose(output);
-        return err(tr("无法建立命令进程组。"));
+        return err(spawn_error);
     }
     int status=0;
     bool reaped=false,timed=false,failed=false;
@@ -196,6 +387,17 @@ J *run_command(App *a,const char *command,int timeout_ms){
         check_exit(*a);
         progress_tick(a);
         if(interrupted)break;
+        if(background_requested.exchange(false)){
+            // Ctrl+B: the command keeps running and the turn continues.
+            if(!last_tail.empty()&&a->task_events>=0)task_detail(*a,"");
+            J *r=register_shell(a,command,child,output,start);
+            put(r,"moved_to_background",json_object_new_boolean(1));
+            put(r,"note",str("The user moved this command to the background; it is still running. Continue with other work, check it with shell_output, and stop it with shell_kill when it is no longer needed."));
+            progress_clear(a);
+            printf("%s\n",tr("命令已转入后台继续运行，任务继续。"));
+            fflush(stdout);
+            return r;
+        }
         pid_t result=waitpid(child,&status,WNOHANG);
         if(result==child){
             reaped=true;

@@ -1,0 +1,8 @@
+{
+  "id": "c-memory-bugs",
+  "title": "Fix heap memory errors in a C string-list library",
+  "category": "c-memory",
+  "difficulty": "medium",
+  "timeout_seconds": 900,
+  "max_steps": 40
+}

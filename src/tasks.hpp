@@ -19,6 +19,9 @@ public:
     // can keep an absolute position across truncation.
     std::string output(int id,bool *truncated=nullptr,std::uint64_t *dropped=nullptr);
     bool decide(int id,bool allow);
+    // Ask a running worker to leave its current command running in the
+    // background and continue (Ctrl+B). False when nothing can be detached.
+    bool background(int id);
     char *readline(const char *prompt="\n› ");
 };
 class ResourceLock {
@@ -36,6 +39,13 @@ void task_event(App &app,char state);
 void task_tokens(App &app);
 // Report how much of the context budget the latest request used (0..100).
 void task_context(App &app,int percent);
+// Report the split token usage and cost of this turn and of the conversation.
+void task_usage(App &app);
+// Wire form of the usage report: 'u', six counters, two costs, one flag byte.
+constexpr size_t USAGE_EVENT_SIZE=1+6*8+2*8+1;
+std::string usage_event(const App &app);
+void parse_usage_event(const char *bytes,TokenUsage &turn,TokenUsage &session);
+void put_usage(J *state,const TokenUsage &turn,const TokenUsage &session);
 void task_detail(App &app,std::string_view detail);
 int task_worker(std::intptr_t fd);
 J *conversation_settings(const App &app,bool reset,J *replace_messages=nullptr);

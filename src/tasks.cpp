@@ -60,6 +60,7 @@ struct Job {
     // Share of the context budget used by the latest request; -1 until known.
     int context=-1;
     bool shell_approval=false;
+    TokenUsage turn_usage{},session_usage{};
     std::string detail;
     std::string pending_events;
     std::string title,workspace,state="执行中",output;
@@ -91,6 +92,11 @@ void task_context(App &app,int percent){
     if(app.task_events<0)return;
     const char message[2]={'x',static_cast<char>(std::clamp(percent,0,100))};
     ssize_t n=write(app.task_events,message,sizeof message);(void)n;
+}
+void task_usage(App &app){
+    if(app.task_events<0)return;
+    const auto message=usage_event(app);
+    ssize_t n=write(app.task_events,message.data(),message.size());(void)n;
 }
 void task_detail(App &app,std::string_view detail){
     if(app.task_events<0)return;
@@ -177,6 +183,11 @@ void Tasks::refresh(){
                 j.context=static_cast<unsigned char>(j.pending_events[k+1]);
                 k+=1;used=k+1;continue;
             }
+            if(event=='u'){
+                if(k+USAGE_EVENT_SIZE>j.pending_events.size())break;
+                parse_usage_event(j.pending_events.data()+k,j.turn_usage,j.session_usage);
+                k+=USAGE_EVENT_SIZE-1;used=k+1;continue;
+            }
             if(event=='p'){
                 if(k+2>j.pending_events.size())break;
                 size_t plen=static_cast<unsigned char>(j.pending_events[k+1]);
@@ -237,6 +248,7 @@ int Tasks::start(App &app,const std::string &task,const std::string &workspace){
     put(data.get(),"guided_approval",json_object_new_boolean(app.guided_approval));
     put(data.get(),"shell",json_object_new_boolean(app.shell));put(data.get(),"sandbox",json_object_new_boolean(app.sandbox));put(data.get(),"desktop",json_object_new_boolean(app.desktop));
     put(data.get(),"record",json_object_new_boolean(app.record));put(data.get(),"verbose",json_object_new_boolean(app.verbose));put(data.get(),"max_steps",json_object_new_int(app.max_steps));
+    put(data.get(),"plan_mode",json_object_new_boolean(app.plan_mode));
     put(data.get(),"events",json_object_new_int(events[1]));
     std::string body=json_object_to_json_string_ext(data.get(),JSON_C_TO_STRING_PLAIN);
     if(body.size()>250000){close(payload[0]);close(payload[1]);close(events[0]);close(events[1]);seterr(&app,tr("任务配置过大。"));return -1;}
@@ -285,6 +297,7 @@ J *Tasks::snapshot(){
         put(v,"turn_seconds",json_object_new_double(j.active&&j.turn_started>0?monotime()-j.turn_started:0));
         put(v,"tokens",json_object_new_int64(static_cast<int64_t>(j.tokens)));
         put(v,"context_percent",json_object_new_int(j.context));
+        put_usage(v,j.turn_usage,j.session_usage);
         add(items,v);
     }return items;
 }
@@ -305,8 +318,13 @@ bool Tasks::resume(int id,const std::string &task,J *settings){
     std::string text=json_object_to_json_string_ext(message.get(),JSON_C_TO_STRING_PLAIN);if(text.size()>250000)return false;text+='\n';
     if(!write_all(j->feed,text))return false;
     j->active=true;j->cancelled=false;j->state="执行中";j->title=task;j->changed_at=monotime();
-    j->turn_started=monotime();j->tokens=0;
+    j->turn_started=monotime();j->tokens=0;j->turn_usage=TokenUsage{};
     return true;
+}
+bool Tasks::background(int id){
+    refresh();Job *j=impl->find(id);
+    if(!j||!j->active||!j->alive||j->cancelled||j->state!="执行中")return false;
+    return kill(j->pid,SIGUSR1)==0;
 }
 char *Tasks::readline(const char *prompt){
     return editable_input(prompt,nullptr,false,[this]{refresh();if(on_idle)on_idle();});
@@ -341,7 +359,16 @@ int task_worker(std::intptr_t fd){
     if(get(data.get(),"sandbox"))app.sandbox=bget(data.get(),"sandbox");
     app.desktop=bget(data.get(),"desktop");app.record=bget(data.get(),"record");app.verbose=bget(data.get(),"verbose");
     app.max_steps=iget(data.get(),"max_steps",0);app.task_events=iget(data.get(),"events",-1);
+    app.plan_mode=bget(data.get(),"plan_mode");
     if(app.task_events>=0)fcntl(app.task_events,F_SETFD,FD_CLOEXEC);
+    {
+        // Ctrl+B in the controller: leave the running command in the background.
+        struct sigaction detach{};
+        detach.sa_handler=[](int){background_requested=true;};
+        detach.sa_flags=SA_RESTART;
+        sigemptyset(&detach.sa_mask);
+        sigaction(SIGUSR1,&detach,nullptr);
+    }
     auto cleanup=[](App *a){app_cleanup(a);};std::unique_ptr<App,decltype(cleanup)> guard(&app,cleanup);
     std::string task=sget(data.get(),"task");
     app.conversation_id=sget(data.get(),"conversation_id");

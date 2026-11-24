@@ -8,6 +8,7 @@ struct Job {
     bool retired=false;double retired_at=0;
     bool thinking=false;double thinking_started=0,changed_at=0,turn_started=0;
     std::uint64_t tokens=0;int context=-1;bool shell_approval=false;std::string detail,pending_events;
+    TokenUsage turn_usage{},session_usage{};
     std::string title,workspace,state="执行中",text;
     WinHandle process,group,feed,approval,logs,events,cancellation;
     std::mutex mutex;std::jthread reader;
@@ -34,6 +35,11 @@ void pump(Job &job){
                 if(k+2>job.pending_events.size())break;
                 job.context=static_cast<unsigned char>(job.pending_events[k+1]);
                 k+=1;used=k+1;continue;
+            }
+            if(event=='u'){
+                if(k+USAGE_EVENT_SIZE>job.pending_events.size())break;
+                parse_usage_event(job.pending_events.data()+k,job.turn_usage,job.session_usage);
+                k+=USAGE_EVENT_SIZE-1;used=k+1;continue;
             }
             if(event=='p'){
                 if(k+2>job.pending_events.size())break;
@@ -84,6 +90,11 @@ void task_context(App &app,int percent){
     if(app.task_events<0)return;
     const char message[2]={'x',static_cast<char>(std::clamp(percent,0,100))};
     DWORD count=0;WriteFile(reinterpret_cast<HANDLE>(app.task_events),message,sizeof message,&count,nullptr);
+}
+void task_usage(App &app){
+    if(app.task_events<0)return;
+    const auto message=usage_event(app);
+    DWORD count=0;WriteFile(reinterpret_cast<HANDLE>(app.task_events),message.data(),static_cast<DWORD>(message.size()),&count,nullptr);
 }
 void task_detail(App &app,std::string_view detail){
     if(app.task_events<0)return;
@@ -165,6 +176,7 @@ int Tasks::start(App &app,const std::string &task,const std::string &workspace){
     put(data.get(),"yes",json_object_new_boolean(app.yes));put(data.get(),"auto_edit",json_object_new_boolean(app.auto_edit));put(data.get(),"guided_approval",json_object_new_boolean(app.guided_approval));
     put(data.get(),"columns",json_object_new_int(terminal_columns()));put(data.get(),"ansi",json_object_new_boolean(terminal_supports_ansi()));
     put(data.get(),"shell",json_object_new_boolean(app.shell));put(data.get(),"desktop",json_object_new_boolean(app.desktop));put(data.get(),"record",json_object_new_boolean(app.record));put(data.get(),"verbose",json_object_new_boolean(app.verbose));put(data.get(),"max_steps",json_object_new_int(app.max_steps));
+    put(data.get(),"plan_mode",json_object_new_boolean(app.plan_mode));
     put(data.get(),"events",json_object_new_int64(reinterpret_cast<std::intptr_t>(events_write.get())));put(data.get(),"cancel",json_object_new_int64(reinterpret_cast<std::intptr_t>(job->cancellation.get())));
     std::string body=json_object_to_json_string_ext(data.get(),JSON_C_TO_STRING_PLAIN);body+='\n';if(body.size()>250000){seterr(&app,tr("任务配置过大。"));return -1;}
     auto args=quote_arg(impl->executable)+L" --task-worker "+std::to_wstring(reinterpret_cast<std::intptr_t>(payload_read.get()));
@@ -195,6 +207,7 @@ J *Tasks::snapshot(){
         put(entry,"turn_seconds",json_object_new_double(job->active&&job->turn_started>0?monotime()-job->turn_started:0));
         put(entry,"tokens",json_object_new_int64(static_cast<int64_t>(job->tokens)));
         put(entry,"context_percent",json_object_new_int(job->context));
+        put_usage(entry,job->turn_usage,job->session_usage);
         add(items,entry);
     }
     return items;
@@ -212,9 +225,12 @@ bool Tasks::resume(int id,const std::string &task,J *settings){
     std::string bytes=json_object_to_json_string_ext(message.get(),JSON_C_TO_STRING_PLAIN);bytes+='\n';
     if(bytes.size()>250000)return false;ResetEvent(job->cancellation.get());
     if(!win_write(job->feed.get(),bytes))return false;
-    job->active=true;job->cancelled=false;job->state="执行中";job->title=task;job->changed_at=monotime();job->turn_started=monotime();job->tokens=0;
+    job->active=true;job->cancelled=false;job->state="执行中";job->title=task;job->changed_at=monotime();job->turn_started=monotime();job->tokens=0;job->turn_usage=TokenUsage{};
     return true;
 }
+// Detaching a running command needs a signal the Windows worker does not have;
+// run_shell's background option covers long-running commands there.
+bool Tasks::background(int){return false;}
 std::string Tasks::output(int id,bool *truncated,std::uint64_t *dropped){if(dropped)*dropped=0;Job *job=impl->find(id);if(!job)return {};std::lock_guard lock(job->mutex);if(truncated)*truncated=job->truncated;if(dropped)*dropped=job->dropped;return job->text;}
 bool Tasks::decide(int id,bool allow){Job *job=impl->find(id);if(!job)return false;std::lock_guard lock(job->mutex);return job->active&&job->state=="等待确认"&&win_write(job->approval.get(),allow?"1\n":"2\n");}
 char *Tasks::readline(const char *prompt){refresh();if(on_idle)on_idle();return input(prompt,nullptr,false);}
@@ -233,6 +249,7 @@ int task_worker(std::intptr_t raw){
     app.config=copy(get(data.get(),"config"));snprintf(app.root,sizeof app.root,"%s",sget(data.get(),"root"));snprintf(app.config_dir,sizeof app.config_dir,"%s",sget(data.get(),"config_dir"));
     app.yes=bget(data.get(),"yes");app.auto_edit=bget(data.get(),"auto_edit");app.shell=bget(data.get(),"shell");app.desktop=bget(data.get(),"desktop");app.record=bget(data.get(),"record");app.verbose=bget(data.get(),"verbose");app.max_steps=iget(data.get(),"max_steps",0);app.task_events=static_cast<std::intptr_t>(json_object_get_int64(get(data.get(),"events")));
     app.conversation_id=sget(data.get(),"conversation_id");
+    app.plan_mode=bget(data.get(),"plan_mode");
     if(!app.conversation_id.empty())app.messages=history_context(app,app.conversation_id);
     WinHandle events(reinterpret_cast<HANDLE>(app.task_events)),cancel(reinterpret_cast<HANDLE>(static_cast<std::intptr_t>(json_object_get_int64(get(data.get(),"cancel")))));
     SetHandleInformation(control.get(),HANDLE_FLAG_INHERIT,0);SetHandleInformation(events.get(),HANDLE_FLAG_INHERIT,0);SetHandleInformation(cancel.get(),HANDLE_FLAG_INHERIT,0);

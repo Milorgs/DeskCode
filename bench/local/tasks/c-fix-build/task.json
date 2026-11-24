@@ -1,0 +1,8 @@
+{
+  "id": "c-fix-build",
+  "title": "Make a small C program build cleanly with -Wall -Wextra -Werror",
+  "category": "c-build",
+  "difficulty": "easy",
+  "timeout_seconds": 600,
+  "max_steps": 30
+}

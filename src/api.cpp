@@ -484,19 +484,72 @@ J *native_response(App *a,J *data){
     seterr(a,tr("Anthropic 工具或内容块格式无效，本轮工具未执行。"));
     return NULL;
 }
-static std::uint64_t reported_tokens(J *usage,bool native){
-    auto count=[usage](const char *name){
-        J *value=get(usage,name);
+// Prices are per million tokens in the profile's currency. A profile without
+// prices is never charged a guessed amount; an OpenRouter-style usage.cost is
+// used as reported when present.
+static double price_field(J *config,const char *key,bool &present){
+    J *value=get(config,key);
+    if(!json_object_is_type(value,json_type_double)&&!json_object_is_type(value,json_type_int))return 0;
+    const double number=json_object_get_double(value);
+    if(!(number>=0)||number>1e9)return 0;
+    present=true;
+    return number;
+}
+bool usage_priced(J *config){
+    bool input=false,output=false;
+    price_field(config,"price_input",input);
+    price_field(config,"price_output",output);
+    return input||output;
+}
+TokenUsage usage_from_response(J *usage,bool native,J *config){
+    auto count=[](J *object,const char *name){
+        J *value=get(object,name);
         if(!json_object_is_type(value,json_type_int)||json_object_get_int64(value)<0)return std::uint64_t{0};
         return json_object_get_uint64(value);
     };
+    TokenUsage used;
     if(native){
-        auto input=add_tokens(count("input_tokens"),count("cache_creation_input_tokens"));
-        input=add_tokens(input,count("cache_read_input_tokens"));
-        return add_tokens(input,count("output_tokens"));
+        used.input=add_tokens(count(usage,"input_tokens"),count(usage,"cache_creation_input_tokens"));
+        used.cache_read=count(usage,"cache_read_input_tokens");
+        used.output=count(usage,"output_tokens");
+    }else{
+        const std::uint64_t prompt=count(usage,"prompt_tokens"),completion=count(usage,"completion_tokens");
+        std::uint64_t cached=count(get(usage,"prompt_tokens_details"),"cached_tokens");
+        if(!cached)cached=count(usage,"prompt_cache_hit_tokens");
+        cached=std::min(cached,prompt);
+        used.input=prompt-cached;
+        used.cache_read=cached;
+        used.output=completion;
+        // Some providers only send a total, others count extra reasoning
+        // tokens there; keep the total as reported either way.
+        const std::uint64_t total=count(usage,"total_tokens"),sum=add_tokens(prompt,completion);
+        if(total>sum){
+            if(sum)used.output=add_tokens(used.output,total-sum);
+            else used.input=total;
+        }
     }
-    auto total=count("total_tokens");
-    return total?total:add_tokens(count("prompt_tokens"),count("completion_tokens"));
+    bool has_input=false,has_output=false,has_cache=false;
+    const double input_price=price_field(config,"price_input",has_input);
+    const double output_price=price_field(config,"price_output",has_output);
+    const double cache_price=price_field(config,"price_cache_read",has_cache);
+    if(has_input||has_output){
+        used.cost=(static_cast<double>(used.input)*input_price+static_cast<double>(used.output)*output_price
+                   +static_cast<double>(used.cache_read)*(has_cache?cache_price:input_price))/1e6;
+        used.priced=true;
+    }else if(J *reported=get(usage,"cost");json_object_is_type(reported,json_type_double)||json_object_is_type(reported,json_type_int)){
+        const double cost=json_object_get_double(reported);
+        if(cost>=0&&cost<1e6){used.cost=cost;used.priced=true;}
+    }
+    return used;
+}
+std::string usage_cost_label(J *config,double cost){
+    std::string currency=usage_priced(config)?sget(config,"price_currency"):"";
+    for(char &c:currency)c=static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    const std::string symbol=currency.empty()||currency=="USD"||currency=="$"?"$"
+        :currency=="CNY"||currency=="RMB"||currency=="¥"?"¥":currency=="EUR"?"€":currency+" ";
+    char number[64];
+    snprintf(number,sizeof number,cost<0.01?"%.4f":cost<1?"%.3f":"%.2f",cost);
+    return "≈"+symbol+number;
 }
 J *api_complete(App *a,J *c,J *messages,J *tools){
     bool native=!strcmp(sget(c,"protocol"),"anthropic");
@@ -645,9 +698,13 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
             put(data,"choices",choices);
         }
     }
-    a->task_tokens=add_tokens(a->task_tokens,reported_tokens(get(data,"usage"),native));
+    const TokenUsage used=usage_from_response(get(data,"usage"),native,c);
+    a->turn_usage.add(used);
+    a->session_usage.add(used);
+    a->task_tokens=add_tokens(a->task_tokens,used.total());
     task_tokens(*a);
-    if(!record_tokens(*a,c,reported_tokens(get(data,"usage"),native)))
+    task_usage(*a);
+    if(!record_tokens(*a,c,used.total()))
         fputs(tr("无法保存词元用量。\n"),stderr);
     J *result=NULL;
     if(native)result=native_response(a,data);

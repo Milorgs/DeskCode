@@ -1,0 +1,8 @@
+{
+  "id": "config-ini-update",
+  "title": "Apply a set of changes to an INI config while preserving everything else",
+  "category": "config",
+  "difficulty": "easy",
+  "timeout_seconds": 480,
+  "max_steps": 25
+}

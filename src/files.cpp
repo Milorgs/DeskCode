@@ -817,6 +817,10 @@ static J *builtin_tools(){
             put(timeout,"type",str("integer"));
             put(timeout,"description",str("Optional command timeout in milliseconds (1000..300000, default 30000)."));
             put(shell_props,"timeout_ms",timeout);
+            J *background=obj();
+            put(background,"type",str("boolean"));
+            put(background,"description",str("Optional: start a long-running command (dev server, watcher, long build or test run) in the background and return a shell_id at once; read its output with shell_output and stop it with shell_kill."));
+            put(shell_props,"background",background);
         }
         definition(tools,"desktop_snapshot","Read apps with empty app, or up to 500 controls for an exact app name (with optional filter on control name/role). Text is sent to model API.",app,1);
         {
@@ -891,16 +895,35 @@ static J *builtin_tools(){
             put(maxr,"description",str("Optional maximum search results to return (1..10, default 5)."));
             put(ws_props,"max_results",maxr);
         }
+        // Tools whose schema does not follow the shared field descriptions.
+        auto literal=[tools](const char *json){
+            J *tool=json_tokener_parse(json);
+            if(tool)add(tools,tool);
+        };
+        literal(R"({"type":"function","function":{"name":"todo_write","description":"Create or update your checklist for multi-step work (3 or more distinct steps). Send the complete list each time; keep one item in_progress and mark items completed as soon as they are verified. The user sees the list.","parameters":{"type":"object","properties":{"todos":{"type":"array","description":"The complete checklist, 1..50 items in order.","items":{"type":"object","properties":{"content":{"type":"string","description":"Short imperative description of the step."},"status":{"type":"string","description":"pending, in_progress or completed."}},"required":["content","status"],"additionalProperties":false}}},"required":["todos"],"additionalProperties":false}}})");
+        literal(R"({"type":"function","function":{"name":"submit_plan","description":"Plan mode is on: files cannot be changed, MCP tools are unavailable and only read-only shell commands run. Investigate with the read-only tools, then call submit_plan once with the complete implementation plan in Markdown (goal, files to change, steps, how it will be verified). The user reviews it; implementation starts only after approval.","parameters":{"type":"object","properties":{"plan":{"type":"string","description":"The complete plan in Markdown."}},"required":["plan"],"additionalProperties":false}}})");
+        literal(R"({"type":"function","function":{"name":"shell_output","description":"Read new output and the status (running, or exit_code once finished) of a background command started by run_shell with background=true.","parameters":{"type":"object","properties":{"shell_id":{"type":"string","description":"The shell_id returned when the command was started."}},"required":["shell_id"],"additionalProperties":false}}})");
+        literal(R"({"type":"function","function":{"name":"shell_kill","description":"Stop a background command and its child processes.","parameters":{"type":"object","properties":{"shell_id":{"type":"string","description":"The shell_id returned when the command was started."}},"required":["shell_id"],"additionalProperties":false}}})");
         return tools;
     }());
     return catalog.get();
+}
+bool plan_safe_tool(const char *name){
+    for(const char *safe:{"list_files","search_text","read_file","code_outline","delegate_research","web_fetch",
+                          "web_search","desktop_snapshot","desktop_screenshot","todo_write","submit_plan","shell_output"})
+        if(!strcmp(name,safe))return true;
+    return false;
 }
 static bool tool_enabled(const App &app,const char *name){
     if(app.subagent){
         return !strcmp(name,"list_files")||!strcmp(name,"search_text")
             ||!strcmp(name,"read_file")||!strcmp(name,"code_outline");
     }
+    if(!strcmp(name,"submit_plan"))return app.plan_mode;
+    // Plan mode keeps run_shell for read-only commands; tool_call refuses the rest.
+    if(app.plan_mode&&!plan_safe_tool(name)&&strcmp(name,"run_shell"))return false;
     if(!strcmp(name,"run_shell"))return app.shell;
+    if(!strcmp(name,"shell_output")||!strcmp(name,"shell_kill"))return app.shell;
     if(!strncmp(name,"desktop_",8))return app.desktop;
     return true;
 }
@@ -911,11 +934,15 @@ J *schemas(App *a){
         J *item=at(catalog,i);
         if(tool_enabled(*a,sget(get(item,"function"),"name")))add(tools.get(),copy(item));
     }
-    mcp_append_tools(*a,tools.get());
+    // An MCP tool can change anything, so plan mode leaves them out.
+    if(!a->plan_mode)mcp_append_tools(*a,tools.get());
     return tools.release();
 }
 J *tool_call(App *a,const char *name,J *args){
-    if(!strncmp(name,"mcp_",4))return mcp_call(*a,name,args);
+    if(!strncmp(name,"mcp_",4)){
+        if(a->plan_mode)return err(tr("计划模式下不能调用 MCP 工具；请写入计划，批准后再执行。"));
+        return mcp_call(*a,name,args);
+    }
     J *defs=builtin_tools(),*spec=NULL;
     for(size_t i=0;i<alen(defs);i++){
         J *f=get(at(defs,i),"function");
@@ -970,6 +997,20 @@ J *tool_call(App *a,const char *name,J *args){
         }
     }
     if(!valid)return err(tr("工具参数缺失、多余或类型不正确。"));
+    if(!strcmp(name,"todo_write"))return tool_todo_write(a,args);
+    if(!strcmp(name,"submit_plan")){
+        if(!a->plan_mode)return err(tr("当前不在计划模式。"));
+        const char *plan=sget(args,"plan");
+        size_t length=strlen(plan),first=strspn(plan," \t\r\n");
+        if(first==length)return err(tr("计划内容为空。"));
+        if(length>65536)return err(tr("计划超过 64 KB，请精简后重新提交。"));
+        J *r=obj();
+        put(r,"submitted",json_object_new_boolean(1));
+        put(r,"status",str("The plan is shown to the user for review. Stop here and wait."));
+        return r;
+    }
+    if(!strcmp(name,"shell_output"))return tool_shell_output(a,args);
+    if(!strcmp(name,"shell_kill"))return tool_shell_kill(a,args);
     std::unique_ptr<ResourceLock> lock;
     if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit")||!strcmp(name,"run_shell")){
         lock=std::make_unique<ResourceLock>(*a,false);
@@ -993,14 +1034,18 @@ J *tool_call(App *a,const char *name,J *args){
             timeout_ms=static_cast<int>(requested);
         }
         const char *cmd=sget(args,"command");
+        const bool background=bget(args,"background");
+        if(a->plan_mode&&!safe_readonly_command(cmd))
+            return err(tr("计划模式只允许只读命令；请把需要执行的命令写进计划，批准后再运行。"));
         std::string hook_err;
         if(!run_pre_shell_hook(*a,cmd,hook_err))return err(hook_err.c_str());
-        const bool auto_safe=(a->auto_edit&&safe_readonly_command(cmd))||command_allowed_in_session(*a,cmd);
+        const bool auto_safe=(a->auto_edit&&safe_readonly_command(cmd))||command_allowed_in_session(*a,cmd)||(a->plan_mode&&safe_readonly_command(cmd));
         if(!auto_safe&&!approve(a,cmd,Operation::Shell,tr("执行命令"))){
             J *r=err(tr("用户拒绝执行，不要绕过。"));
             put(r,"denied",json_object_new_boolean(1));
             return r;
         }
+        if(background)return start_background_command(a,cmd);
         return run_command(a,cmd,timeout_ms);
     }
     if(!strcmp(name,"desktop_snapshot"))return desktop_snapshot(a,sget(args,"app"),sget(args,"filter"));

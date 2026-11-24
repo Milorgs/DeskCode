@@ -521,7 +521,7 @@ struct Conversation {
     struct Request {std::string text;JsonPtr settings;};
     std::vector<Request> queue{};
     std::string id{};
-    bool yes=false,auto_edit=false;
+    bool yes=false,auto_edit=false,plan=false;
     // Requests sent in this conversation, oldest first, for recall in the
     // composer. Loaded from the saved transcript the first time it opens.
     std::vector<std::string> prompts{};
@@ -668,6 +668,8 @@ class ConversationScreen {
     std::string last_header,last_composer,top_frame,frame;
     bool composer=false,overlay=false;
     int context_percent=-1;
+    bool session_priced=false;
+    double session_cost=0;
     double checked=0;
     static std::string clipped(std::string_view text,int width){
         return ui_clip(text,width);
@@ -774,6 +776,8 @@ public:
         }
         if(has_composer()&&!controls_open)draw_chat_activity(current_state);
         context_percent=current_state?iget(current_state,"context_percent",-1):-1;
+        session_priced=current_state&&bget(current_state,"session_priced");
+        session_cost=current_state?json_object_get_double(get(current_state,"session_cost")):0;
         draw_composer();
         if(current)return;
         // Approval requests remain visible even when several other chats run.
@@ -861,10 +865,14 @@ public:
             snprintf(label,sizeof label,tr(" · 上下文约 %d%%（估算）"),context_percent);
             context=label;
         }
+        if(session_priced&&current)context+=" · "+usage_cost_label(app.config,session_cost);
         const int context_cells=ui_width(context);
         if(context_cells>columns-28)context.clear();
-        auto text=ui_clip(status,columns-4-(context.empty()?0:context_cells));
-        const std::string composer_key=text+context;
+        // Plan mode leads the line so it is never clipped away.
+        const std::string plan=app.plan_mode?std::string(tr("计划模式"))+" · ":"";
+        const int plan_cells=ui_width(plan);
+        auto text=ui_clip(status,columns-4-plan_cells-(context.empty()?0:context_cells));
+        const std::string composer_key=plan+text+context;
         const int rule_width=std::min(columns-4,100);
         std::string rule="  ";
         for(int i=0;i<rule_width;i++)rule+="─";
@@ -897,6 +905,7 @@ public:
         const Tone footer_tone=contrast?Tone::Plain:Tone::Dim;
         auto highlight=app.yes?footer.find(permission):footer.npos;
         fputs("  ",stdout);
+        if(!plan.empty())fputs(ui_paint(Tone::Warning,plan,true).c_str(),stdout);
         if(highlight!=footer.npos){
             fputs(ui_paint(footer_tone,footer.substr(0,highlight),contrast).c_str(),stdout);
             fputs(ui_paint(Tone::Orange,permission).c_str(),stdout);
@@ -1182,7 +1191,7 @@ static void show_inline_status(const App &app){
 }
 static void show_inline_help(){
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令\n  Shift+Tab 或 /plan 计划模式 · /go 批准计划 · /rewind 回退 · /cost 用量 · /price 价格 · Ctrl+B 命令转后台\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1215,6 +1224,102 @@ static void show_custom_commands(const App &app){
     }
     terminal_message(out);
 }
+static void inline_box(const char *title,const std::string &body){
+    const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
+    std::string box=ui_box(title,body,width);
+    std::string out="\n";
+    for(size_t start=0;start<box.size();){
+        auto end=box.find('\n',start);
+        out+="  "+box.substr(start,end==std::string::npos?std::string::npos:end-start)+"\n";
+        if(end==std::string::npos)break;
+        start=end+1;
+    }
+    terminal_message(out);
+}
+static std::string price_number(J *config,const char *key){
+    char text[64];
+    snprintf(text,sizeof text,"%g",json_object_get_double(get(config,key)));
+    return text;
+}
+// /cost: what this conversation used, split the way providers bill it.
+static void show_cost(const App &app,J *state){
+    TokenUsage session=app.session_usage;
+    if(state){
+        session.input=json_object_get_uint64(get(state,"session_input"));
+        session.output=json_object_get_uint64(get(state,"session_output"));
+        session.cache_read=json_object_get_uint64(get(state,"session_cache_read"));
+        session.cost=json_object_get_double(get(state,"session_cost"));
+        session.priced=bget(state,"session_priced");
+    }
+    char line[512];
+    snprintf(line,sizeof line,tr("本对话：输入 %s · 缓存命中 %s · 输出 %s 词元"),
+             token_label(session.input).c_str(),token_label(session.cache_read).c_str(),token_label(session.output).c_str());
+    std::string body=line;
+    if(session.priced)body+="\n"+std::string(tr("估算费用："))+usage_cost_label(app.config,session.cost);
+    if(usage_priced(app.config)){
+        std::string currency=sget(app.config,"price_currency");
+        snprintf(line,sizeof line,tr("当前价格（每百万词元）：输入 %s · 输出 %s · 缓存命中 %s %s"),
+                 price_number(app.config,"price_input").c_str(),price_number(app.config,"price_output").c_str(),
+                 get(app.config,"price_cache_read")?price_number(app.config,"price_cache_read").c_str():price_number(app.config,"price_input").c_str(),
+                 currency.c_str());
+        body+="\n";body+=line;
+    }else body+="\n"+std::string(tr("未设置价格：/price 输入价 输出价 [缓存命中价] [币种]，单位为每百万词元。"));
+    JsonPtr usage(load_tokens(app));
+    if(usage)body+="\n"+std::string(tr("此模型累计："))+token_label(model_tokens(usage.get(),app.config))+" "+tr("词元");
+    inline_box(tr("用量与费用"),body);
+}
+// /price IN OUT [CACHE] [CURRENCY], /price off, or /price to show it.
+static std::string set_price(App *a,std::string_view args){
+    std::vector<std::string> words;
+    for(size_t i=0;i<args.size();){
+        while(i<args.size()&&isspace(static_cast<unsigned char>(args[i])))i++;
+        size_t start=i;
+        while(i<args.size()&&!isspace(static_cast<unsigned char>(args[i])))i++;
+        if(i>start)words.emplace_back(args.substr(start,i-start));
+    }
+    if(words.empty()){
+        if(!usage_priced(a->config))return tr("未设置价格：/price 输入价 输出价 [缓存命中价] [币种]，单位为每百万词元。");
+        char line[256];
+        snprintf(line,sizeof line,tr("当前价格（每百万词元）：输入 %s · 输出 %s · 缓存命中 %s %s"),
+                 price_number(a->config,"price_input").c_str(),price_number(a->config,"price_output").c_str(),
+                 get(a->config,"price_cache_read")?price_number(a->config,"price_cache_read").c_str():price_number(a->config,"price_input").c_str(),
+                 sget(a->config,"price_currency"));
+        return line;
+    }
+    JsonPtr candidate(copy(a->config));
+    for(const char *key:{"price_input","price_output","price_cache_read","price_currency"})json_object_object_del(candidate.get(),key);
+    if(words.size()!=1||(words[0]!="off"&&words[0]!="clear")){
+        std::vector<double> numbers;
+        std::string currency;
+        for(const auto &word:words){
+            char *end=nullptr;
+            double value=strtod(word.c_str(),&end);
+            if(end!=word.c_str()&&!*end&&numbers.size()<3&&currency.empty()){
+                if(!(value>=0)||value>1e6)return tr("价格须为 0 到 1000000 之间的数字。");
+                numbers.push_back(value);
+            }else if(currency.empty()&&word.size()<=8&&std::all_of(word.begin(),word.end(),[](char c){return isalpha(static_cast<unsigned char>(c))||c=='$'||static_cast<unsigned char>(c)>=0x80;}))currency=word;
+            else return tr("用法：/price 输入价 输出价 [缓存命中价] [币种]，例如 /price 2 8 0.5 CNY；/price off 清除。");
+        }
+        if(numbers.size()<2)return tr("用法：/price 输入价 输出价 [缓存命中价] [币种]，例如 /price 2 8 0.5 CNY；/price off 清除。");
+        if(currency.empty())currency=strcmp(language_code(),"zh")?"USD":"CNY";
+        put(candidate.get(),"price_input",json_object_new_double(numbers[0]));
+        put(candidate.get(),"price_output",json_object_new_double(numbers[1]));
+        if(numbers.size()==3)put(candidate.get(),"price_cache_read",json_object_new_double(numbers[2]));
+        put(candidate.get(),"price_currency",str(currency.c_str()));
+    }
+    // Prices belong to the saved profile; this conversation keeps its own
+    // reasoning setting.
+    JsonPtr profile(copy(get(get(a->store,"profiles"),sget(a->config,"profile"))));
+    if(!profile)profile.reset(copy(candidate.get()));
+    for(const char *key:{"price_input","price_output","price_cache_read","price_currency"}){
+        json_object_object_del(profile.get(),key);
+        if(J *value=get(candidate.get(),key))put(profile.get(),key,copy(value));
+    }
+    JsonPtr reasoning(copy(get(a->config,"reasoning_effort")));
+    if(save_config(a,profile.get(),false))return a->error;
+    use_reasoning(a->config,reasoning.get());
+    return usage_priced(a->config)?tr("已保存此模型的价格，之后的用量会显示估算费用。"):tr("已清除此模型的价格。");
+}
 // First screen of an empty conversation: what to type and where the controls
 // are. Shown again whenever an empty chat is opened, never once history exists.
 static void show_welcome(){
@@ -1223,7 +1328,7 @@ static void show_welcome(){
     for(const char *example:{"梳理这个项目的结构、入口和构建方式","运行测试，找出失败原因并修复","给 README 补一段安装与使用说明"}){
         text+="    "+ui_paint(Tone::Accent,"›")+" "+ui_paint(Tone::Dim,tr(example))+"\n";
     }
-    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · @+Tab 选文件 · /paste 贴图 · /undo 撤回 · /compact 压缩 · Ctrl+D 返回"))+"\n";
+    text+="\n  "+ui_paint(Tone::Dim,tr("/ 命令面板 · Shift+Tab 计划模式 · @+Tab 选文件 · /rewind 回退 · /undo 撤回 · Ctrl+D 返回"))+"\n";
     terminal_message(text);
 }
 static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,ConversationScreen *screen=nullptr){
@@ -1279,11 +1384,12 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
         if(!screen||!screen->has_composer())
         {
             std::string model=sget(a->config,"model");
-            std::string modes=std::string(language_code())+" "+reasoning_name(sget(a->config,"reasoning_effort"))+" "+permission_name(*a);
+            std::string modes=std::string(language_code())+" "+reasoning_name(sget(a->config,"reasoning_effort"))+" "+permission_name(*a)+(a->plan_mode?" plan":"");
             if(model!=last_model||modes!=last_modes){
                 char hint[768],summary[512];
                 snprintf(hint,sizeof hint,tr("  当前模型：%s · F2 模型 · F3 推理\n"),model.c_str());
                 fputs(ui_paint(Tone::Dim,hint).c_str(),stdout);
+                if(a->plan_mode)fputs(ui_paint(Tone::Warning,std::string("  ")+tr("计划模式：只调研并提交计划 · /go 批准执行 · Shift+Tab 或 /plan 退出")+"\n").c_str(),stdout);
                 snprintf(summary,sizeof summary,tr("推理模式：%s · 批准模式：%s\n"),reasoning_name(sget(a->config,"reasoning_effort")),permission_name(*a));
                 const bool contrast=env_value("DESK_CONTRAST_NUMBERS");
                 fputs(ui_paint(contrast?Tone::Plain:Tone::Dim,summary,contrast).c_str(),stdout);
@@ -1439,6 +1545,145 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
                 a->sandbox=!a->sandbox;
                 terminal_message(ui_paint(Tone::Accent,std::string("  ")+tr(a->sandbox?"已开启 Landlock 内核沙箱（禁止写入工作目录外文件）。":"已关闭当前会话的 Landlock 内核沙箱。"))+"\n");
             }
+            continue;
+        }
+        auto warn=[&](const char *text){terminal_message(ui_paint(Tone::Warning,std::string("  ")+text)+"\n");};
+        auto accent=[&](const std::string &text){terminal_message(ui_paint(Tone::Accent,"  "+text)+"\n");};
+        auto busy=[&]{return screen&&conversation&&screen->active(*conversation);};
+        if(trimmed=="/plan"||trimmed.starts_with("/plan ")){
+            std::string request=trimmed.size()>6?trimmed.substr(6):"";
+            request.erase(0,std::min(request.size(),request.find_first_not_of(" \t")));
+            if(request.empty()){
+                a->plan_mode=!a->plan_mode;
+                if(conversation)conversation->plan=a->plan_mode;
+                accent(tr(a->plan_mode?"已进入计划模式：只调研并提交计划，不修改文件；批准后再执行。":"已退出计划模式，恢复正常执行。"));
+                if(screen)screen->refresh_composer();
+                last_modes.clear();
+                continue;
+            }
+            a->plan_mode=true;
+            if(conversation)conversation->plan=true;
+            if(screen)screen->refresh_composer();
+            last_modes.clear();
+            task=request;
+            trimmed=request;
+        }
+        if(trimmed=="/go"||trimmed.starts_with("/go ")){
+            if(!a->plan_mode){warn(tr("当前不在计划模式；输入 /plan 或按 Shift+Tab 进入。"));continue;}
+            a->plan_mode=false;
+            if(conversation)conversation->plan=false;
+            if(screen)screen->refresh_composer();
+            last_modes.clear();
+            std::string extra=trimmed.size()>4?trimmed.substr(4):"";
+            task=tr("计划已批准，请按计划开始实施，完成后验证结果。");
+            if(!extra.empty())task+="\n"+extra;
+            trimmed=task;
+        }
+        if(trimmed=="/bg"){
+            if(screen&&conversation&&conversation->job&&jobs.background(conversation->job))
+                accent(tr("已请求将正在执行的命令转入后台。"));
+            else warn(tr("当前没有可转入后台的命令；也可以让模型用 run_shell 的 background 参数启动长时间运行的命令。"));
+            continue;
+        }
+        if(trimmed=="/cost"){
+            JsonPtr states;
+            J *state=nullptr;
+            if(screen&&conversation&&conversation->job){
+                states.reset(jobs.snapshot());
+                for(size_t i=0;i<alen(states.get());i++)if(iget(at(states.get(),i),"id",0)==conversation->job)state=at(states.get(),i);
+            }
+            show_cost(*a,state);
+            continue;
+        }
+        if(trimmed=="/price"||trimmed.starts_with("/price ")){
+            const std::string message=set_price(a,std::string_view(trimmed).substr(6));
+            if(conversation){
+                conversation->config.reset(copy(a->config));
+                persist_conversation(*a,*conversation);
+            }
+            if(screen)screen->refresh_composer();
+            terminal_message(ui_paint(Tone::Dim,"  "+message)+"\n");
+            continue;
+        }
+        if(trimmed=="/rewind"){
+            if(busy()){warn(tr("当前对话正在执行任务，请等待完成或按 Ctrl+C 停止后再回退。"));continue;}
+            if(!conversation||conversation->id.empty()){warn(tr("只有已保存的对话可以回退。"));continue;}
+            JsonPtr context(history_context(*a,conversation->id));
+            struct Turn {std::string id,text;};
+            std::vector<Turn> turns;
+            for(size_t i=0;i<alen(context.get());i++){
+                J *message=at(context.get(),i);
+                if(strcmp(sget(message,"role"),"user")||!*sget(message,"_turn"))continue;
+                turns.push_back({sget(message,"_turn"),user_message_text(message)});
+            }
+            if(turns.empty()){warn(tr("没有可回退的轮次；更早的内容可能已压缩进摘要。"));continue;}
+            std::reverse(turns.begin(),turns.end());
+            if(turns.size()>15)turns.resize(15);
+            std::vector<std::string> options;
+            const int option_width=terminal_columns()>0?std::max(20,terminal_columns()-16):72;
+            for(const auto &turn:turns){
+                std::string text=turn.text;
+                for(char &c:text)if(c=='\n'||c=='\r'||c=='\t')c=' ';
+                options.push_back(ui_clip(text,option_width));
+            }
+            options.emplace_back(tr("返回"));
+            if(screen){screen->controls_open=true;screen->begin_overlay();}
+            clear_page();
+            menu_text(tr("\n回退到哪条需求之前？（该需求及之后的对话会被移除）"));
+            const int choice=arrow_menu(jobs,options);
+            int mode=0;
+            if(choice>0&&static_cast<size_t>(choice)<=turns.size()){
+                clear_page();
+                mode=menu_choices(jobs,tr("\n回退内容\n  [1] 对话和文件改动\n  [2] 仅对话（保留文件）\n  [0] 取消"),nullptr,1);
+            }
+            if(screen){screen->end_overlay();screen->controls_open=false;}
+            if(choice<=0||static_cast<size_t>(choice)>turns.size()||mode<=0){
+                if(!screen||!screen->has_composer()){clear_page();chat_title(*a,*conversation);show_conversation_history(*a,*conversation);}
+                continue;
+            }
+            const size_t index=static_cast<size_t>(choice-1);
+            std::vector<std::string> ids;
+            for(size_t i=0;i<=index;i++)ids.push_back(turns[i].id);
+            std::string summary;
+            a->error[0]=0;
+            if(mode==1&&!undo_turns(*a,ids,summary)){
+                warn(summary.empty()?a->error:summary.c_str());
+                a->error[0]=0;
+                continue;
+            }
+            if(!history_rewind(*a,turns[index].id)){
+                warn(mode==1?tr("文件已回退，但无法改写对话记录。"):tr("无法改写对话记录，对话未回退。"));
+                continue;
+            }
+            conversation->sync_messages=true;
+            conversation->reset_context=false;
+            conversation->prompts.clear();
+            {
+                JsonPtr record(history_read(*a,conversation->id));
+                J *messages=get(record.get(),"transcript");
+                for(size_t i=0;i<alen(messages);i++){
+                    J *message=at(messages,i);
+                    if(strcmp(sget(message,"role"),"user"))continue;
+                    std::string text=user_message_text(message);
+                    if(!text.empty()&&(conversation->prompts.empty()||conversation->prompts.back()!=text))conversation->prompts.push_back(std::move(text));
+                }
+            }
+            if(conversation->job)conversation->displayed=output_end(jobs,conversation->job);
+            // The request comes back into the input box to edit and resend.
+            draft.text.clear();
+            for(char c:turns[index].text){
+                if(c=='\n'){draft.text+="\xE2\x86\xB5";draft.newline_inserted=true;}
+                else if(c!='\r')draft.text+=c;
+            }
+            draft.cursor=static_cast<int>(draft.text.size());
+            if(screen){screen->select(conversation);screen->set_context_percent(-1);}
+            else clear_page();
+            chat_title(*a,*conversation);
+            show_conversation_history(*a,*conversation);
+            std::string done=tr("已回退到所选需求之前，可修改后重新发送。");
+            if(mode==1&&!summary.empty())done+="\n  "+summary;
+            accent(done);
+            last_modes.clear();
             continue;
         }
         if(trimmed=="/undo"){
@@ -1680,6 +1925,7 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
             items.push_back({{},JsonPtr(arr()),JsonPtr(copy(a->config))});
             items.back().yes=a->yes;
             items.back().auto_edit=a->auto_edit;
+            items.back().plan=a->plan_mode;
             persist_conversation(*a,items.back());
         }
         auto selected=items.begin()+(choice-1);
@@ -1687,9 +1933,10 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         JsonPtr previous(a->messages);
         a->messages=item.messages.release();
         a->conversation_id=item.id;
-        const bool previous_yes=a->yes,previous_auto_edit=a->auto_edit;
+        const bool previous_yes=a->yes,previous_auto_edit=a->auto_edit,previous_plan=a->plan_mode;
         a->yes=item.yes;
         a->auto_edit=item.auto_edit;
+        a->plan_mode=item.plan;
         json_object_put(a->config);a->config=copy(item.config.get());
         a->state="等待任务";
         screen.reopen(item);
@@ -1699,10 +1946,12 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         item.config.reset(copy(a->config));
         item.yes=a->yes;
         item.auto_edit=a->auto_edit;
+        item.plan=a->plan_mode;
         persist_conversation(*a,item);
         a->conversation_id.clear();
         a->yes=previous_yes;
         a->auto_edit=previous_auto_edit;
+        a->plan_mode=previous_plan;
         use_reasoning(a->config,profile_reasoning(*a));
         std::rotate(items.begin(),selected,selected+1);
         if(interrupted==SIGTERM)return;
@@ -1820,7 +2069,7 @@ static int menu(App *a,int start_mode=0){
     }
 }
 static void help(void){
-    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --no-sandbox  --allow-desktop  --record  --verbose  --version  --help"));
+    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  --plan                  计划模式：只调研并给出计划，不修改文件\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --no-sandbox  --allow-desktop  --record  --verbose  --version  --help"));
 }
 #ifdef _WIN32
 #define desk_dup _dup
@@ -1954,6 +2203,18 @@ static int run_once(App &a,const char *task,bool json_output){
         put(result.get(),"protocol",str(sget(a.config,"protocol")));
         put(result.get(),"workspace",str(a.root));
         put(result.get(),"tokens",json_object_new_int64(static_cast<int64_t>(std::min<std::uint64_t>(a.task_tokens,INT64_MAX))));
+        {
+            J *usage=obj();
+            put(usage,"input",json_object_new_int64(static_cast<int64_t>(std::min<std::uint64_t>(a.turn_usage.input,INT64_MAX))));
+            put(usage,"output",json_object_new_int64(static_cast<int64_t>(std::min<std::uint64_t>(a.turn_usage.output,INT64_MAX))));
+            put(usage,"cache_read",json_object_new_int64(static_cast<int64_t>(std::min<std::uint64_t>(a.turn_usage.cache_read,INT64_MAX))));
+            if(a.turn_usage.priced){
+                put(usage,"cost",json_object_new_double(a.turn_usage.cost));
+                if(*sget(a.config,"price_currency"))put(usage,"currency",str(sget(a.config,"price_currency")));
+            }
+            put(result.get(),"usage",usage);
+        }
+        if(a.plan_mode)put(result.get(),"plan_submitted",json_object_new_boolean(a.plan_submitted));
         put(result.get(),"elapsed_seconds",json_object_new_double(static_cast<double>(static_cast<long long>((monotime()-started)*10))/10));
         put(result.get(),"tools",a.trace?copy(a.trace):arr());
         put(result.get(),"version",str(VERSION));
@@ -2024,6 +2285,7 @@ static int run_cli(int argc,char **argv){
         if(!strcmp(arg,"--lang")){i++;continue;}
         if(!strcmp(arg,"--yes")){a.yes=true;a.auto_edit=false;}
         else if(!strcmp(arg,"--json"))json_output=true;
+        else if(!strcmp(arg,"--plan"))a.plan_mode=true;
         else if(!strcmp(arg,"-c")||!strcmp(arg,"--continue"))resume=true;
         else if(!strcmp(arg,"--no-shell"))a.shell=false;
         else if(!strcmp(arg,"--no-sandbox"))a.sandbox=false;

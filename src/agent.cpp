@@ -456,7 +456,8 @@ struct Observation {
 };
 static bool readonly_probe(const char *name){
     return !strcmp(name,"read_file")||!strcmp(name,"list_files")||!strcmp(name,"search_text")
-        ||!strcmp(name,"code_outline")||!strcmp(name,"delegate_research")||!strcmp(name,"web_fetch")||!strcmp(name,"web_search");
+        ||!strcmp(name,"code_outline")||!strcmp(name,"delegate_research")||!strcmp(name,"web_fetch")||!strcmp(name,"web_search")
+        ||!strcmp(name,"shell_output");
 }
 static void recovery(App *a,std::vector<FailedOperation> &unresolved,const char *name,J *args,bool failed){
     const char *kind=domain(name),*target=sget(args,"path");
@@ -515,10 +516,12 @@ static void show_call(const char *name,J *args){
         !strcmp(name,"web_search")?tr("联网搜索"):!strcmp(name,"multi_edit")?tr("批量修改文件"):
         !strcmp(name,"edit_file")?tr("修改文件"):!strcmp(name,"write_file")?tr("写入文件"):
         !strcmp(name,"run_shell")?tr("执行命令"):!strcmp(name,"desktop_snapshot")?tr("读取桌面"):
-        !strcmp(name,"desktop_screenshot")?tr("截取桌面"):tr("操作桌面");
+        !strcmp(name,"desktop_screenshot")?tr("截取桌面"):!strcmp(name,"todo_write")?tr("更新任务清单"):
+        !strcmp(name,"submit_plan")?tr("提交计划"):!strcmp(name,"shell_output")?tr("查看后台命令"):
+        !strcmp(name,"shell_kill")?tr("停止后台命令"):!strncmp(name,"mcp_",4)?tr("调用 MCP 工具"):tr("操作桌面");
     const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
         !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"web_fetch")?sget(args,"url"):
-        !strcmp(name,"web_search")?sget(args,"query"):sget(args,"app");
+        !strcmp(name,"web_search")?sget(args,"query"):*sget(args,"shell_id")?sget(args,"shell_id"):sget(args,"app");
     const int width=std::max(24,terminal_columns()-6);
     std::string head=std::string(ui_bullet())+" "+label;
     if(*target){
@@ -534,6 +537,10 @@ static void show_result(const char *name,J *r,double elapsed){
     std::string detail;
     char text[512];
     if(*sget(r,"error")){detail=" · ";detail.append(sget(r,"error"));}
+    else if(*sget(r,"shell_id")&&bget(r,"running")){
+        snprintf(text,sizeof text,tr(" · 后台运行中 %s"),sget(r,"shell_id"));
+        detail=text;
+    }
     else if(!strcmp(name,"run_shell")){
         snprintf(text,sizeof text,tr(" · 退出码 %d%s"),iget(r,"exit_code",0),bget(r,"timed_out")?tr(" · 超时"):"");
         detail=text;
@@ -592,6 +599,9 @@ static const char *activity(const char *name){
     if(!strcmp(name,"desktop_screenshot"))return tr("正在截取桌面…");
     if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit"))return tr("正在编辑文件…");
     if(!strcmp(name,"run_shell"))return tr("正在执行命令…");
+    if(!strcmp(name,"todo_write"))return tr("正在更新任务清单…");
+    if(!strcmp(name,"submit_plan"))return tr("正在整理计划…");
+    if(!strcmp(name,"shell_output")||!strcmp(name,"shell_kill"))return tr("正在查看后台命令…");
     return tr("正在操作桌面…");
 }
 #ifndef _WIN32
@@ -636,11 +646,19 @@ int run_task(App *a,const char *task){
         prune_workspace_cache(*a);
     }
     size_t history_start=alen(a->messages);
-    add(a->messages,prepare_user_message(a,task));
+    {
+        J *request=prepare_user_message(a,task);
+        // Checkpoints find the turn of a request by this id; internal keys
+        // never reach the provider.
+        if(!a->turn_id.empty())put(request,"_turn",str(a->turn_id.c_str()));
+        add(a->messages,request);
+    }
     history_checkpoint(*a,history_start);
     a->state="执行中";
     a->error[0]=0;
     a->task_tokens=0;
+    a->turn_usage=TokenUsage{};
+    a->plan_submitted=false;
     a->approval_unavailable=false;
     const double task_started=monotime();
     if(!mcp_prepare(*a)){a->state="失败";return -1;}
@@ -784,8 +802,36 @@ int run_task(App *a,const char *task){
                 add(a->trace,entry);
             }
             tool_result(a,sget(call,"id"),result);
+            if(!failed&&!strcmp(name,"todo_write")&&!quiet_reply){
+                progress_clear(a);
+                fputs(todo_render(a->todos,ui_color()).c_str(),stdout);
+                fflush(stdout);
+            }
+            const bool plan_ready=!failed&&!strcmp(name,"submit_plan");
+            const std::string plan_text=plan_ready?sget(args,"plan"):"";
             json_object_put(args);
             json_object_put(result);
+            if(plan_ready){
+                // The plan closes the turn as the assistant's reply, so the
+                // transcript and the next request read naturally.
+                pending(a,calls,i+1);
+                J *reply_message=obj();
+                put(reply_message,"role",str("assistant"));
+                put(reply_message,"content",str(plan_text.c_str()));
+                add(a->messages,reply_message);
+                progress_clear(a);
+                if(quiet_reply){
+                    if(a->reply_out){fputs(plan_text.c_str(),a->reply_out);fputc('\n',a->reply_out);fflush(a->reply_out);}
+                }else{
+                    printf("\n%s\n",ui_paint(Tone::Accent,std::string("  ")+tr("计划（等待批准）"),true).c_str());
+                    printf("%s%s\n",reply_marker,ui_markdown(plan_text,reply_indent).c_str());
+                    printf("%s\n",ui_paint(Tone::Dim,std::string("  ")+tr("输入 /go 批准并开始执行，或直接回复修改意见；Shift+Tab 或 /plan 退出计划模式。")).c_str());
+                }
+                a->plan_submitted=true;
+                a->state="本轮结束";
+                rc=0;
+                goto done;
+            }
             if(denied||interrupted){
                 pending(a,calls,i+1);
                 if(denied)a->state="已取消";
@@ -810,7 +856,8 @@ int run_task(App *a,const char *task){
             snprintf(tokens,sizeof tokens,tr(" · %s 词元"),token_label(a->task_tokens).c_str());
             line+=tokens;
         }
-        line+=" · ";line+=outcome;
+        if(a->turn_usage.priced)line+=" · "+usage_cost_label(a->config,a->turn_usage.cost);
+        line+=" · ";line+=a->plan_submitted?tr("计划待批准"):outcome;
         const bool emphasize_summary=rc==0&&env_value("DESK_CONTRAST_NUMBERS");
         const Tone tone=rc!=0?Tone::Warning:emphasize_summary?Tone::Accent:Tone::Dim;
         printf("\n%s\n",ui_paint(tone,line,emphasize_summary).c_str());

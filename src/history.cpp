@@ -110,3 +110,28 @@ void history_checkpoint(App &app,size_t first){
     if(!save(app,path(app,app.conversation_id,".data.json"),document.get()))
         fputs(tr("无法保存对话记录，请检查本机配置目录。\n"),stderr);
 }
+// Cut the saved transcript and model context at the request of turn_id, so the
+// conversation continues as if that request had never been sent.
+bool history_rewind(App &app,const std::string &turn_id){
+    if(!valid_id(app.conversation_id)||turn_id.empty())return false;
+    ResourceLock lock(app.config_dir);
+    if(!lock.acquired())return false;
+    JsonPtr document(history_read(app,app.conversation_id));
+    if(!document)return false;
+    auto cut=[&](J *messages){
+        for(size_t i=0;i<alen(messages);i++){
+            J *message=at(messages,i);
+            if(strcmp(sget(message,"role"),"user")||turn_id!=sget(message,"_turn"))continue;
+            json_object_array_del_idx(messages,i,alen(messages)-i);
+            return true;
+        }
+        return false;
+    };
+    J *context=get(document.get(),"context");
+    if(!json_object_is_type(context,json_type_array)||!cut(context))return false;
+    if(J *transcript=get(document.get(),"transcript");json_object_is_type(transcript,json_type_array))cut(transcript);
+    if(!save(app,path(app,app.conversation_id,".data.json"),document.get()))return false;
+    json_object_put(app.messages);
+    app.messages=copy(context);
+    return true;
+}

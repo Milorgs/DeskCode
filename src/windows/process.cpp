@@ -38,14 +38,146 @@ std::string safe_output(std::string_view bytes){
     }
     return result;
 }
-J *run_command(App *app,const char *command,int timeout_ms){
-    if(timeout_ms<1||timeout_ms>300000)return err(tr("命令超时设置无效。"));
-    const char *root=env_value("SystemRoot");if(!root)return err("SystemRoot is unavailable.");
-    std::wstring executable=wide(root)+L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+static std::wstring powershell_executable(){
+    const char *root=env_value("SystemRoot");
+    if(!root)return {};
+    return wide(root)+L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+}
+static std::wstring powershell_arguments(const std::wstring &executable,const char *command){
     std::string script="[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; & {\n"+std::string(command)+"\n}; $desk_ok=$?; $desk_exit=$LASTEXITCODE; if($null -ne $desk_exit){exit $desk_exit}; if(!$desk_ok){exit 1}";
     std::wstring text=wide(script);std::string encoded(((text.size()*sizeof(wchar_t)+2)/3)*4,'\0');
     EVP_EncodeBlock(reinterpret_cast<unsigned char *>(encoded.data()),reinterpret_cast<const unsigned char *>(text.data()),static_cast<int>(text.size()*sizeof(wchar_t)));
-    std::wstring arguments=quote_arg(executable)+L" -NoLogo -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand "+wide(encoded);
+    return quote_arg(executable)+L" -NoLogo -NoProfile -NonInteractive -OutputFormat Text -EncodedCommand "+wide(encoded);
+}
+namespace {
+struct BackgroundShell {
+    std::string id,command;
+    WinHandle process,job,reader;
+    std::uint64_t shown=0;
+    double started=0;
+    bool finished=false,killed=false;
+    long long exit_code=0;
+};
+struct Shells {std::vector<std::unique_ptr<BackgroundShell>> list;int next=1;};
+Shells &shells(App *a){
+    if(!a->shell_data)a->shell_data=new Shells;
+    return *static_cast<Shells *>(a->shell_data);
+}
+void refresh_shell(BackgroundShell &shell){
+    if(shell.finished)return;
+    if(WaitForSingleObject(shell.process.get(),0)==WAIT_OBJECT_0){
+        DWORD code=1;GetExitCodeProcess(shell.process.get(),&code);
+        shell.finished=true;shell.exit_code=code;
+    }
+}
+J *shell_state(BackgroundShell &shell){
+    refresh_shell(shell);
+    J *r=obj();
+    put(r,"shell_id",str(shell.id.c_str()));
+    put(r,"command",str(shell.command.c_str()));
+    put(r,"running",json_object_new_boolean(!shell.finished));
+    if(shell.finished)put(r,"exit_code",json_object_new_int64(shell.exit_code));
+    if(shell.killed)put(r,"killed",json_object_new_boolean(1));
+    LARGE_INTEGER size{};
+    std::uint64_t total=GetFileSizeEx(shell.reader.get(),&size)?static_cast<std::uint64_t>(size.QuadPart):shell.shown;
+    std::uint64_t from=shell.shown;
+    if(total-from>32768){
+        put(r,"skipped_bytes",json_object_new_int64(static_cast<int64_t>(total-32768-from)));
+        from=total-32768;
+    }
+    std::string data(static_cast<size_t>(total>from?total-from:0),'\0');
+    DWORD got=0;
+    if(!data.empty()){
+        OVERLAPPED offset{};offset.Offset=static_cast<DWORD>(from&0xffffffffu);offset.OffsetHigh=static_cast<DWORD>(from>>32);
+        if(!ReadFile(shell.reader.get(),data.data(),static_cast<DWORD>(data.size()),&got,&offset))got=0;
+    }
+    data.resize(got);
+    size_t keep=data.size();
+    if(!shell.finished){
+        size_t tail=0;
+        while(tail<keep&&tail<3&&(static_cast<unsigned char>(data[keep-1-tail])&0xc0)==0x80)tail++;
+        if(tail<keep){
+            auto lead=static_cast<unsigned char>(data[keep-1-tail]);
+            size_t expected=lead<0x80?1:lead<0xe0?2:lead<0xf0?3:lead<0xf8?4:0;
+            if(expected>tail+1)keep-=tail+1;
+        }
+    }
+    data.resize(keep);
+    shell.shown=from+keep;
+    auto text=safe_output(data);
+    put(r,"output",json_object_new_string_len(text.data(),static_cast<int>(text.size())));
+    return r;
+}
+}
+J *start_background_command(App *a,const char *command){
+    auto &all=shells(a);
+    size_t running=0;
+    for(auto &shell:all.list){refresh_shell(*shell);running+=!shell->finished;}
+    if(running>=8)return err(tr("后台命令已达 8 个上限，请先用 shell_kill 停止不需要的命令。"));
+    const std::wstring executable=powershell_executable();
+    if(executable.empty())return err("SystemRoot is unavailable.");
+    wchar_t folder[MAX_PATH+1]{},name[MAX_PATH+1]{};
+    if(!GetTempPathW(MAX_PATH,folder)||!GetTempFileNameW(folder,L"dsk",0,name))return err(tr("无法创建命令输出文件。"));
+    SECURITY_ATTRIBUTES attr{sizeof attr,nullptr,TRUE};
+    WinHandle writer(CreateFileW(name,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,&attr,CREATE_ALWAYS,FILE_ATTRIBUTE_TEMPORARY|FILE_FLAG_DELETE_ON_CLOSE,nullptr));
+    if(!writer)return err(tr("无法创建命令输出文件。"));
+    WinHandle reader(CreateFileW(name,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+    WinHandle null(CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&attr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+    auto shell=std::make_unique<BackgroundShell>();
+    shell->job=kill_job();
+    if(!reader||!null||!shell->job||!win_spawn(executable,powershell_arguments(executable,command),wide(a->root),null.get(),writer.get(),{null.get(),writer.get()},shell->job.get(),shell->process))
+        return err(tr("无法启动命令。"));
+    writer.reset();
+    shell->reader=std::move(reader);
+    shell->command=command;
+    shell->started=monotime();
+    if(WaitForSingleObject(shell->process.get(),1000)==WAIT_OBJECT_0){
+        J *r=shell_state(*shell);
+        json_object_object_del(r,"shell_id");
+        return r;
+    }
+    shell->id="ps-"+std::to_string(all.next++);
+    all.list.push_back(std::move(shell));
+    J *r=shell_state(*all.list.back());
+    put(r,"note",str("Running in the background. Use shell_output to read new output and shell_kill to stop it; it stops when this conversation ends."));
+    return r;
+}
+J *tool_shell_output(App *a,J *args){
+    const char *id=sget(args,"shell_id");
+    for(auto &shell:shells(a).list)if(shell->id==id)return shell_state(*shell);
+    return err(tr("没有这个后台命令；shell_id 来自 run_shell 的返回结果。"));
+}
+J *tool_shell_kill(App *a,J *args){
+    const char *id=sget(args,"shell_id");
+    for(auto &shell:shells(a).list){
+        if(shell->id!=id)continue;
+        refresh_shell(*shell);
+        if(!shell->finished){
+            TerminateJobObject(shell->job.get(),1);
+            WaitForSingleObject(shell->process.get(),2000);
+            shell->killed=true;
+        }
+        return shell_state(*shell);
+    }
+    return err(tr("没有这个后台命令；shell_id 来自 run_shell 的返回结果。"));
+}
+size_t background_shell_count(App *a){
+    if(!a->shell_data)return 0;
+    size_t running=0;
+    for(auto &shell:shells(a).list){refresh_shell(*shell);running+=!shell->finished;}
+    return running;
+}
+void shells_destroy(App *a){
+    if(!a->shell_data)return;
+    auto *all=static_cast<Shells *>(a->shell_data);
+    for(auto &shell:all->list)TerminateJobObject(shell->job.get(),1);
+    delete all;
+    a->shell_data=nullptr;
+}
+J *run_command(App *app,const char *command,int timeout_ms){
+    if(timeout_ms<1||timeout_ms>300000)return err(tr("命令超时设置无效。"));
+    std::wstring executable=powershell_executable();if(executable.empty())return err("SystemRoot is unavailable.");
+    std::wstring arguments=powershell_arguments(executable,command);
     WinHandle read,write;if(!win_pipe(read,write))return err("Could not create command output pipe.");SetHandleInformation(read.get(),HANDLE_FLAG_INHERIT,0);
     SECURITY_ATTRIBUTES attr{sizeof attr,nullptr,TRUE};WinHandle null(CreateFileW(L"NUL",GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,&attr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
     WinHandle job=kill_job(),process;if(!null||!job||!win_spawn(executable,std::move(arguments),wide(app->root),null.get(),write.get(),{null.get(),write.get()},job.get(),process))return err(tr("无法启动命令。"));

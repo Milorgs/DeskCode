@@ -1,0 +1,8 @@
+order_id,customer,region,quantity,unit_price,status
+1001,"Smith, John",North,2,19.99,shipped
+1002,Ana Lopez,South,1,250.00,shipped
+1003,"Wu ""Kim"" Li",North,10,3.50,pending
+1004,Bo Ek,East,3,12.00,cancelled
+
+1005,"Carter, Dee", South ,4,7.25,Shipped
+1006,Eve,East,1,0.99,CANCELLED

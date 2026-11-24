@@ -1,0 +1,8 @@
+{
+  "id": "cli-add-options",
+  "title": "Add --top and --ignore-case options to a word-frequency CLI",
+  "category": "feature",
+  "difficulty": "medium",
+  "timeout_seconds": 600,
+  "max_steps": 30
+}

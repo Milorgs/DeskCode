@@ -15,6 +15,8 @@
 
 - **原生 C++20 单二进制交付**：无需 Node.js 或 Python 运行时，毫秒级启动、低内存占用；终端内置底部固定输入栏、实时流式 Markdown 排版、彩色 Diff 审批框、鼠标滚轮翻阅与右侧拖拽滚动条。
 - **可校验、可撤回的原子代码编辑**：写入强制核对 `SHA256` 杜绝盲改覆盖；支持单处精确替换 `edit_file` 与单次最多 20 处原子替换 `multi_edit`（最大 `4 MB` 源码文件），自动兼容 `CRLF` 换行，支持 `/undo` 一键回滚上一轮修改与新建文件（部分失败自动保留进度可重试）。
+- **计划模式、任务清单与多步回退**：`Shift+Tab` 或 `/plan` 进入计划模式，模型只能使用只读工具调研并通过 `submit_plan` 提交方案，`/go` 批准后才开始改动；多步任务由模型用 `todo_write` 维护实时任务清单；`/rewind` 可回退到任意一条历史需求之前，同时撤回对话与该轮之后的文件改动，并把原需求放回输入框以便修改重发。
+- **后台命令与用量费用透明**：`run_shell` 支持 `background` 启动开发服务器或长时间测试，`shell_output` / `shell_kill` 随时查看与停止；命令跑太久时按 `Ctrl+B` 直接转入后台、任务继续。按「输入 / 缓存命中 / 输出」拆分统计词元，`/price` 设置模型单价后状态栏与 `/cost` 实时显示估算费用（OpenRouter 自动读取官方计费）。
 - **Linux Landlock 内核沙箱与细粒度审批**：Linux 下默认启用 Landlock 内核级文件系统沙箱，限制子进程仅可写入当前工作区与 `/tmp`；支持 `ask` / `edit` / `full` 三档批准模式，`edit` 模式自动放行只读检查命令，命令审批支持「本对话允许同类」，并实时显示耗时命令最新输出行。
 - **跨平台桌面无障碍自动化 + 多模态视觉**：原生对接 Linux `AT-SPI`、Windows `UI Automation` 与 macOS `System Events`（支持最多 500 个控件节点与 `filter` 过滤），配合 `desktop_screenshot` 桌面视觉截图、`/paste` 剪贴板贴图与 `@图片` 内联输入，打通终端与 GUI 应用边界。
 - **双协议原生推理与提示词缓存**：原生支持 OpenAI Chat Completions 与 Anthropic Messages API（含自适应推理强度 `reasoning_effort` / `thinking` 与 Anthropic 自动 `cache_control` 提示词缓存断点），内置 OpenAI、Anthropic、DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter 与本地 Ollama 预设。
@@ -24,7 +26,7 @@
 
 ## 快速安装
 
-当前最新版本：**1.14.3**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+当前最新版本：**1.15.0**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
 
 ### Linux (x86_64)
 
@@ -71,7 +73,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 
 ---
 
-## 内置工具矩阵（15 项 + MCP）
+## 内置工具矩阵（19 项 + MCP）
 
 | 类别 | 工具名 | 功能说明 |
 |---|---|---|
@@ -83,7 +85,8 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | **安全代码编辑** | `edit_file` | 校验 `SHA256` 后对文件（最大 `4 MB`）做唯一精确替换，歧义时返回候选行号 |
 | | `multi_edit` | 单次 `SHA256` 校验下对同一文件原子应用 `1..20` 处修改（任一分块不匹配则整体零写入回滚） |
 | | `write_file` | 新建或完整替换 UTF-8 文件，自动生成 `.bak` 备份并回读校验 |
-| **终端与联网** | `run_shell` | 执行非交互式命令（默认 30s，最高 300s），支持实时输出进度与 Linux Landlock 内核写保护 |
+| **终端与联网** | `run_shell` | 执行非交互式命令（默认 30s，最高 300s），支持实时输出进度与 Linux Landlock 内核写保护；`background: true` 时在后台启动长时间运行的命令 |
+| | `shell_output` / `shell_kill` | 读取后台命令的新增输出与退出状态 / 停止后台命令及其子进程（同时最多 8 个，对话结束自动清理） |
 | | `web_search` | 关键词联网检索并返回标题、链接与摘要（支持通过 `DESK_SEARCH_URL` 接入自建检索端） |
 | | `web_fetch` | 拉取公开 HTTPS 网页（或本机调试 `localhost` HTTP）并提取可读正文，内置私有/内网地址 SSRF 拦截与 DNS 绑定校验 |
 | **桌面自动化与视觉** | `desktop_snapshot` | 读取当前桌面应用列表或目标应用的无障碍控件树（最多 500 节点，支持 `filter` 过滤） |
@@ -91,6 +94,8 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | | `desktop_set_text` | 设置可编辑桌面控件的文本内容 |
 | | `desktop_screenshot` | 截取当前活动窗口或全屏 PNG 图像并按多模态图像块送入模型进行视觉核验 |
 | **MCP 生态扩展** | `mcp_<server>_<tool>` | 动态挂载本地 `stdio` 或远程 `Streamable HTTP` MCP 服务暴露的工具（支持分页发现、会话鉴权与自动清理） |
+| **规划与进度** | `todo_write` | 模型为多步任务维护任务清单（待办 / 进行中 / 已完成），终端实时显示进度 |
+| | `submit_plan` | 仅在计划模式提供：提交完整实施方案等待用户批准，批准前不会修改任何文件 |
 
 ---
 
@@ -104,6 +109,11 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | `@文件` / `@文件:起-止` | 在消息中直接内联附带源码片段或本地图片（`PNG` / `JPEG` / `WebP` / `GIF`） |
 | `/` | 打开交互式对话操作面板（切换模型、推理强度、批准模式、MCP、清空上下文等） |
 | `/undo` | 一键撤回上一轮任务修改与新建的工作区文件 |
+| `/plan [需求]`（或 `Shift+Tab`） | 进入 / 退出计划模式：只调研并提交方案，不修改文件；带需求时直接以计划模式发送 |
+| `/go [补充说明]` | 批准当前计划，退出计划模式并开始实施 |
+| `/rewind` | 选择回退到某条历史需求之前：可同时撤回对话与文件改动，或仅回退对话 |
+| `/cost` · `/price 输入价 输出价 [缓存价] [币种]` | 查看本对话按输入 / 缓存命中 / 输出拆分的词元与估算费用 · 设置当前模型每百万词元单价（`/price off` 清除） |
+| `/bg`（或 `Ctrl+B`） | 把正在执行的命令转入后台继续运行，任务不中断 |
 | `/compact` | 主动调用当前模型将长对话压缩为高密度工程续接摘要 |
 | `/paste [说明]` | 从系统剪贴板读取图片并附带到当前输入（或按 `Ctrl+V`） |
 | `/sandbox` | 开启或关闭当前会话的 Linux Landlock 内核文件系统沙箱 |
@@ -115,6 +125,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 ### 键盘与鼠标操作
 
 - **`F2` / `F3`**：快速切换模型 / 调整思考推理强度。
+- **`Shift+Tab`**：进入或退出计划模式；**`Ctrl+B`**：把正在执行的命令转入后台（Linux / macOS）。
 - **`Alt+Enter`**：在输入框内插入换行；粘贴多行代码自动折叠为摘要块，不会误触发提交。
 - **`Ctrl+P` / `Ctrl+N`（或 `Alt+↑` / `Alt+↓`）**：回调当前对话历史发送过的需求。
 - **鼠标滚轮 / 右侧滚动条 / `PgUp` `PgDn` / `Ctrl+↑↓`**：上下滚动审阅历史对话与审批面板中的长 Diff；按住 **`Shift` + 鼠标拖动** 选择复制终端文字。
@@ -185,8 +196,11 @@ desk -p "检查当前项目并列出最关键的三个风险点" > report.md
 # 从标准输入管道读取 diff 并自动批准工作区内文件编辑
 git diff | desk -p - --approval edit
 
-# 输出机器可读 JSON（含 status / reply / tokens / elapsed_seconds / tools 调用轨迹）
+# 输出机器可读 JSON（含 status / reply / tokens / usage 输入·缓存命中·输出拆分 / elapsed_seconds / tools 调用轨迹）
 desk --json -p "运行测试并修复失败用例" --approval edit --max-steps 25
+
+# 计划模式：只调研并把实施方案作为回复输出，不修改任何文件
+desk --plan -p "为登录模块增加限流，给出改动方案" > plan.md
 
 # 机器可读环境健康检查
 desk doctor --json
@@ -194,6 +208,12 @@ desk doctor --json
 
 - **批准档位**：`--approval ask`（默认）｜`--approval edit`（自动批准工作区文件修改与安全只读命令）｜`--approval full`（同 `--yes`，自动批准已启用工具；可选 `--no-sandbox` 关闭沙箱）。
 - **退出码约定**：`0` 完成 · `1` 未完成（含非交互终端下需人工审批返回 `approval_required`） · `2` 参数错误 · `130` 中断退出。
+
+---
+
+## Agent 质量跑分
+
+[`bench/`](bench/README.md) 提供可复现的跑分体系：本地离线任务集（`python3 bench/run_local.py`，用 `DESK_*` 环境变量指定模型，隔离配置目录运行并输出通过率、耗时与词元报告）以及 Terminal-Bench 2.0 / Harbor 适配器。
 
 ---
 

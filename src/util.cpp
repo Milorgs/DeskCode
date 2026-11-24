@@ -130,6 +130,16 @@ int choose_chat_reasoning(int,int){
     if(editor)editor->action="/reasoning";
     return 0;
 }
+int toggle_plan_hotkey(int,int){
+    if(!active_draft||!editor)return rl_ding();
+    editor->action="/plan";
+    return 0;
+}
+int background_hotkey(int,int){
+    if(!active_draft||!editor)return rl_ding();
+    editor->action="/bg";
+    return 0;
+}
 int unbound_scroll_key(int,int){return rl_ding();}
 int scroll_up(int,int){scroll_transcript_page(-1);return 0;}
 int scroll_down(int,int){scroll_transcript_page(1);return 0;}
@@ -296,6 +306,8 @@ struct EditorSession {
         active_draft=draft;
         rl_bind_key('\t',complete_chat_tab);
         bind("\026",paste_clipboard_hotkey);
+        bind("\033[Z",toggle_plan_hotkey);
+        bind("\002",background_hotkey);
         bind("\033\r",insert_newline_glyph);
         bind("\033\n",insert_newline_glyph);
         rl_variable_bind("enable-bracketed-paste","off");

@@ -15,6 +15,8 @@
 
 - **Single Native C++20 Binary**: Zero Node.js or Python runtime dependencies, instant cold start, and minimal memory footprint—complete with a pinned terminal composer, live streaming Markdown rendering, colored diff approval panels, mouse-wheel transcript scrolling, and a draggable scrollbar.
 - **Verified, Reversible Code Editing**: Every write verifies `SHA256` to prevent stale overwrites. Supports single-match `edit_file` and atomic multi-hunk `multi_edit` (`1..20` hunks on files up to `4 MB`) with automatic `CRLF` preservation, `.bak` backups, and one-command `/undo` per turn (retaining unresolved entries for retry on partial failure).
+- **Plan Mode, Checklists & Multi-Step Rewind**: Press `Shift+Tab` or type `/plan` and the model may only use read-only tools, then proposes an implementation through `submit_plan`; nothing changes until you approve with `/go`. Multi-step work is tracked live through the model's `todo_write` checklist, and `/rewind` returns to before any earlier request—restoring the conversation and the file changes made since—with the original request back in the composer to edit and resend.
+- **Background Commands & Transparent Cost**: `run_shell` can start dev servers or long test runs with `background`, inspected and stopped through `shell_output` / `shell_kill`; press `Ctrl+B` to move a slow foreground command to the background while the turn continues. Tokens are split into input / cache hits / output, and after `/price` the status bar and `/cost` show an estimated cost (OpenRouter's reported cost is used automatically).
 - **Linux Landlock Kernel Sandbox & Smart Approvals**: Restricts shell child processes at the kernel level on Linux so writes outside the workspace and `/tmp` are blocked by default. Offers `ask` / `edit` / `full` approval modes, zero-friction execution of verified read-only inspection commands in `edit` mode, per-chat `Allow similar` shell rules, and live latest-line progress for long-running commands.
 - **Cross-Platform Desktop Automation + Vision**: Bridges terminal and GUI workflows via Linux `AT-SPI`, Windows `UI Automation`, and macOS `System Events` (up to 500 controls with `filter` support), paired with multimodal `desktop_screenshot` inspection, `/paste` clipboard image attachment, and inline `@image` mentions.
 - **Native Dual-Protocol Streaming & Prompt Caching**: Speaks both OpenAI Chat Completions and the native Anthropic Messages API (including native `reasoning_effort` / adaptive `thinking` controls and automatic Anthropic `cache_control` prompt-caching breakpoints), with built-in presets for OpenAI, Anthropic, DeepSeek, Kimi, Qwen, Zhipu GLM, SiliconFlow, OpenRouter, and local Ollama.
@@ -24,7 +26,7 @@
 
 ## Quick Install
 
-Latest version: **1.14.3** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
+Latest version: **1.15.0** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
 
 ### Linux (x86_64)
 
@@ -71,7 +73,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 
 ---
 
-## Built-in Tools (15 + MCP)
+## Built-in Tools (19 + MCP)
 
 | Category | Tool | Description |
 |---|---|---|
@@ -83,7 +85,8 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | **Verified Editing** | `edit_file` | Replace a unique exact text match in files up to `4 MB` under `SHA256` verification |
 | | `multi_edit` | Atomically apply `1..20` `{old_text, new_text}` hunks to a file under one `SHA256` check, diff preview, and backup |
 | | `write_file` | Create or replace a UTF-8 file with automatic `.bak` backup and read-back verification |
-| **Shell & Web** | `run_shell` | Execute noninteractive commands (`30s` default, up to `300s`) with live output progress and Linux Landlock write sandboxing |
+| **Shell & Web** | `run_shell` | Execute noninteractive commands (`30s` default, up to `300s`) with live output progress and Linux Landlock write sandboxing; `background: true` starts long-running commands in the background |
+| | `shell_output` / `shell_kill` | Read new output and exit status of a background command / stop it and its children (up to 8, cleaned up when the conversation ends) |
 | | `web_search` | Search the web for titles, URLs, and snippets (customizable via `DESK_SEARCH_URL`) |
 | | `web_fetch` | Fetch public HTTPS pages (or `localhost` HTTP) into clean text with SSRF private-IP blocking and DNS pinning |
 | **Desktop & Vision** | `desktop_snapshot` | Inspect open desktop apps or up to 500 accessibility controls for an app (with optional `filter`) |
@@ -91,6 +94,8 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | | `desktop_set_text` | Replace text in an editable desktop control |
 | | `desktop_screenshot` | Capture the active window or desktop as PNG and attach it as a multimodal vision block |
 | **MCP Ecosystem** | `mcp_<server>_<tool>` | Dynamically attach tools from local `stdio` or remote `Streamable HTTP` MCP servers |
+| **Planning & Progress** | `todo_write` | The model keeps a checklist (pending / in progress / completed) for multi-step work, shown live in the terminal |
+| | `submit_plan` | Plan mode only: submit the full implementation plan for approval; no file changes before approval |
 
 ---
 
@@ -104,6 +109,11 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | `@file` / `@file:start-end` | Inline file contents, line ranges, or workspace images (`PNG` / `JPEG` / `WebP` / `GIF`) |
 | `/` | Open the interactive chat command palette |
 | `/undo` | Revert all file edits and newly created files from the last turn |
+| `/plan [request]` (or `Shift+Tab`) | Toggle plan mode: investigate and propose without changing files; with a request, send it in plan mode |
+| `/go [notes]` | Approve the current plan, leave plan mode, and start implementing |
+| `/rewind` | Rewind to before an earlier request: conversation and file changes, or the conversation only |
+| `/cost` · `/price IN OUT [CACHE] [CURRENCY]` | Show tokens split by input / cache hits / output with estimated cost · Set per-million-token prices for the current model (`/price off` clears) |
+| `/bg` (or `Ctrl+B`) | Move the running command to the background without stopping the turn |
 | `/compact` | Summarize long conversation history into a dense continuation brief |
 | `/paste [prompt]` | Attach an image directly from the system clipboard (or press `Ctrl+V`) |
 | `/sandbox` | Toggle the Linux Landlock kernel filesystem sandbox for the current session |
@@ -115,6 +125,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 ### Keyboard & Mouse Navigation
 
 - **`F2` / `F3`**: Switch model profile / adjust reasoning effort.
+- **`Shift+Tab`**: Toggle plan mode; **`Ctrl+B`**: Move the running command to the background (Linux / macOS).
 - **`Alt+Enter`**: Insert a newline in the composer; pasted multiline snippets fold automatically without premature submission.
 - **`Ctrl+P` / `Ctrl+N` (or `Alt+Up` / `Alt+Down`)**: Recall earlier prompts sent in the current conversation.
 - **Mouse wheel / Scrollbar drag / `PgUp` `PgDn` / `Ctrl+Up/Down`**: Scroll conversation history and approval diffs; hold **`Shift` + drag** to select terminal text.
@@ -185,8 +196,11 @@ desk -p "Audit this repository and list the top 3 risks" > report.md
 # Pipe a diff over stdin and auto-approve workspace edits + read-only commands
 git diff | desk -p - --approval edit
 
-# Emit structured JSON (status, reply, tokens, elapsed_seconds, tools trace)
+# Emit structured JSON (status, reply, tokens, usage split into input / cache_read / output, elapsed_seconds, tools trace)
 desk --json -p "Run the test suite and fix any failing test" --approval edit --max-steps 25
+
+# Plan mode: investigate and print the implementation plan without changing files
+desk --plan -p "Add rate limiting to the login module and propose the changes" > plan.md
 
 # Machine-readable environment health check
 desk doctor --json
@@ -194,6 +208,12 @@ desk doctor --json
 
 - **Approval flags**: `--approval ask` (default) | `--approval edit` (auto-approves workspace file edits and safe read-only commands) | `--approval full` (alias `--yes`; combine with `--no-sandbox` when needed).
 - **Exit codes**: `0` completed · `1` not completed (including `approval_required` when no interactive TTY is available) · `2` usage error · `130` interrupted.
+
+---
+
+## Agent Benchmarks
+
+[`bench/`](bench/README.md) provides reproducible scoring: an offline local task suite (`python3 bench/run_local.py`, model chosen through `DESK_*` variables, run with isolated configuration directories, reporting pass rate, time and tokens) and a Terminal-Bench 2.0 / Harbor adapter.
 
 ---
 

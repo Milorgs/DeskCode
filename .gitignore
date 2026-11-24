@@ -14,3 +14,4 @@ mcp.json
 /dist/
 *.exe
 *.pdb
+bench/results/

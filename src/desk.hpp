@@ -31,7 +31,7 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.14.3"
+#define VERSION "1.15.0"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -45,12 +45,35 @@ struct JsonDeleter {
     void operator()(J *value) const noexcept { json_object_put(value); }
 };
 using JsonPtr = std::unique_ptr<J,JsonDeleter>;
+// Tokens a provider reported, split the way providers bill them. cost is in
+// the profile's own currency and only meaningful when priced is true.
+struct TokenUsage {
+    std::uint64_t input=0,output=0,cache_read=0;
+    double cost=0;
+    bool priced=false;
+    static std::uint64_t sum(std::uint64_t left,std::uint64_t right){
+        return right>UINT64_MAX-left?UINT64_MAX:left+right;
+    }
+    void add(const TokenUsage &other){
+        input=sum(input,other.input);
+        output=sum(output,other.output);
+        cache_read=sum(cache_read,other.cache_read);
+        cost+=other.cost;
+        priced=priced||other.priced;
+    }
+    std::uint64_t total() const {return sum(sum(input,output),cache_read);}
+};
 struct App {
     J *store=nullptr, *config=nullptr, *messages=nullptr;
     char root[PATH_MAX]{}, config_dir[PATH_MAX]{}, error[512]{};
     bool yes=false, auto_edit=false, shell=true, desktop=false, record=false, verbose=false, progress_visible=false;
     bool progress_animated=false;
     bool conversation_worker=false, guided_approval=false;
+    // Plan mode: only read-only tools plus submit_plan are offered, so the
+    // model investigates and proposes before anything changes.
+    bool plan_mode=false;
+    // Set when the current turn ended by submitting a plan for review.
+    bool plan_submitted=false;
     std::string conversation_id{};
     size_t session_revision=0;
     size_t config_revision=0;
@@ -69,6 +92,13 @@ struct App {
     // Tokens reported by the provider during the current task, so the live
     // status line and the closing summary can show them.
     std::uint64_t task_tokens=0;
+    // The same tokens split by kind for this turn and for the whole worker
+    // lifetime (one conversation), with the cost when the profile is priced.
+    TokenUsage turn_usage{},session_usage{};
+    // The model's own checklist for multi-step work (todo_write); owned.
+    J *todos=nullptr;
+    // Commands left running in the background (run_shell background or Ctrl+B).
+    void *shell_data=nullptr;
     bool progress_line=false;
     CurlHandle api_http{};
     // Headless runs (stdout redirected or --json): the final reply goes to
@@ -243,4 +273,26 @@ int run_task(App *a,const char *task);
 J *context(App *a,J *tools,bool *compacted=nullptr);
 void save_record(App *a);
 void app_cleanup(App *a);
+// Token accounting and optional per-profile prices (price_input,
+// price_output, price_cache_read per million tokens; price_currency).
+TokenUsage usage_from_response(J *usage,bool native,J *config);
+bool usage_priced(J *config);
+std::string usage_cost_label(J *config,double cost);
+// The model's checklist for multi-step work.
+J *tool_todo_write(App *app,J *args);
+std::string todo_progress(J *todos);
+std::string todo_render(J *todos,bool color);
+// Plan mode: tools that cannot change anything outside the conversation.
+bool plan_safe_tool(const char *name);
+// Checkpoints: restore the files changed by the given turns, newest first.
+bool undo_turns(App &app,const std::vector<std::string> &turn_ids,std::string &summary);
+// Drop the transcript and context from the user message of turn_id onward.
+bool history_rewind(App &app,const std::string &turn_id);
+// Background commands started by run_shell(background) or Ctrl+B.
+extern std::atomic<bool> background_requested;
+J *start_background_command(App *a,const char *command);
+J *tool_shell_output(App *a,J *args);
+J *tool_shell_kill(App *a,J *args);
+size_t background_shell_count(App *a);
+void shells_destroy(App *a);
 #endif

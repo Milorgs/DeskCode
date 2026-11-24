@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <functional>
 #include <filesystem>
+#include <thread>
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -562,20 +563,20 @@ static void test_context_and_validation(void){
 }
 static void test_tool_configuration(){
     App a=fresh();a.shell=true;a.desktop=true;
-    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==15);
+    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==18);
     // Mutating one caller's schema must not change validation or other callers.
     json_object_object_del(get(get(get(at(enabled.get(),0),"function"),"parameters"),"properties"),"path");
     JsonPtr untouched(schemas(&a));
     CHECK(get(get(get(get(at(untouched.get(),0),"function"),"parameters"),"properties"),"path"));
     JsonPtr empty(obj()),result(tool_call(&a,"list_files",empty.get()));CHECK(tool_failed(result.get()));
     a.shell=false;a.desktop=false;
-    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==10);
+    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==11);
     JsonPtr shell_args(obj());put(shell_args.get(),"command",str("exit 0"));
     result.reset(tool_call(&a,"run_shell",shell_args.get()));CHECK(tool_failed(result.get()));
     JsonPtr desktop_args(obj());put(desktop_args.get(),"app",str(""));
     result.reset(tool_call(&a,"desktop_snapshot",desktop_args.get()));CHECK(tool_failed(result.get()));
-    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==11);
-    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==10);
+    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==14);
+    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==11);
     a.subagent=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==4);
     JsonPtr research_args(obj());put(research_args.get(),"question",str("nested?"));
     result.reset(tool_call(&a,"delegate_research",research_args.get()));CHECK(tool_failed(result.get()));
@@ -2655,7 +2656,7 @@ static void test_mcp(){
     child=restarted;
     JsonPtr failed(mcp_call(a,fail.c_str(),input.get()));CHECK(tool_failed(failed.get()));
     CHECK(!workflow(&a,{model_tool("external",echo.c_str(),copy(input.get())),model_reply(nullptr,"MCP model integration complete")}));
-    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==13);
+    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==16);
     JsonPtr follow(capture(&a,1));J *messages=get(get(follow.get(),"body"),"messages");CHECK(strstr(sget(at(messages,alen(messages)-1),"content"),"MCP_ECHO_OK"));
     mcp_close(a);CHECK(kill(child,0)<0&&errno==ESRCH);
     put(get(loaded.get(),"fixture"),"disabled",json_object_new_boolean(true));CHECK(mcp_save(a,loaded.get()));CHECK(mcp_prepare(a));tools.reset(mcp_tools(a));CHECK(alen(tools.get())==0);
@@ -3588,6 +3589,266 @@ static void test_v1_14_features(){
     app_cleanup(&a);
 }
 
+static void test_v1_15_features(){
+    // 1. Usage is split the way providers bill it, and priced only when asked.
+    {
+        JsonPtr priced(config("priced","openai"));
+        put(priced.get(),"price_input",json_object_new_double(2));
+        put(priced.get(),"price_output",json_object_new_double(8));
+        put(priced.get(),"price_cache_read",json_object_new_double(0.5));
+        put(priced.get(),"price_currency",str("CNY"));
+        JsonPtr openai(json_tokener_parse(R"({"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":60}})"));
+        TokenUsage used=usage_from_response(openai.get(),false,priced.get());
+        CHECK(used.input==40&&used.cache_read==60&&used.output==20&&used.total()==120);
+        CHECK(used.priced&&used.cost>0.000269&&used.cost<0.000271);
+        CHECK(usage_cost_label(priced.get(),used.cost)=="≈¥0.0003");
+        JsonPtr plain(config("plain","openai"));
+        used=usage_from_response(openai.get(),false,plain.get());
+        CHECK(!used.priced&&used.cost==0);
+        JsonPtr deepseek(json_tokener_parse(R"({"prompt_tokens":50,"completion_tokens":5,"prompt_cache_hit_tokens":30})"));
+        used=usage_from_response(deepseek.get(),false,plain.get());
+        CHECK(used.input==20&&used.cache_read==30&&used.output==5);
+        JsonPtr total_only(json_tokener_parse(R"({"total_tokens":17})"));
+        used=usage_from_response(total_only.get(),false,plain.get());
+        CHECK(used.total()==17);
+        JsonPtr native(json_tokener_parse(R"({"input_tokens":10,"cache_creation_input_tokens":5,"cache_read_input_tokens":100,"output_tokens":7})"));
+        used=usage_from_response(native.get(),true,plain.get());
+        CHECK(used.input==15&&used.cache_read==100&&used.output==7&&used.total()==122);
+        JsonPtr router(json_tokener_parse(R"({"prompt_tokens":10,"completion_tokens":2,"cost":0.0125})"));
+        used=usage_from_response(router.get(),false,plain.get());
+        CHECK(used.priced&&used.cost==0.0125&&usage_cost_label(plain.get(),used.cost)=="≈$0.013");
+        // The worker reports both counters to the controller in one event.
+        App wire;wire.turn_usage={1,2,3,0.5,true};wire.session_usage={10,20,30,1.25,true};
+        const auto event=usage_event(wire);
+        CHECK(event.size()==USAGE_EVENT_SIZE&&event[0]=='u');
+        TokenUsage turn,session;parse_usage_event(event.data(),turn,session);
+        CHECK(turn.input==1&&turn.output==2&&turn.cache_read==3&&turn.cost==0.5&&turn.priced);
+        CHECK(session.input==10&&session.output==20&&session.cache_read==30&&session.cost==1.25&&session.priced);
+    }
+    // 2. todo_write keeps one checklist and renders it.
+    {
+        App a=fresh();
+        JsonPtr list(json_tokener_parse(R"({"todos":[{"content":"Read the code","status":"completed"},{"content":"Fix the bug","status":"in_progress"},{"content":"Run tests","status":"pending"}]})"));
+        JsonPtr result(tool_call(&a,"todo_write",list.get()));
+        CHECK(!tool_failed(result.get())&&iget(result.get(),"total",0)==3&&iget(result.get(),"completed",0)==1);
+        CHECK(alen(a.todos)==3&&todo_progress(a.todos)=="1/3");
+        const std::string shown=todo_render(a.todos,false);
+        CHECK(shown.find("1/3")!=std::string::npos&&shown.find("[x] Read the code")!=std::string::npos);
+        CHECK(shown.find("[~] Fix the bug")!=std::string::npos&&shown.find("[ ] Run tests")!=std::string::npos);
+        JsonPtr bad(json_tokener_parse(R"({"todos":[{"content":"x","status":"done"}]})"));
+        result.reset(tool_call(&a,"todo_write",bad.get()));CHECK(tool_failed(result.get()));
+        JsonPtr empty(json_tokener_parse(R"({"todos":[]})"));
+        result.reset(tool_call(&a,"todo_write",empty.get()));CHECK(tool_failed(result.get()));
+        CHECK(alen(a.todos)==3);
+        app_cleanup(&a);
+    }
+    // 3. Plan mode offers only read-only tools and ends the turn with a plan.
+    {
+        App a=fresh();a.shell=true;a.desktop=true;a.plan_mode=true;
+        JsonPtr tools(schemas(&a));CHECK(alen(tools.get())==13);
+        bool has_submit=false,has_write=false;
+        for(size_t i=0;i<alen(tools.get());i++){
+            const char *name=sget(get(at(tools.get(),i),"function"),"name");
+            has_submit|=!strcmp(name,"submit_plan");
+            has_write|=!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"desktop_action");
+        }
+        CHECK(has_submit&&!has_write);
+        a.desktop=false;
+        J *write=args("planned.txt");put(write,"content",str("x"));put(write,"expected_sha256",nullptr);
+        JsonPtr write_args(write),result(tool_call(&a,"write_file",write_args.get()));CHECK(tool_failed(result.get()));
+        JsonPtr touch(command("touch planned.txt"));result.reset(tool_call(&a,"run_shell",touch.get()));
+        CHECK(tool_failed(result.get())&&strstr(sget(result.get(),"error"),"计划模式"));
+        JsonPtr list(command("ls"));result.reset(tool_call(&a,"run_shell",list.get()));
+        CHECK(!tool_failed(result.get())&&iget(result.get(),"exit_code",-1)==0);
+        CHECK(access((std::string(a.root)+"/planned.txt").c_str(),F_OK)!=0);
+        JsonPtr plan(obj());put(plan.get(),"plan",str("# Plan\n1. Edit main.cpp"));
+        CHECK(!workflow(&a,{model_tool("plan","submit_plan",copy(plan.get()))}));
+        CHECK(a.plan_submitted&&!strcmp(a.state,"本轮结束"));
+        J *last=at(a.messages,alen(a.messages)-1);
+        CHECK(!strcmp(sget(last,"role"),"assistant")&&!strcmp(sget(last,"content"),"# Plan\n1. Edit main.cpp"));
+        JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");
+        bool offered=false;
+        for(size_t i=0;i<alen(defs);i++)offered|=!strcmp(sget(get(at(defs,i),"function"),"name"),"submit_plan");
+        CHECK(offered);
+        CHECK(!get(get(request.get(),"body"),"system"));
+        // Outside plan mode the tool is not offered and refuses to run.
+        a.plan_mode=false;
+        result.reset(tool_call(&a,"submit_plan",plan.get()));CHECK(tool_failed(result.get()));
+        app_cleanup(&a);
+    }
+    // 4. Headless --plan returns the plan as the reply, with split usage.
+    {
+        App a=fresh();json_object_put(a.config);a.config=config("headless-plan","openai");
+        J *plan=obj();put(plan,"plan",str("PLAN_BODY"));
+        std::string reply=model_tool("p","submit_plan",plan);
+        reply.insert(reply.size()-1,R"(,"usage":{"prompt_tokens":30,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":10}})");
+        const char *responses[]={reply.c_str()};
+        pid_t server=fake_server(&a,responses,1);
+        auto run=run_desk({"--json","--plan","--lang","en","--workspace",a.root,"-p","plan it"},model_environment(a),"");
+        server_done(server);
+        JsonPtr result(json_tokener_parse(run.out.c_str()));
+        CHECK(result&&run.status==0);
+        CHECK(!strcmp(sget(result.get(),"reply"),"PLAN_BODY")&&bget(result.get(),"plan_submitted"));
+        J *usage=get(result.get(),"usage");
+        CHECK(iget(usage,"input",0)==20&&iget(usage,"cache_read",0)==10&&iget(usage,"output",0)==4&&!get(usage,"cost"));
+        CHECK(iget(result.get(),"tokens",0)==34);
+        app_cleanup(&a);
+    }
+    // 5. Background commands: started by the model or detached with Ctrl+B.
+    {
+        App a=fresh();a.shell=true;a.yes=true;
+        JsonPtr start(command("echo started; sleep 30"));put(start.get(),"background",json_object_new_boolean(1));
+        JsonPtr result(tool_call(&a,"run_shell",start.get()));
+        CHECK(!tool_failed(result.get())&&!strcmp(sget(result.get(),"shell_id"),"bash-1")&&bget(result.get(),"running"));
+        CHECK(background_shell_count(&a)==1);
+        JsonPtr id(obj());put(id.get(),"shell_id",str("bash-1"));
+        std::string seen=sget(result.get(),"output");
+        for(double until=monotime()+5;seen.find("started")==std::string::npos&&monotime()<until;usleep(50000)){
+            JsonPtr state(tool_call(&a,"shell_output",id.get()));seen+=sget(state.get(),"output");
+        }
+        CHECK(seen.find("started")!=std::string::npos);
+        JsonPtr stopped(tool_call(&a,"shell_kill",id.get()));
+        CHECK(!bget(stopped.get(),"running")&&bget(stopped.get(),"killed"));
+        CHECK(background_shell_count(&a)==0);
+        JsonPtr quick(command("echo early; exit 3"));put(quick.get(),"background",json_object_new_boolean(1));
+        result.reset(tool_call(&a,"run_shell",quick.get()));
+        CHECK(!get(result.get(),"shell_id")&&iget(result.get(),"exit_code",0)==3&&strstr(sget(result.get(),"output"),"early"));
+        JsonPtr unknown(obj());put(unknown.get(),"shell_id",str("bash-99"));
+        result.reset(tool_call(&a,"shell_output",unknown.get()));CHECK(tool_failed(result.get()));
+        // Ctrl+B reaches the worker as a flag; the running command is detached.
+        std::thread detach([]{usleep(400000);background_requested=true;});
+        const double began=monotime();
+        result.reset(run_command(&a,"echo detached; sleep 20",30000));
+        detach.join();
+        CHECK(monotime()-began<5);
+        CHECK(bget(result.get(),"moved_to_background")&&!strcmp(sget(result.get(),"shell_id"),"bash-2")&&bget(result.get(),"running"));
+        CHECK(background_shell_count(&a)==1);
+        app_cleanup(&a);
+        CHECK(a.shell_data==nullptr);
+    }
+    // 6. Checkpoints: file changes of several turns come back newest first,
+    // and another conversation's later edits are never overwritten.
+    {
+        App a=fresh();a.yes=true;
+        const std::string path=std::string(a.root)+"/story.txt";
+        CHECK(!atomic_file(path.c_str(),"v1\n",3,0644));
+        auto edit=[&](const char *turn,const char *from,const char *to){
+            a.turn_id=turn;
+            JsonPtr read(tool_call(&a,"read_file",JsonPtr(args("story.txt")).get()));
+            JsonPtr change(args("story.txt"));
+            put(change.get(),"old_text",str(from));put(change.get(),"new_text",str(to));
+            put(change.get(),"expected_sha256",str(sget(read.get(),"sha256")));
+            JsonPtr done(tool_call(&a,"edit_file",change.get()));CHECK(!tool_failed(done.get()));
+        };
+        const char *first="11111111111111111111111111111111",*second="22222222222222222222222222222222",*other="33333333333333333333333333333333";
+        edit(first,"v1","v2");
+        edit(second,"v2","v3");
+        a.turn_id=second;
+        JsonPtr created(args("created.txt"));put(created.get(),"content",str("new"));put(created.get(),"expected_sha256",nullptr);
+        JsonPtr wrote(tool_call(&a,"write_file",created.get()));CHECK(!tool_failed(wrote.get()));
+        std::string summary;
+        CHECK(undo_turns(a,{second,first},summary));
+        char *restored=read_bytes(path.c_str(),64,nullptr);CHECK(restored&&!strcmp(restored,"v1\n"));free(restored);
+        CHECK(access((std::string(a.root)+"/created.txt").c_str(),F_OK)!=0);
+        CHECK(summary.find("2")!=std::string::npos);
+        CHECK(undo_turns(a,{first},summary));
+        edit(first,"v1","v2");
+        edit(other,"v2","v3");
+        CHECK(!undo_turns(a,{first},summary));
+        restored=read_bytes(path.c_str(),64,nullptr);CHECK(restored&&!strcmp(restored,"v3\n"));free(restored);
+        app_cleanup(&a);
+    }
+    // 7. history_rewind cuts the saved context and transcript at a request.
+    {
+        App a=fresh();
+        const char *id="44444444444444444444444444444444";
+        CHECK(history_save(a,id,"Rewind me",a.config));
+        a.conversation_id=id;
+        auto user=[&](const char *text,const char *turn){
+            J *m=obj();put(m,"role",str("user"));put(m,"content",str(text));put(m,"_turn",str(turn));add(a.messages,m);
+            J *r=obj();put(r,"role",str("assistant"));put(r,"content",str((std::string("reply to ")+text).c_str()));add(a.messages,r);
+        };
+        user("first request","aaaa");
+        user("second request","bbbb");
+        user("third request","cccc");
+        history_checkpoint(a,0);
+        CHECK(!history_rewind(a,"missing"));
+        CHECK(history_rewind(a,"bbbb"));
+        CHECK(alen(a.messages)==2&&!strcmp(sget(at(a.messages,0),"content"),"first request"));
+        JsonPtr record(history_read(a,id));
+        CHECK(alen(get(record.get(),"transcript"))==2&&alen(get(record.get(),"context"))==2);
+        app_cleanup(&a);
+    }
+}
+static void test_plan_rewind_session(){
+    // End to end through the conversation worker: /plan, submit_plan, /go,
+    // /price and /cost, then /rewind replaces the worker's context.
+    App a=fresh();json_object_put(a.config);a.config=config("plan-session","openai");
+    J *plan=obj();put(plan,"plan",str("PLAN_STEPS: edit and verify"));
+    std::string planned=model_tool("plan","submit_plan",plan);
+    planned.insert(planned.size()-1,R"(,"usage":{"prompt_tokens":1000000,"completion_tokens":0})");
+    const std::string implemented=model_reply(nullptr,"IMPLEMENTED"),again=model_reply(nullptr,"AGAIN_DONE");
+    const char *responses[]={planned.c_str(),implemented.c_str(),again.c_str()};
+    pid_t server=fake_server(&a,responses,3);
+    CHECK(!save_config(&a,a.config));
+    int master=-1;pid_t child=forkpty(&master,nullptr,nullptr,nullptr);CHECK(child>=0);
+    if(!child){execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
+    std::string output;
+    CHECK(write(master,"1\n1\n",4)==4);CHECK(terminal_until(master,output,"Approval: Ask for approval\r\n❯ "));
+    output.clear();type_terminal(master,output,"/price 2 8 USD\n");
+    CHECK(terminal_until(master,output,"Prices saved for this model"));
+    output.clear();type_terminal(master,output,"/plan\n");
+    CHECK(terminal_until(master,output,"Plan mode on"));
+    CHECK(terminal_until(master,output,"\r\n❯ "));
+    output.clear();type_terminal(master,output,"design it\n");
+    CHECK(terminal_until(master,output,"Plan (awaiting approval)"));
+    CHECK(terminal_until(master,output,"PLAN_STEPS"));
+    CHECK(terminal_until(master,output,"Plan awaiting approval"));
+    CHECK(terminal_until(master,output,"$2.00"));
+    wait_for_chat_prompt(master,output,"Plan awaiting approval");
+    output.clear();type_terminal(master,output,"/go\n");
+    CHECK(terminal_until(master,output,"IMPLEMENTED"));
+    wait_for_chat_prompt(master,output,"IMPLEMENTED");
+    output.clear();type_terminal(master,output,"/cost\n");
+    CHECK(terminal_until(master,output,"Usage and cost"));
+    CHECK(terminal_until(master,output,"Estimated cost: ≈$2.00"));
+    CHECK(terminal_until(master,output,"\r\n❯ "));
+    output.clear();type_terminal(master,output,"/rewind\n");
+    CHECK(terminal_until(master,output,"Rewind to before which request?"));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    CHECK(output.find("The plan is approved")<output.find("design it"));
+    output.clear();type_terminal(master,output,"2\n");
+    CHECK(terminal_until(master,output,"Conversation only"));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    output.clear();type_terminal(master,output,"2\n");
+    CHECK(terminal_until(master,output,"Rewound to before the selected request"));
+    CHECK(terminal_until(master,output,"\r\n❯ "));
+    output.clear();type_terminal(master,output,"again\n");
+    CHECK(terminal_until(master,output,"AGAIN_DONE"));
+    wait_for_chat_prompt(master,output,"AGAIN_DONE");
+    leave_chat_and_exit(master);
+    CHECK(reap_pty(master,child)==0);
+    server_done(server);
+    auto names=[](J *request){
+        std::string joined;
+        J *defs=get(get(request,"body"),"tools");
+        for(size_t i=0;i<alen(defs);i++){joined+=sget(get(at(defs,i),"function"),"name");joined+=' ';}
+        return joined;
+    };
+    JsonPtr first(capture(&a,0)),second(capture(&a,1)),third(capture(&a,2));
+    CHECK(names(first.get()).find("submit_plan")!=std::string::npos&&names(first.get()).find("write_file")==std::string::npos);
+    CHECK(names(second.get()).find("submit_plan")==std::string::npos&&names(second.get()).find("write_file")!=std::string::npos);
+    J *messages=get(get(second.get(),"body"),"messages");
+    CHECK(!strcmp(sget(at(messages,alen(messages)-1),"content"),"The plan is approved. Implement it now and verify the result when done."));
+    CHECK(!strcmp(sget(at(messages,alen(messages)-2),"content"),"PLAN_STEPS: edit and verify"));
+    // After the rewind the worker starts from an empty context.
+    messages=get(get(third.get(),"body"),"messages");
+    CHECK(alen(messages)==1&&!strcmp(sget(at(messages,0),"content"),"again"));
+    App reloaded;CHECK(!store_load(&reloaded));
+    CHECK(json_object_get_double(get(get(get(reloaded.store,"profiles"),"plan-session"),"price_input"))==2);
+    app_cleanup(&reloaded);
+    app_cleanup(&a);
+}
 int main(int argc,char **argv){
     if(argc==2&&!strcmp(argv[1],"--mcp-fixture"))return mcp_fixture();
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -3627,6 +3888,8 @@ int main(int argc,char **argv){
     RUN_STEP(test_mentions_paste_and_multimodal());
     RUN_STEP(test_v1_13_features());
     RUN_STEP(test_v1_14_features());
+    RUN_STEP(test_v1_15_features());
+    RUN_STEP(test_plan_rewind_session());
     RUN_STEP(test_chat_actions_layout());
     RUN_STEP(test_menu_navigation_and_resize());
     RUN_STEP(test_persistent_conversations());

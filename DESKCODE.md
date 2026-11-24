@@ -13,7 +13,9 @@ make install               # 跑 ./install.sh，装到 ~/.local/bin/desk
 ```
 
 - **测试必须带 `DESK_NO_ARROW=1`**（Makefile 的 `test` 目标已内置，对应 `.github/workflows/test.yml`），用于验证编号菜单输出。
-- **当前回归断言基线**：约 **4925–4955** 项（随并发/时序有微小浮动，判断回归以是否存在 `FAIL` 为准）。
+- **当前回归断言基线**：约 **5130–5150** 项（随并发/时序有微小浮动，判断回归以是否存在 `FAIL` 为准）。
+- **Agent 跑分**：`bench/`（`python3 bench/run_local.py --self-test` 校验任务集；真实跑分需 `DESK_*` 环境变量，结果写入 `bench/results/`，不要提交）。
+- **1.15 交互要点**：计划模式（`App::plan_mode`，经 `conversation_settings` 下发 worker）只开放 `plan_safe_tool()` 与只读命令；`/rewind` 依赖用户消息上的内部字段 `_turn`（下划线字段不会发给服务商）与 undo 日志轮次 ID；worker 用 `'u'` 事件（`USAGE_EVENT_SIZE` 字节）上报拆分词元与费用；`Ctrl+B` 通过 `SIGUSR1` 设置 `background_requested`。
 - **项目指令与扩展约定**：`DeskCode` 启动任务时自动加载工作区根目录的 `DESKCODE.md` / `deskcode.md`（并兼容 `AGENTS.md`；可通过 `DESK_NO_PROJECT_GUIDE=1` 关闭），支持 `.deskcode/commands/*.md` 与 `.desk-agent/commands/*.md` 自定义斜杠指令以及 `hooks.json`（`pre_shell` / `post_edit`）。
 
 ## 真实运行环境与桌面常驻窗口

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <stdexcept>
 std::atomic<int> interrupted{0};
+std::atomic<bool> background_requested{false};
 std::atomic<bool> input_closed{false};
 std::string elapsed_label(double seconds){
     auto elapsed=static_cast<unsigned long long>(seconds>0?seconds:0);
@@ -145,6 +146,7 @@ void seterr(App *a,const char *m){
 double monotime(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 void id_string(char out[33]){unsigned char bytes[16];if(RAND_bytes(bytes,16)!=1)throw std::runtime_error("Random generation failed");for(size_t i=0;i<16;i++)snprintf(out+i*2,3,"%02x",bytes[i]);}
 void app_cleanup(App *a){
+    shells_destroy(a);
     mcp_close(*a);
     a->api_http.reset();
     desktop_destroy(a);
@@ -152,6 +154,8 @@ void app_cleanup(App *a){
     json_object_put(a->config);
     json_object_put(a->messages);
     json_object_put(a->trace);
+    json_object_put(a->todos);
+    a->todos=nullptr;
     a->trace=nullptr;
 }
 size_t alen(J *j){
