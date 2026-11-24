@@ -2081,7 +2081,7 @@ static void test_menu_navigation_and_resize(){
     CHECK(terminal_until(master,output,"❯ 1. Item 1"));
     output.clear();
     CHECK(write(master,"\x1b",1)==1);
-    usleep(80000);
+    usleep(25000);
     CHECK(write(master,"[B",2)==2);
     CHECK(terminal_until(master,output,"❯ 2. Item 2"));
     window.ws_row=6;window.ws_col=35;
@@ -4784,7 +4784,7 @@ static void test_v1_18_features(){
                 }
                 free(line);
                 std::string body(clen>0&&clen<262144?static_cast<size_t>(clen):0,'\0');
-                if(!body.empty())(void)fread(body.data(),1,body.size(),fp);
+                if(!body.empty()&&fread(body.data(),1,body.size(),fp)!=body.size()){fclose(fp);continue;}
                 const bool has_tool=body.find("\"role\":\"tool\"")!=std::string::npos||body.find("\"role\": \"tool\"")!=std::string::npos;
                 std::string resp=has_tool
                     ?R"({"choices":[{"index":0,"message":{"role":"assistant","content":"SERVE_SHARED_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25}})"

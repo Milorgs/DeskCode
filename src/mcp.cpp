@@ -1101,13 +1101,13 @@ void open_browser_best_effort(const std::string &url){
 #endif
 }
 std::string query_param(std::string_view query,std::string_view key){
-    for(size_t pos=0;pos<query.size();){
-        auto amp=query.find('&',pos);
-        std::string_view pair=query.substr(pos,amp==std::string_view::npos?std::string_view::npos:amp-pos);
+    while(!query.empty()){
+        auto amp=query.find('&');
+        std::string_view pair=amp==std::string_view::npos?query:query.substr(0,amp);
         auto eq=pair.find('=');
         if(eq!=std::string_view::npos&&pair.substr(0,eq)==key)return url_decode(pair.substr(eq+1));
         if(amp==std::string_view::npos)break;
-        pos=amp+1;
+        query.remove_prefix(amp+1);
     }
     return {};
 }

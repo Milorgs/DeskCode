@@ -104,7 +104,11 @@ void notify_user_event(const App &app,const char *title,const char *body){
         put(entry.get(),"title",str(safe_title.c_str()));
         put(entry.get(),"body",str(safe_body.c_str()));
         std::string line=json_str(entry.get())+"\n";
+#ifdef _WIN32
+        FILE *fp=_wfopen(wide(cap).c_str(),L"ab");
+#else
         FILE *fp=fopen(cap,"ab");
+#endif
         if(fp){fwrite(line.data(),1,line.size(),fp);fclose(fp);}
         return;
     }
@@ -610,13 +614,13 @@ void send_json(SockFd fd,int status,const char *reason,J *body){
 }
 
 std::string query_value(std::string_view qs,std::string_view key){
-    for(size_t p=0;p<qs.size();){
-        auto amp=qs.find('&',p);
-        std::string_view kv=qs.substr(p,amp==std::string_view::npos?std::string_view::npos:amp-p);
+    while(!qs.empty()){
+        auto amp=qs.find('&');
+        std::string_view kv=amp==std::string_view::npos?qs:qs.substr(0,amp);
         auto eq=kv.find('=');
         if(eq!=std::string_view::npos&&kv.substr(0,eq)==key)return std::string(kv.substr(eq+1));
         if(amp==std::string_view::npos)break;
-        p=amp+1;
+        qs.remove_prefix(amp+1);
     }
     return {};
 }
