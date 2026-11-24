@@ -489,6 +489,8 @@ void handle_request(App &base,J *message){
         app->messages=arr();
         app->shell=base.shell;
         app->sandbox=base.sandbox;
+        app->sandbox_no_net=base.sandbox_no_net;
+        app->notify=base.notify;
         app->max_steps=base.max_steps;
         app->json_output=true;
         app->state="等待任务";

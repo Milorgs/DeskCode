@@ -4481,6 +4481,395 @@ static void test_plan_rewind_session(){
     app_cleanup(&reloaded);
     app_cleanup(&a);
 }
+static void test_v1_18_features(){
+    // 1. Cross-platform sandbox backend + kernel network isolation (--no-net / sandbox_no_net).
+    {
+        App a=fresh();a.yes=true;
+        CHECK(sandbox_net_supported());
+#ifdef __linux__
+        CHECK(!strcmp(sandbox_backend(),sandbox_supported()?"landlock":"seccomp"));
+#elif defined(__APPLE__)
+        CHECK(sandbox_supported()&&!strcmp(sandbox_backend(),"seatbelt"));
+        if(const char *home=getenv("HOME");home&&*home&&strncmp(home,"/tmp",4)&&strncmp(home,"/private/tmp",12)&&access(home,W_OK)==0){
+            std::string probe=std::string(home)+"/.desk-seatbelt-probe-"+std::to_string(getpid());
+            unlink(probe.c_str());
+            a.sandbox=true;
+            JsonPtr blocked(run_command(&a,("echo nope > \""+probe+"\"").c_str(),5000));
+            CHECK(iget(blocked.get(),"exit_code",0)!=0&&access(probe.c_str(),F_OK)!=0);
+            a.sandbox=false;
+            JsonPtr allowed(run_command(&a,("echo ok > \""+probe+"\"").c_str(),5000));
+            CHECK(iget(allowed.get(),"exit_code",-1)==0&&access(probe.c_str(),F_OK)==0);
+            unlink(probe.c_str());
+            a.sandbox=true;
+        }
+#endif
+        // Spin up a local TCP listener and verify bash TCP connection works without --no-net and is kernel-blocked with --no-net.
+        int tcp_fd=socket(AF_INET,SOCK_STREAM,0);
+        CHECK(tcp_fd>=0);
+        sockaddr_in tcp_addr{};
+        tcp_addr.sin_family=AF_INET;
+        tcp_addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(!bind(tcp_fd,reinterpret_cast<sockaddr *>(&tcp_addr),sizeof tcp_addr));
+        socklen_t tcp_len=sizeof tcp_addr;
+        CHECK(!getsockname(tcp_fd,reinterpret_cast<sockaddr *>(&tcp_addr),&tcp_len));
+        CHECK(!listen(tcp_fd,8));
+        const int tcp_port=ntohs(tcp_addr.sin_port);
+        std::atomic<bool> stop_tcp{false};
+        std::thread tcp_accepter([tcp_fd,&stop_tcp]{
+            while(!stop_tcp){
+                pollfd pfd{tcp_fd,POLLIN,0};
+                if(poll(&pfd,1,40)<=0)continue;
+                int c=accept(tcp_fd,nullptr,nullptr);
+                if(c>=0)close(c);
+            }
+        });
+
+        std::string connect_cmd="(exec 3<>/dev/tcp/127.0.0.1/"+std::to_string(tcp_port)+")";
+        a.sandbox_no_net=false;
+        JsonPtr net_ok(run_command(&a,connect_cmd.c_str(),5000));
+        CHECK(iget(net_ok.get(),"exit_code",-1)==0);
+
+        a.sandbox_no_net=true;
+        JsonPtr net_blocked(run_command(&a,connect_cmd.c_str(),5000));
+        CHECK(iget(net_blocked.get(),"exit_code",0)!=0);
+        // Workspace writes & local pipes still succeed while network is blocked!
+        JsonPtr local_ok(run_command(&a,"printf 'offline_ok' | cat > offline.txt",5000));
+        CHECK(iget(local_ok.get(),"exit_code",-1)==0&&fs::exists(fs_path(std::string(a.root)+"/offline.txt")));
+
+        stop_tcp=true;
+        if(tcp_accepter.joinable())tcp_accepter.join();
+        close(tcp_fd);
+
+        auto doc_res=run_desk({"doctor","--json","--no-net","--workspace",a.root},{},"");
+        JsonPtr doc_json(json_tokener_parse(doc_res.out.c_str()));
+        CHECK(doc_json&&bget(doc_json.get(),"sandbox_net_support")&&bget(doc_json.get(),"sandbox_no_net"));
+        CHECK(strlen(sget(doc_json.get(),"sandbox_backend"))>0);
+        app_cleanup(&a);
+    }
+
+    // 2. Complete MCP Protocol: OAuth 2.0 + S256 PKCE + Dynamic Client Reg + Refresh Token + Resources + Prompts.
+    {
+        App a=fresh();a.yes=true;
+        int mfd=socket(AF_INET,SOCK_STREAM,0);
+        CHECK(mfd>=0);
+        sockaddr_in maddr{};
+        maddr.sin_family=AF_INET;
+        maddr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(!bind(mfd,reinterpret_cast<sockaddr *>(&maddr),sizeof maddr));
+        socklen_t mlen=sizeof maddr;
+        CHECK(!getsockname(mfd,reinterpret_cast<sockaddr *>(&maddr),&mlen));
+        CHECK(!listen(mfd,16));
+        const int mport=ntohs(maddr.sin_port);
+        const std::string origin="http://127.0.0.1:"+std::to_string(mport);
+
+        std::atomic<int> refresh_calls{0},reg_calls{0};
+        std::atomic<bool> stop_mcp{false};
+        std::thread mcp_srv([mfd,origin,&refresh_calls,&reg_calls,&stop_mcp]{
+            auto handle=[&](int cfd){
+                FILE *fp=fdopen(cfd,"r+");
+                if(!fp){close(cfd);return;}
+                char *line=nullptr;size_t cap=0;long clen=0;
+                std::string method,path,auth_hdr;
+                if(getline(&line,&cap,fp)>0){
+                    char m[16]{},p[512]{};
+                    if(sscanf(line,"%15s %511s",m,p)==2){method=m;path=p;}
+                    while(getline(&line,&cap,fp)>0&&strcmp(line,"\r\n")&&strcmp(line,"\n")){
+                        if(!strncasecmp(line,"Content-Length:",15))clen=strtol(line+15,nullptr,10);
+                        if(!strncasecmp(line,"Authorization:",14)){
+                            auth_hdr=line+14;
+                            while(!auth_hdr.empty()&&(auth_hdr.front()==' '||auth_hdr.front()=='\t'))auth_hdr.erase(0,1);
+                            while(!auth_hdr.empty()&&(auth_hdr.back()=='\r'||auth_hdr.back()=='\n'))auth_hdr.pop_back();
+                        }
+                    }
+                }
+                free(line);
+                std::string body(clen>0&&clen<262144?static_cast<size_t>(clen):0,'\0');
+                if(!body.empty()&&fread(body.data(),1,body.size(),fp)!=body.size()){fclose(fp);return;}
+                auto reply=[&](int code,const char *reason,const std::string &json_body,const char *extra_hdr=""){
+                    fprintf(fp,"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nConnection: close\r\n%sContent-Length: %zu\r\n\r\n",
+                            code,reason,extra_hdr,json_body.size());
+                    fwrite(json_body.data(),1,json_body.size(),fp);
+                    fflush(fp);
+                };
+                if(path==".well-known/oauth-authorization-server"||path=="/.well-known/oauth-authorization-server"){
+                    reply(200,"OK","{\"authorization_endpoint\":\""+origin+"/authorize\",\"token_endpoint\":\""+origin+"/token\",\"registration_endpoint\":\""+origin+"/register\"}");
+                }else if(path=="/register"&&method=="POST"){
+                    reg_calls++;
+                    reply(201,"Created","{\"client_id\":\"dyn-mcp-client\"}");
+                }else if(path=="/token"&&method=="POST"){
+                    if(body.find("grant_type=authorization_code")!=std::string::npos&&body.find("code=pkce-ok-code")!=std::string::npos&&body.find("code_verifier=")!=std::string::npos&&body.find("client_id=dyn-mcp-client")!=std::string::npos){
+                        reply(200,"OK",R"({"access_token":"tok-initial","refresh_token":"rt-rotate-1","token_type":"Bearer","expires_in":3600})");
+                    }else if(body.find("grant_type=refresh_token")!=std::string::npos&&body.find("refresh_token=rt-rotate-1")!=std::string::npos){
+                        refresh_calls++;
+                        reply(200,"OK",R"({"access_token":"tok-refreshed-ok","refresh_token":"rt-rotate-2","token_type":"Bearer","expires_in":3600})");
+                    }else{
+                        reply(400,"Bad Request",R"({"error":"invalid_grant"})");
+                    }
+                }else if(path=="/mcp"){
+                    if(method=="DELETE"){reply(200,"OK","{}");fclose(fp);return;}
+                    if(auth_hdr!="Bearer tok-refreshed-ok"){reply(401,"Unauthorized",R"({"error":"unauthorized"})");fclose(fp);return;}
+                    JsonPtr rpc(json_tokener_parse(body.c_str()));
+                    const std::string m=sget(rpc.get(),"method");
+                    const int64_t id=json_object_get_int64(get(rpc.get(),"id"));
+                    if(m=="initialize"){
+                        reply(200,"OK","{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(id)+",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"resources\":{},\"prompts\":{}},\"serverInfo\":{\"name\":\"docs-srv\",\"version\":\"1.0\"}}}",
+                              "Mcp-Session-Id: oauth-sess-1\r\n");
+                    }else if(m=="notifications/initialized"){
+                        reply(202,"Accepted","{}");
+                    }else if(m=="resources/list"){
+                        reply(200,"OK","{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(id)+",\"result\":{\"resources\":[{\"uri\":\"mcp://arch/overview.md\",\"name\":\"Overview\",\"description\":\"System architecture doc\",\"mimeType\":\"text/markdown\"}]}}");
+                    }else if(m=="resources/templates/list"){
+                        reply(200,"OK","{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(id)+",\"result\":{\"resourceTemplates\":[{\"uriTemplate\":\"mcp://arch/{module}.md\",\"name\":\"Module doc\"}]}}");
+                    }else if(m=="resources/read"){
+                        reply(200,"OK","{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(id)+",\"result\":{\"contents\":[{\"uri\":\"mcp://arch/overview.md\",\"mimeType\":\"text/markdown\",\"text\":\"# Architecture\\nZero-dependency C++20 core.\"}]}}");
+                    }else if(m=="prompts/list"){
+                        reply(200,"OK","{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(id)+",\"result\":{\"prompts\":[{\"name\":\"summarize\",\"description\":\"Summarize module\",\"arguments\":[{\"name\":\"topic\",\"required\":true}]}]}}");
+                    }else if(m=="prompts/get"){
+                        std::string topic=sget(get(get(rpc.get(),"params"),"arguments"),"topic");
+                        reply(200,"OK","{\"jsonrpc\":\"2.0\",\"id\":"+std::to_string(id)+",\"result\":{\"description\":\"Module summary prompt\",\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Please audit module: "+topic+"\"}}]}}");
+                    }else{
+                        reply(400,"Bad Request","{}");
+                    }
+                }else{
+                    reply(404,"Not Found","{}");
+                }
+                fclose(fp);
+            };
+            std::vector<std::thread> threads;
+            while(!stop_mcp){
+                pollfd pfd{mfd,POLLIN,0};
+                if(poll(&pfd,1,40)<=0)continue;
+                int c=accept(mfd,nullptr,nullptr);
+                if(c>=0)threads.emplace_back(handle,c);
+            }
+            for(auto &t:threads)if(t.joinable())t.join();
+        });
+
+        std::string cfg_json="{\"mcpServers\":{\"docs-srv\":{\"url\":\""+origin+"/mcp\",\"oauth\":{}}}}";
+        CHECK(mcp_import_json(a,cfg_json));
+
+        // Run `desk mcp auth docs-srv` in a child process and complete the loopback PKCE callback!
+        int out_pipe[2];CHECK(pipe(out_pipe)==0);
+        pid_t auth_pid=fork();CHECK(auth_pid>=0);
+        if(auth_pid==0){
+            close(out_pipe[0]);
+            dup2(out_pipe[1],STDOUT_FILENO);
+            close(out_pipe[1]);
+            setenv("DESK_OAUTH_NO_BROWSER","1",1);
+            execl("./build/desk","desk","--workspace",a.root,"mcp","auth","docs-srv",static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        close(out_pipe[1]);
+        std::string auth_stdout;
+        double auth_deadline=monotime()+8.0;
+        while(monotime()<auth_deadline&&auth_stdout.find('\n')==std::string::npos){
+            pollfd pfd{out_pipe[0],POLLIN,0};
+            if(poll(&pfd,1,50)<=0)continue;
+            char buf[1024];ssize_t n=read(out_pipe[0],buf,sizeof buf);
+            if(n<=0)break;
+            auth_stdout.append(buf,static_cast<size_t>(n));
+        }
+        CHECK(auth_stdout.find("Authorization URL: ")!=std::string::npos);
+        CHECK(auth_stdout.find("code_challenge_method=S256")!=std::string::npos);
+        auto extract_q=[&](const char *key)->std::string{
+            std::string needle=std::string(key)+"=";
+            auto pos=auth_stdout.find(needle);
+            if(pos==std::string::npos)return {};
+            pos+=needle.size();
+            auto end=auth_stdout.find_first_of("&\r\n ",pos);
+            std::string raw=auth_stdout.substr(pos,end==std::string::npos?std::string::npos:end-pos);
+            std::string dec;
+            for(size_t i=0;i<raw.size();i++){
+                if(raw[i]=='%'&&i+2<raw.size()){
+                    char h[3]{raw[i+1],raw[i+2],0};
+                    dec+=static_cast<char>(strtol(h,nullptr,16));
+                    i+=2;
+                }else dec+=raw[i];
+            }
+            return dec;
+        };
+        std::string redir=extract_q("redirect_uri"),st_param=extract_q("state");
+        CHECK(redir.starts_with("http://127.0.0.1:")&&!st_param.empty());
+        {
+            CurlHandle cb(curl_easy_init());
+            std::string cb_url=redir+"?code=pkce-ok-code&state="+st_param;
+            auto sink=+[](char *,size_t s,size_t n,void *)->size_t{return s*n;};
+            curl_easy_setopt(cb.get(),CURLOPT_URL,cb_url.c_str());
+            curl_easy_setopt(cb.get(),CURLOPT_WRITEFUNCTION,sink);
+            CHECK(curl_easy_perform(cb.get())==CURLE_OK);
+        }
+        char rem[512];while(read(out_pipe[0],rem,sizeof rem)>0){}
+        close(out_pipe[0]);
+        int auth_st=0;CHECK(waitpid(auth_pid,&auth_st,0)==auth_pid&&WIFEXITED(auth_st)&&WEXITSTATUS(auth_st)==0);
+        CHECK(reg_calls.load()==1);
+
+        // Force token expiry to verify automatic refresh_token rotation during mcp_prepare!
+        const std::string tok_file=std::string(a.config_dir)+"/mcp_tokens.json";
+        struct stat tst{};CHECK(stat(tok_file.c_str(),&tst)==0&&(tst.st_mode&0777)==0600);
+        {
+            char *raw_t=read_bytes(tok_file.c_str(),16384,nullptr);
+            CHECK(raw_t!=nullptr);
+            JsonPtr tdoc(json_tokener_parse(raw_t));free(raw_t);
+            put(get(tdoc.get(),"docs-srv"),"expires_at",json_object_new_int64(1));
+            const char *updated=json_object_to_json_string_ext(tdoc.get(),JSON_C_TO_STRING_PLAIN);
+            CHECK(!atomic_file(tok_file.c_str(),updated,strlen(updated),0600));
+        }
+
+        CHECK(mcp_prepare(a));
+        CHECK(refresh_calls.load()==1);
+        auto sums=mcp_summaries(a);
+        CHECK(sums.size()==1&&sums[0].resources==1&&sums[0].prompts==1&&sums[0].has_token);
+
+        // Resources & prompts tools are available in both normal mode and Plan Mode!
+        a.plan_mode=true;
+        JsonPtr plan_defs(schemas(&a));
+        bool saw_list_res=false,saw_read_res=false,saw_prompt=false;
+        for(size_t i=0;i<alen(plan_defs.get());i++){
+            const char *n=sget(get(at(plan_defs.get(),i),"function"),"name");
+            if(!strcmp(n,"mcp_list_resources"))saw_list_res=true;
+            if(!strcmp(n,"mcp_read_resource"))saw_read_res=true;
+            if(!strcmp(n,"mcp_get_prompt"))saw_prompt=true;
+        }
+        CHECK(saw_list_res&&saw_read_res&&saw_prompt);
+        a.plan_mode=false;
+
+        JsonPtr empty_args(obj());
+        JsonPtr lres(tool_call(&a,"mcp_list_resources",empty_args.get()));
+        CHECK(!tool_failed(lres.get())&&alen(get(lres.get(),"resources"))==1&&alen(get(lres.get(),"resourceTemplates"))==1);
+
+        JsonPtr rargs(obj());put(rargs.get(),"server",str("docs-srv"));put(rargs.get(),"uri",str("mcp://arch/overview.md"));
+        JsonPtr rres(tool_call(&a,"mcp_read_resource",rargs.get()));
+        CHECK(!tool_failed(rres.get())&&strstr(json_object_to_json_string_ext(rres.get(),JSON_C_TO_STRING_PLAIN),"Zero-dependency C++20 core.")!=nullptr);
+
+        std::string exp_prompt,exp_label;
+        CHECK(mcp_expand_prompt(a,"/docs-srv:summarize topic=sandbox",exp_prompt,exp_label));
+        CHECK(exp_label=="/docs-srv:summarize topic=sandbox"&&exp_prompt.find("Please audit module: sandbox")!=std::string::npos);
+
+        auto list_out=run_desk({"--workspace",a.root,"mcp","list"},{},"");
+        CHECK(list_out.status==0&&list_out.out.find("oauth-authenticated")!=std::string::npos);
+        auto out_logout=run_desk({"--workspace",a.root,"mcp","logout","docs-srv"},{},"");
+        CHECK(out_logout.status==0);
+
+        mcp_close(a);
+        stop_mcp=true;
+        if(mcp_srv.joinable())mcp_srv.join();
+        close(mfd);
+        app_cleanup(&a);
+    }
+
+    // 3. `desk serve` multi-client shared session daemon + Web UI + remote approval + `desk attach` + notifications.
+    {
+        App a=fresh();
+        json_object_put(a.config);a.config=config("serve-test","openai");
+        // Fake model server: 1st call invokes write_file("shared.txt", "serve_v18\n"), 2nd call replies SERVE_SHARED_OK.
+        int lm=socket(AF_INET,SOCK_STREAM,0);CHECK(lm>=0);
+        sockaddr_in lma{};lma.sin_family=AF_INET;lma.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(!bind(lm,reinterpret_cast<sockaddr *>(&lma),sizeof lma));
+        socklen_t lml=sizeof lma;CHECK(!getsockname(lm,reinterpret_cast<sockaddr *>(&lma),&lml));
+        CHECK(!listen(lm,8));
+        put(a.config,"base_url",str(("http://127.0.0.1:"+std::to_string(ntohs(lma.sin_port))+"/v1").c_str()));
+        CHECK(!save_config(&a,a.config));
+
+        std::atomic<bool> stop_lm{false};
+        std::thread lm_thr([lm,&stop_lm]{
+            while(!stop_lm){
+                pollfd pfd{lm,POLLIN,0};
+                if(poll(&pfd,1,40)<=0)continue;
+                int c=accept(lm,nullptr,nullptr);if(c<0)continue;
+                FILE *fp=fdopen(c,"r+");if(!fp){close(c);continue;}
+                char *line=nullptr;size_t cap=0;long clen=0;
+                if(getline(&line,&cap,fp)>0){
+                    while(getline(&line,&cap,fp)>0&&strcmp(line,"\r\n")&&strcmp(line,"\n"))
+                        if(!strncasecmp(line,"Content-Length:",15))clen=strtol(line+15,nullptr,10);
+                }
+                free(line);
+                std::string body(clen>0&&clen<262144?static_cast<size_t>(clen):0,'\0');
+                if(!body.empty())(void)fread(body.data(),1,body.size(),fp);
+                const bool has_tool=body.find("\"role\":\"tool\"")!=std::string::npos||body.find("\"role\": \"tool\"")!=std::string::npos;
+                std::string resp=has_tool
+                    ?R"({"choices":[{"index":0,"message":{"role":"assistant","content":"SERVE_SHARED_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25}})"
+                    :R"({"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"w1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"shared.txt\",\"content\":\"serve_v18\\n\",\"expected_sha256\":null}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}})";
+                fprintf(fp,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n%s",resp.size(),resp.c_str());
+                fflush(fp);fclose(fp);
+            }
+        });
+
+        const std::string port_file=std::string(a.root)+"/serve.port";
+        const std::string notify_file=std::string(a.root)+"/notify.jsonl";
+        pid_t spid=fork();CHECK(spid>=0);
+        if(spid==0){
+            setenv("DESK_NOTIFY_CAPTURE",notify_file.c_str(),1);
+            execl("./build/desk","desk","--workspace",a.root,"serve","--port","0","--token","tok-118","--notify","--port-file",port_file.c_str(),static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        int sport=0;
+        for(int i=0;i<100&&sport<=0;i++){
+            char *p=read_bytes(port_file.c_str(),32,nullptr);
+            if(p){sport=atoi(p);free(p);}
+            if(sport<=0)usleep(25000);
+        }
+        CHECK(sport>0);
+        const std::string surl="http://127.0.0.1:"+std::to_string(sport);
+
+        auto http_get=[&](const std::string &path,const char *tok,long &code_out)->std::string{
+            CurlHandle h(curl_easy_init());std::string out;
+            HttpHeaders hdrs;if(tok)hdrs.append(std::string("Authorization: Bearer ")+tok);
+            auto wr=+[](char *ptr,size_t sz,size_t n,void *ud)->size_t{static_cast<std::string *>(ud)->append(ptr,sz*n);return sz*n;};
+            curl_easy_setopt(h.get(),CURLOPT_URL,(surl+path).c_str());
+            if(tok)curl_easy_setopt(h.get(),CURLOPT_HTTPHEADER,hdrs.get());
+            curl_easy_setopt(h.get(),CURLOPT_WRITEFUNCTION,wr);
+            curl_easy_setopt(h.get(),CURLOPT_WRITEDATA,&out);
+            CHECK(curl_easy_perform(h.get())==CURLE_OK);
+            curl_easy_getinfo(h.get(),CURLINFO_RESPONSE_CODE,&code_out);
+            return out;
+        };
+
+        long code=0;
+        std::string html=http_get("/",nullptr,code);
+        CHECK(code==200&&html.find("DeskCode Serve")!=std::string::npos);
+        (void)http_get("/api/sessions",nullptr,code);
+        CHECK(code==401);
+        std::string health=http_get("/api/health","tok-118",code);
+        CHECK(code==200&&health.find(VERSION)!=std::string::npos);
+
+        // Client B watches for pending approval on sess-1 and approves it via `desk attach --approve allow`!
+        std::thread approver([&]{
+            for(int i=0;i<150;i++){
+                long sc=0;
+                std::string snap=http_get("/api/sessions/sess-1","tok-118",sc);
+                if(sc==200&&snap.find("\"pending_approval\"")!=std::string::npos){
+                    auto ap=run_desk({"attach",surl,"--session","sess-1","--token","tok-118","--approve","allow"},{},"");
+                    CHECK(ap.status==0);
+                    return;
+                }
+                usleep(30000);
+            }
+        });
+
+        // Client A attaches, sends prompt, and waits for SSE completion!
+        auto client_a=run_desk({"attach",surl,"--session","sess-1","--token","tok-118","--json","-p","Create shared.txt"},{},"");
+        if(approver.joinable())approver.join();
+        CHECK(client_a.status==0);
+        JsonPtr a_json(json_tokener_parse(client_a.out.c_str()));
+        CHECK(a_json&&!strcmp(sget(a_json.get(),"status"),"completed")&&strstr(sget(a_json.get(),"reply"),"SERVE_SHARED_OK")!=nullptr);
+
+        // Verify file created AND second client sees full shared transcript AND desktop notifications were captured!
+        char *sh_bytes=read_bytes((std::string(a.root)+"/shared.txt").c_str(),64,nullptr);
+        CHECK(sh_bytes&&!strcmp(sh_bytes,"serve_v18\n"));free(sh_bytes);
+
+        std::string snap_after=http_get("/api/sessions/sess-1","tok-118",code);
+        CHECK(code==200&&snap_after.find("Create shared.txt")!=std::string::npos&&snap_after.find("SERVE_SHARED_OK")!=std::string::npos);
+
+        char *notif_bytes=read_bytes(notify_file.c_str(),8192,nullptr);
+        CHECK(notif_bytes!=nullptr);
+        std::string notif_txt(notif_bytes);free(notif_bytes);
+        CHECK(notif_txt.find("DeskCode")!=std::string::npos&&notif_txt.find('\n')!=std::string::npos);
+
+        kill(spid,SIGTERM);int sst=0;waitpid(spid,&sst,0);
+        stop_lm=true;if(lm_thr.joinable())lm_thr.join();close(lm);
+        app_cleanup(&a);
+    }
+}
 int main(int argc,char **argv){
     if(argc==2&&!strcmp(argv[1],"--mcp-fixture"))return mcp_fixture();
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -4525,6 +4914,7 @@ int main(int argc,char **argv){
     RUN_STEP(test_v1_15_features());
     RUN_STEP(test_v1_16_features());
     RUN_STEP(test_v1_17_features());
+    RUN_STEP(test_v1_18_features());
     RUN_STEP(test_plan_rewind_session());
     RUN_STEP(test_chat_actions_layout());
     RUN_STEP(test_menu_navigation_and_resize());

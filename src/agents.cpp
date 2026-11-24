@@ -369,6 +369,7 @@ struct SubagentRunSpec {
     JsonPtr config;
     bool shell=false;
     bool sandbox=true;
+    bool sandbox_no_net=false;
     bool use_worktree=false;
     WorktreeHandle wt;
 };
@@ -422,6 +423,7 @@ JsonPtr run_subagent_loop(SubagentRunSpec &spec,std::atomic<bool> &cancel_flag,s
     sub.yes=true;
     sub.shell=spec.shell;
     sub.sandbox=spec.sandbox;
+    sub.sandbox_no_net=spec.sandbox_no_net;
     sub.desktop=false;
     sub.subagent=true;
     sub.subagent_writable=!spec.agent.readonly;
@@ -668,6 +670,7 @@ J *tool_delegate_task(App *app,J *args){
     spec->config=std::move(sub_cfg);
     spec->shell=allows_shell;
     spec->sandbox=app->sandbox;
+    spec->sandbox_no_net=app->sandbox_no_net;
     spec->use_worktree=use_worktree;
 
     if(use_worktree){

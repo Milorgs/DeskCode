@@ -24,19 +24,19 @@
 - **可校验、可撤回的原子代码编辑**：写入强制核对 `SHA256` 杜绝盲改覆盖；支持单处精确替换 `edit_file` 与单次最多 20 处原子替换 `multi_edit`（最大 `4 MB` 源码文件），自动兼容 `CRLF` 换行，支持 `/undo` 一键回滚上一轮修改与新建文件（部分失败自动保留进度可重试）。
 - **计划模式、任务清单与多步回退**：`Shift+Tab` 或 `/plan` 进入计划模式，模型只能使用只读工具调研并通过 `submit_plan` 提交方案，`/go` 批准后才开始改动；多步任务由模型用 `todo_write` 维护实时任务清单；`/rewind` 可回退到任意一条历史需求之前，同时撤回对话与该轮之后的文件改动，并把原需求放回输入框以便修改重发。
 - **后台命令与用量费用透明**：`run_shell` 支持 `background` 启动开发服务器或长时间测试，`shell_output` / `shell_kill` 随时查看与停止；命令跑太久时按 `Ctrl+B` 直接转入后台、任务继续。按「输入 / 缓存命中 / 输出」拆分统计词元，`/price` 设置模型单价后状态栏与 `/cost` 实时显示估算费用（OpenRouter 自动读取官方计费）。
-- **Linux Landlock 内核沙箱与细粒度审批**：Linux 下默认启用 Landlock 内核级文件系统沙箱，限制子进程仅可写入当前工作区与 `/tmp`；支持 `ask` / `edit` / `full` 三档批准模式，`edit` 模式自动放行只读检查命令，命令审批支持「本对话允许同类」，并实时显示耗时命令最新输出行。
+- **三平台内核级沙箱、可选禁网与细粒度审批**：Linux 默认启用 **Landlock** 内核写保护，macOS 默认启用 **Apple Seatbelt（`sandbox-exec`）** 写保护，Windows 默认启用 **Job Object UI/进程隔离 + Restricted Token** 特权剥离；叠加 `--no-net`（或 `/sandbox net`）可通过 Linux **Seccomp-BPF** / macOS **Seatbelt** 彻底拦截子进程网络连接。支持 `ask` / `edit` / `full` 三档批准模式与实时命令尾部进度。
 - **跨平台桌面无障碍自动化 + 多模态视觉**：原生对接 Linux `AT-SPI`、Windows `UI Automation` 与 macOS `System Events`（支持最多 500 个控件节点与 `filter` 过滤），配合 `desktop_screenshot` 桌面视觉截图、`/paste` 剪贴板贴图与 `@图片` 内联输入，打通终端与 GUI 应用边界。
 - **双协议原生推理与提示词缓存**：原生支持 OpenAI Chat Completions 与 Anthropic Messages API（含自适应推理强度 `reasoning_effort` / `thinking` 与 Anthropic 自动 `cache_control` 提示词缓存断点），内置 OpenAI、Anthropic、DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter 与本地 Ollama 预设。
 - **LSP 代码诊断与导航**：自动发现本机语言服务（`clangd`、`pyright-langserver` / `pylsp`、`typescript-language-server`、`gopls`、`rust-analyzer` 或自定义 `lsp.json`），每次 `edit_file` / `multi_edit` / `write_file` 后自动回传编译器错误与警告，并通过 `lsp` 工具支持跳转定义、查找引用、悬停类型与文档符号。
 - **可写并行子代理与 Git Worktree 隔离**：通过 `delegate_task` + `subagent_output` 可并发启动最多 4 个独立子代理（支持 `.deskcode/agents/*.md`、`.claude/agents/*.md` 与插件 `agents/*.md` 自定义角色），在各自临时 `git worktree` 分支（`desk/<agent>-<id>`）中并行改代码跑测试，完成后零冲突合并回主分支。
 - **IDE 原生扩展（VS Code + ACP）、Skills/插件生态、GitHub Action 与 Python SDK**：提供 [VS Code 原生扩展](editors/vscode/README.md)（`.vsix`）以及内置 `desk acp` 直连 **Zed** 与 **JetBrains IDEs**；支持 `SKILL.md` 技能与 `desk plugin` 插件管理器（兼容 Claude Code 插件包与 `PreToolUse` / `PostToolUse` 钩子）；随附官方 [GitHub Action](action/README.md)（`Milorgs/DeskCode/action@main`）与零依赖 [Python SDK](sdk/python/README.md)（`deskcode`）。
-- **多对话后台并发与 MCP 扩展**：支持同时挂起多个后台对话（最多 4 路并发执行、32 个会话槽），`Ctrl+D` 返回列表不中断后台任务；原生支持跨平台本地 `stdio` 与远程 `Streamable HTTP` **MCP 服务**。
+- **`desk serve` 多端共享守护进程、全协议 MCP（含 OAuth）与系统通知**：`desk serve` 启动本地 HTTP + SSE 守护服务与内置响应式 **Web 控制台**，终端 `desk attach`、浏览器与 Python SDK `DeskServeClient` 可同时挂载并远程审批同一个实时会话；后台对话完成或待批准支持原生桌面通知（`--notify` / `/notify`）；完整支持本地 `stdio` 与远程 `Streamable HTTP` **MCP 服务**（含 `tools`、`resources`、`prompts` 与 `desk mcp auth` **OAuth 2.0 + S256 PKCE** 自动续期）。
 
 ---
 
 ## 快速安装
 
-当前最新版本：**1.17.0**（五平台预编译包与 VS Code `.vsix`：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+当前最新版本：**1.18.0**（五平台预编译包与 VS Code `.vsix`：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
 
 ### Linux (`x86_64` & `arm64`)
 
@@ -120,7 +120,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | | `desktop_set_text` | 设置可编辑桌面控件的文本内容 |
 | | `desktop_screenshot` | 截取当前活动窗口或全屏 PNG 图像并按多模态图像块送入模型进行视觉核验 |
 | **技能与 MCP 扩展** | `skill` | 按需加载工作区、用户或插件中的 `SKILL.md` 专业技能及配套参考文件（无技能时不占用上下文） |
-| | `mcp_<server>_<tool>` | 动态挂载本地 `stdio`、远程 `Streamable HTTP`、插件 `.mcp.json` 或 ACP 会话透传的 MCP 工具 |
+| | `mcp_<server>_<tool>` / `mcp_read_resource` / `mcp_get_prompt` | 动态挂载本地 `stdio`、远程 `Streamable HTTP`（含 OAuth 2.0 自动续期）的 MCP 工具、只读资源（`resources`）与提示模板（`prompts`） |
 | **规划与进度** | `todo_write` | 模型为多步任务维护任务清单（待办 / 进行中 / 已完成），终端实时显示进度 |
 | | `submit_plan` | 仅在计划模式提供：提交完整实施方案等待用户批准，批准前不会修改任何文件 |
 
@@ -143,7 +143,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | `/bg`（或 `Ctrl+B`） | 把正在执行的命令转入后台继续运行，任务不中断 |
 | `/compact` | 主动调用当前模型将长对话压缩为高密度工程续接摘要 |
 | `/paste [说明]` | 从系统剪贴板读取图片并附带到当前输入（或按 `Ctrl+V`） |
-| `/sandbox` | 开启或关闭当前会话的 Linux Landlock 内核文件系统沙箱 |
+| `/sandbox [net]` · `/notify` | 开启/关闭当前会话的文件系统内核沙箱或子进程禁网隔离（`net`） · 开启/关闭后台任务系统桌面通知 |
 | `/commands` · `/skills` · `/plugins` · `/agents` | 查看自定义指令 · 查看 `SKILL.md` 技能 · 查看已安装插件 · 查看内置与自定义子代理 |
 | `/approval`（或 `/perm`） | 切换当前对话批准模式（请求批准 / 帮我批准 / 完全访问权限） |
 | `/model` · `/reasoning` | 切换模型配置 · 调整模型原生推理强度档位 |
@@ -222,8 +222,9 @@ desk plugin disable pkg && desk plugin enable pkg
 desk plugin validate ./my-plugin           # 校验插件目录结构与清单
 ```
 
-### 6. IDE 接入（VS Code 原生扩展 + Zed / JetBrains `desk acp`）
-- **VS Code 扩展（[`editors/vscode/`](editors/vscode/README.md)）**：从 [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) 下载 `deskcode-vscode-1.17.0.vsix` 后执行 `code --install-extension deskcode-vscode-1.17.0.vsix`，即可在侧边栏使用流式对话、四档模式切换、双栏原生 Diff 审阅、权限审批以及右键「选中代码提问 / 修复当前文件报错」。
+### 6. IDE 接入与 `desk serve` 多端共享守护模式
+- **VS Code 扩展（[`editors/vscode/`](editors/vscode/README.md)）**：从 [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) 下载 `deskcode-vscode-1.18.0.vsix` 后执行 `code --install-extension deskcode-vscode-1.18.0.vsix`，即可在侧边栏使用流式对话、四档模式切换、双栏原生 Diff 审阅、权限审批以及右键「选中代码提问 / 修复当前文件报错」。
+- **多端共享会话守护进程（`desk serve` + `desk attach`）**：运行 `desk serve --port 7890 --notify` 打开内置 Web 控制台（`http://127.0.0.1:7890`），可在多个终端（`desk attach -p "..."`）、浏览器或移动端隧道上共享同一个实时会话并跨端点击批准。
 - **Zed / JetBrains ACP 接入**：运行 `desk acp` 启动标准 ACP v1 服务端。例如在 Zed `settings.json` 中添加：
 
 ```json

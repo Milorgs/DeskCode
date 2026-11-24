@@ -24,19 +24,19 @@
 - **Verified, Reversible Code Editing**: Every write verifies `SHA256` to prevent stale overwrites. Supports single-match `edit_file` and atomic multi-hunk `multi_edit` (`1..20` hunks on files up to `4 MB`) with automatic `CRLF` preservation, `.bak` backups, and one-command `/undo` per turn (retaining unresolved entries for retry on partial failure).
 - **Plan Mode, Checklists & Multi-Step Rewind**: Press `Shift+Tab` or type `/plan` and the model may only use read-only tools, then proposes an implementation through `submit_plan`; nothing changes until you approve with `/go`. Multi-step work is tracked live through the model's `todo_write` checklist, and `/rewind` returns to before any earlier request—restoring the conversation and the file changes made since—with the original request back in the composer to edit and resend.
 - **Background Commands & Transparent Cost**: `run_shell` can start dev servers or long test runs with `background`, inspected and stopped through `shell_output` / `shell_kill`; press `Ctrl+B` to move a slow foreground command to the background while the turn continues. Tokens are split into input / cache hits / output, and after `/price` the status bar and `/cost` show an estimated cost (OpenRouter's reported cost is used automatically).
-- **Linux Landlock Kernel Sandbox & Smart Approvals**: Restricts shell child processes at the kernel level on Linux so writes outside the workspace and `/tmp` are blocked by default. Offers `ask` / `edit` / `full` approval modes, zero-friction execution of verified read-only inspection commands in `edit` mode, per-chat `Allow similar` shell rules, and live latest-line progress for long-running commands.
+- **Three-Platform Kernel Sandbox, Network Isolation & Smart Approvals**: Enforces **Landlock** on Linux, **Apple Seatbelt (`sandbox-exec`)** on macOS, and **Job Object UI/process isolation + Restricted Tokens** on Windows by default; add `--no-net` (or `/sandbox net`) to block child network sockets at the kernel level (Seccomp-BPF on Linux, Seatbelt on macOS). Offers `ask` / `edit` / `full` approval modes and live latest-line command progress.
 - **Cross-Platform Desktop Automation + Vision**: Bridges terminal and GUI workflows via Linux `AT-SPI`, Windows `UI Automation`, and macOS `System Events` (up to 500 controls with `filter` support), paired with multimodal `desktop_screenshot` inspection, `/paste` clipboard image attachment, and inline `@image` mentions.
 - **Native Dual-Protocol Streaming & Prompt Caching**: Speaks both OpenAI Chat Completions and the native Anthropic Messages API (including native `reasoning_effort` / adaptive `thinking` controls and automatic Anthropic `cache_control` prompt-caching breakpoints), with built-in presets for OpenAI, Anthropic, DeepSeek, Kimi, Qwen, Zhipu GLM, SiliconFlow, OpenRouter, and local Ollama.
 - **Compiler-Grade LSP Diagnostics & Navigation**: Automatically discovers installed language servers (`clangd`, `pyright-langserver` / `pylsp`, `typescript-language-server`, `gopls`, `rust-analyzer`, or custom `lsp.json`), attaches compiler errors and warnings after every `edit_file` / `multi_edit` / `write_file`, and exposes `diagnostics`, `definition`, `references`, `hover`, and `symbols` via the `lsp` tool.
 - **Writable Parallel Subagents & Git Worktree Isolation**: `delegate_task` and `subagent_output` launch up to 4 concurrent subagents (supporting `.deskcode/agents/*.md`, `.claude/agents/*.md`, and plugin `agents/*.md` custom roles) in isolated `git worktree` branches (`desk/<agent>-<id>`), editing code and running tests in parallel before merging cleanly.
 - **Native VS Code Extension, ACP IDEs, Skills/Plugins, GitHub Action & Python SDK**: Ships a native [VS Code extension](editors/vscode/README.md) (`.vsix`) alongside built-in `desk acp` for **Zed** and **JetBrains IDEs**; supports `SKILL.md` skills and `desk plugin` (compatible with Claude Code plugin bundles and `PreToolUse` / `PostToolUse` hooks); includes an official [GitHub Action](action/README.md) (`Milorgs/DeskCode/action@main`) and zero-dependency [Python SDK](sdk/python/README.md) (`deskcode`).
-- **Concurrent Background Chats & MCP Ecosystem**: Keep multiple conversations running in parallel in the background (up to 4 active workers and 32 session slots—press `Ctrl+D` to switch without interrupting work), with first-class local `stdio` and remote `Streamable HTTP` **MCP servers**.
+- **`desk serve` Shared-Session Daemon, Complete MCP (with OAuth) & Native Notifications**: `desk serve` hosts a multi-client HTTP + SSE daemon with a built-in responsive **Web Console**, allowing terminals (`desk attach`), browsers, and Python SDK `DeskServeClient` to share live sessions and approve actions remotely; supports native desktop notifications (`--notify` / `/notify`) and full `stdio` + `Streamable HTTP` **MCP** (`tools`, `resources`, `prompts`, and `desk mcp auth` **OAuth 2.0 + S256 PKCE** with automatic token refresh).
 
 ---
 
 ## Quick Install
 
-Latest version: **1.17.0** (five pre-built platform archives + VS Code `.vsix`: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
+Latest version: **1.18.0** (five pre-built platform archives + VS Code `.vsix`: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
 
 ### Linux (`x86_64` & `arm64`)
 
@@ -120,7 +120,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | | `desktop_set_text` | Replace text in an editable desktop control |
 | | `desktop_screenshot` | Capture the active window or desktop as PNG and attach it as a multimodal vision block |
 | **Skills & MCP Ecosystem** | `skill` | Load on-demand `SKILL.md` domain skills and bundled reference files from workspace, user, or plugins (omitted when none exist) |
-| | `mcp_<server>_<tool>` | Dynamically attach tools from local `stdio`, remote `Streamable HTTP`, plugin `.mcp.json`, or ACP session MCP servers |
+| | `mcp_<server>_<tool>` / `mcp_read_resource` / `mcp_get_prompt` | Dynamically attach tools, read-only `resources`, and `prompts` from local `stdio` or remote `Streamable HTTP` MCP servers (with OAuth 2.0 auto-refresh) |
 | **Planning & Progress** | `todo_write` | The model keeps a checklist (pending / in progress / completed) for multi-step work, shown live in the terminal |
 | | `submit_plan` | Plan mode only: submit the full implementation plan for approval; no file changes before approval |
 
@@ -143,7 +143,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | `/bg` (or `Ctrl+B`) | Move the running command to the background without stopping the turn |
 | `/compact` | Summarize long conversation history into a dense continuation brief |
 | `/paste [prompt]` | Attach an image directly from the system clipboard (or press `Ctrl+V`) |
-| `/sandbox` | Toggle the Linux Landlock kernel filesystem sandbox for the current session |
+| `/sandbox [net]` · `/notify` | Toggle the kernel filesystem sandbox or child network isolation (`net`) · Toggle native desktop notifications |
 | `/commands` · `/skills` · `/plugins` · `/agents` | List custom slash commands · List discovered `SKILL.md` skills · List installed plugins · List built-in & custom subagents |
 | `/approval` (or `/perm`) | Switch approval mode (`Ask for approval` / `Auto-approve edits` / `Full access`) |
 | `/model` · `/reasoning` | Switch active model profile · Adjust native reasoning effort |
@@ -222,8 +222,9 @@ desk plugin disable pkg && desk plugin enable pkg
 desk plugin validate ./my-plugin           # Validate manifest and bundle layout
 ```
 
-### 6. IDE Integration (Native VS Code Extension + Zed / JetBrains `desk acp`)
-- **VS Code Extension ([`editors/vscode/`](editors/vscode/README.md))**: Download `deskcode-vscode-1.17.0.vsix` from [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) and run `code --install-extension deskcode-vscode-1.17.0.vsix` for a native sidebar chat with 4 modes, native side-by-side diffs, inline permission approvals, and editor context actions (*Ask DeskCode About Selection* / *Fix Diagnostics in File*).
+### 6. IDE Integration & `desk serve` Shared-Session Daemon
+- **VS Code Extension ([`editors/vscode/`](editors/vscode/README.md))**: Download `deskcode-vscode-1.18.0.vsix` from [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) and run `code --install-extension deskcode-vscode-1.18.0.vsix` for a native sidebar chat with 4 modes, native side-by-side diffs, inline permission approvals, and editor context actions (*Ask DeskCode About Selection* / *Fix Diagnostics in File*).
+- **Shared-Session Daemon (`desk serve` + `desk attach`)**: Run `desk serve --port 7890 --notify` to open the built-in Web Console (`http://127.0.0.1:7890`) and attach from any terminal (`desk attach -p "..."`), browser, or Python `DeskServeClient` with live remote approvals.
 - **Zed / JetBrains ACP**: Run `desk acp` to expose DeskCode over ACP v1 (`stdio` newline-delimited JSON-RPC 2.0) in **Zed**, **JetBrains IDEs**, and other ACP-capable editors. Example Zed `settings.json`:
 
 ```json

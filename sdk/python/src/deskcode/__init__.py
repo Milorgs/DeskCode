@@ -12,11 +12,12 @@ from .acp import (DeskAgent, DiffContent, Event, Location, Mode, ModeChange, Per
                   TextContent, ToolCall, ToolCallUpdate, TurnEnd, TurnResult, UnknownUpdate,
                   allow_all, allow_reads_only, embedded_resource, reject_all)
 from .aio import AsyncDeskAgent, AsyncSession
+from .serve import DeskServeClient
 
 __all__ = [
     "__version__", "run", "arun", "RunResult", "Usage", "ToolRecord",
     "DeskError", "DeskTimeout", "AcpError", "AgentExited",
-    "DeskAgent", "Session", "AsyncDeskAgent", "AsyncSession",
+    "DeskAgent", "Session", "AsyncDeskAgent", "AsyncSession", "DeskServeClient",
     "Event", "TextChunk", "ToolCall", "ToolCallUpdate", "PlanUpdate", "ModeChange", "UnknownUpdate",
     "TurnEnd", "TurnResult", "Location", "TextContent", "DiffContent", "PlanEntry", "Mode",
     "PermissionRequest", "PermissionOption", "PermissionHandler",

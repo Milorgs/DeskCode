@@ -58,7 +58,7 @@ async function runTests() {
       assert.strictEqual(pkg.name, "deskcode-vscode");
       assert.strictEqual(pkg.displayName, "DeskCode AI Coding Agent");
       assert.strictEqual(pkg.publisher, "milorgs");
-      assert.strictEqual(pkg.version, "1.17.0");
+      assert.strictEqual(pkg.version, "1.18.0");
       assert.strictEqual(pkg.engines.vscode, "^1.85.0");
       assert.strictEqual(pkg.main, "./src/extension.js");
 
@@ -578,7 +578,10 @@ async function runTests() {
     });
 
     await step("package_vsix.py builds valid Open Packaging Conventions .vsix", async () => {
-      const vsixPath = path.join(tmpDir, "deskcode-vscode-1.17.0.vsix");
+      const expectedVer = JSON.parse(
+        fs.readFileSync(path.join(VSCODE_DIR, "package.json"), "utf8")
+      ).version;
+      const vsixPath = path.join(tmpDir, `deskcode-vscode-${expectedVer}.vsix`);
       const out = execFileSync(
         "python3",
         ["-B", path.join(VSCODE_DIR, "package_vsix.py"), vsixPath],
@@ -593,7 +596,7 @@ async function runTests() {
 
       const verifyScript = `
 import json, sys, xml.etree.ElementTree as ET, zipfile
-vsix = sys.argv[1]
+vsix, expected_ver = sys.argv[1], sys.argv[2]
 with zipfile.ZipFile(vsix, "r") as zf:
     assert zf.testzip() is None
     names = set(zf.namelist())
@@ -618,13 +621,13 @@ with zipfile.ZipFile(vsix, "r") as zf:
     mf = ET.fromstring(zf.read("extension.vsixmanifest"))
     xml_text = zf.read("extension.vsixmanifest").decode("utf-8")
     assert 'Id="deskcode-vscode"' in xml_text
-    assert 'Version="1.17.0"' in xml_text
+    assert f'Version="{expected_ver}"' in xml_text
     assert 'Publisher="milorgs"' in xml_text
     pkg = json.loads(zf.read("extension/package.json").decode("utf-8"))
-    assert pkg["version"] == "1.17.0"
+    assert pkg["version"] == expected_ver
 print("VSIX_VALID")
 `;
-      const checkOut = execFileSync("python3", ["-B", "-c", verifyScript, vsixPath], {
+      const checkOut = execFileSync("python3", ["-B", "-c", verifyScript, vsixPath, expectedVer], {
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
         encoding: "utf8",
       }).trim();

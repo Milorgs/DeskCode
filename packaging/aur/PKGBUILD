@@ -1,6 +1,6 @@
 # Maintainer: Milorgs <https://github.com/Milorgs>
 pkgname=deskcode-bin
-pkgver=1.17.0
+pkgver=1.18.0
 pkgrel=1
 pkgdesc="Native C++20 terminal and desktop AI coding agent"
 arch=('x86_64' 'aarch64')

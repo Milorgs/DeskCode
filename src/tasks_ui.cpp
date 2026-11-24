@@ -55,6 +55,8 @@ J *conversation_settings(const App &app,bool reset,J *replace_messages){
     put(settings,"auto_edit",json_object_new_boolean(app.auto_edit));
     put(settings,"shell",json_object_new_boolean(app.shell));
     put(settings,"sandbox",json_object_new_boolean(app.sandbox));
+    put(settings,"sandbox_no_net",json_object_new_boolean(app.sandbox_no_net));
+    put(settings,"notify",json_object_new_boolean(app.notify));
     put(settings,"desktop",json_object_new_boolean(app.desktop));
     put(settings,"record",json_object_new_boolean(app.record));
     put(settings,"verbose",json_object_new_boolean(app.verbose));
@@ -70,6 +72,8 @@ void apply_conversation_settings(App &app,J *settings){
     app.yes=bget(settings,"yes");app.auto_edit=bget(settings,"auto_edit");
     app.shell=bget(settings,"shell");app.desktop=bget(settings,"desktop");
     if(get(settings,"sandbox"))app.sandbox=bget(settings,"sandbox");
+    if(get(settings,"sandbox_no_net"))app.sandbox_no_net=bget(settings,"sandbox_no_net");
+    if(get(settings,"notify"))app.notify=bget(settings,"notify");
     app.record=bget(settings,"record");app.verbose=bget(settings,"verbose");
     app.max_steps=iget(settings,"max_steps",0);
     app.plan_mode=bget(settings,"plan_mode");

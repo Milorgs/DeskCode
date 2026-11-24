@@ -805,11 +805,11 @@ static J *builtin_tools(){
         definition(tools,"write_file","Create a UTF-8 file or replace its entire contents. Prefer edit_file for small changes. Read existing file first and supply SHA256; null only for a new file. Original bytes are backed up and new bytes read back. Verify the task's actual behavior separately.",write,3);
         definition(tools,"run_shell",
 #ifdef _WIN32
-            "Execute noninteractive Windows PowerShell in the workspace (default 30s timeout, configurable up to 300s via timeout_ms). Use PowerShell syntax, not bash. There is no sandbox. Calls do not share variables or working-directory changes. Do not start persistent/background services. Inspect exit_code, timed_out and output to verify the result.",
+            "Execute noninteractive Windows PowerShell in the workspace (default 30s timeout, configurable up to 300s via timeout_ms; Job Object + Restricted Token sandbox active when enabled). Use PowerShell syntax, not bash. Calls do not share variables or working-directory changes. Do not start persistent/background services unless background=true. Inspect exit_code, timed_out and output to verify the result.",
 #elif defined(__linux__)
-            "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms; Landlock restricts writes to workspace and /tmp when enabled). Do not start persistent/background services. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
+            "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms; Landlock restricts writes to workspace and /tmp when enabled, and Seccomp blocks IP sockets when --no-net is active). Do not start persistent/background services unless background=true. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
 #else
-            "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms), no sandbox. Do not start persistent/background services. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
+            "Execute noninteractive bash in workspace (default 30s timeout, configurable up to 300s via timeout_ms; Apple Seatbelt restricts writes to workspace and /tmp when enabled, and blocks IP network when --no-net is active). Do not start persistent/background services unless background=true. Separate calls do not preserve cd or variables. Inspect exit_code, timed_out and output; on failure diagnose and change approach rather than repeating. A successful command alone does not prove task completion.",
 #endif
             cmd,1);
         {
@@ -913,6 +913,7 @@ static J *builtin_tools(){
     return catalog.get();
 }
 bool plan_safe_tool(const char *name){
+    if(mcp_readonly_tool(name))return true;
     for(const char *safe:{"list_files","search_text","read_file","code_outline","delegate_research","web_fetch",
                           "web_search","desktop_snapshot","desktop_screenshot","todo_write","submit_plan","shell_output","lsp","skill"})
         if(!strcmp(name,safe))return true;
@@ -961,13 +962,13 @@ J *schemas(App *a){
        std::find(a->subagent_tools.begin(),a->subagent_tools.end(),"skill")!=a->subagent_tools.end())))){
         if(J *skill=skill_tool_definition(*a))add(tools.get(),skill);
     }
-    // An MCP tool can change anything, so plan mode and subagents leave them out.
-    if(!a->plan_mode&&!a->subagent)mcp_append_tools(*a,tools.get());
+    // Mutable MCP tools are left out in plan mode, while read-only MCP resources/prompts remain available.
+    if(!a->subagent)mcp_append_tools(*a,tools.get(),a->plan_mode);
     return tools.release();
 }
 J *tool_call(App *a,const char *name,J *args){
     if(!strncmp(name,"mcp_",4)){
-        if(a->plan_mode||a->subagent)return err(tr("计划模式下不能调用 MCP 工具；请写入计划，批准后再执行。"));
+        if((a->plan_mode&&!mcp_readonly_tool(name))||a->subagent)return err(tr("计划模式下不能调用 MCP 工具；请写入计划，批准后再执行。"));
         return mcp_call(*a,name,args);
     }
     if(!strcmp(name,"skill")){

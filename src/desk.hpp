@@ -32,7 +32,7 @@
 #include <functional>
 #include <optional>
 #include <map>
-#define VERSION "1.17.0"
+#define VERSION "1.18.0"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -133,6 +133,8 @@ struct App {
     std::vector<std::string> subagent_tools{};
     void *subagents_data=nullptr;
     bool sandbox=true;
+    bool sandbox_no_net=false;
+    bool notify=false;
     bool workspace_hooks_approved=false;
     std::string turn_id{};
     std::vector<std::string> allowed_commands{};
@@ -243,6 +245,8 @@ J *tool_web_search(App *app,J *args);
 J *tool_desktop_screenshot(App *app,J *args);
 bool compact_conversation(App &app,std::string &summary);
 bool sandbox_supported(void);
+bool sandbox_net_supported(void);
+const char *sandbox_backend(void);
 bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason);
 void run_post_edit_hook(App &app,const char *rel_path,J *result);
 struct CustomCommand {
@@ -349,4 +353,8 @@ std::string delegate_task_description(const App &app);
 J *tool_delegate_task(App *app,J *args);
 J *tool_subagent_output(App *app,J *args);
 void subagents_destroy(App *app);
+// Daemon server (`desk serve`), attach client (`desk attach`), and native OS notifications (serve.cpp).
+void notify_user_event(const App &app,const char *title,const char *body);
+int serve_main(App &app,int argc,char **argv,int first);
+int attach_main(App &app,int argc,char **argv,int first);
 #endif

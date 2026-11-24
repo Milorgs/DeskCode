@@ -1,7 +1,7 @@
 class Deskcode < Formula
   desc "Native C++20 terminal and desktop AI coding agent"
   homepage "https://github.com/Milorgs/DeskCode"
-  version "1.17.0"
+  version "1.18.0"
   license "MIT"
 
   on_macos do

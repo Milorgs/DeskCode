@@ -107,6 +107,14 @@ static void test_files_config(){
     const char *agent_md="---\nname: win-fixer\ndescription: Windows worktree agent\nisolation: worktree\n---\nFix Windows issues.\n";
     CHECK(!atomic_file(path_text(agent_dir/"win-fixer.md").c_str(),agent_md,strlen(agent_md),0600));
     auto agents=list_subagents(app);CHECK(agents.size()==1&&agents[0].name=="win-fixer"&&agents[0].worktree);
+    CHECK(sandbox_supported()&&sandbox_net_supported()&&!strcmp(sandbox_backend(),"job-restricted-token"));
+    const fs::path nfile=fs_path(app.root)/"win-notify.jsonl";
+    environment(L"DESK_NOTIFY_CAPTURE",path_text(nfile));
+    notify_user_event(app,"WinTitle","WinBody");
+    environment(L"DESK_NOTIFY_CAPTURE","");
+    char *nb=read_bytes(path_text(nfile).c_str(),1024,nullptr);
+    CHECK(nb&&strstr(nb,"WinTitle")&&strstr(nb,"WinBody"));
+    free(nb);
 }
 static void test_commands(){
     Fixture fixture;App &app=fixture.app;

@@ -1308,7 +1308,7 @@ bool builtin_slash_name(std::string_view name){
     static constexpr std::string_view reserved[]={
         "help","status","clear","undo","compact","paste","model",
         "reasoning","approval","perm","mcp","new","commands","sandbox",
-        "plan","go","rewind","cost","price","bg","todos","skills","plugins","agents"
+        "plan","go","rewind","cost","price","bg","todos","skills","plugins","agents","notify"
     };
     for(auto r:reserved)if(name==r)return true;
     return false;
@@ -1332,6 +1332,7 @@ bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason
     App probe{};
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
+    probe.sandbox_no_net=app.sandbox_no_net;
     set_temp_env("DESK_HOOK_CMD",command);
     set_temp_env("DESK_HOOK_JSON",hook_event_json(app,"PreToolUse","Bash","command",command).c_str());
     for(const auto &hook:hooks){
@@ -1359,6 +1360,7 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
     App probe{};
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
+    probe.sandbox_no_net=app.sandbox_no_net;
     set_temp_env("DESK_HOOK_FILE",rel_path);
     const std::string absolute=path_text(fs_path(app.root)/fs_path(rel_path));
     set_temp_env("DESK_HOOK_JSON",hook_event_json(app,"PostToolUse","Edit","file_path",absolute.c_str()).c_str());

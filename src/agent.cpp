@@ -457,7 +457,7 @@ struct Observation {
 static bool readonly_probe(const char *name){
     return !strcmp(name,"read_file")||!strcmp(name,"list_files")||!strcmp(name,"search_text")
         ||!strcmp(name,"code_outline")||!strcmp(name,"delegate_research")||!strcmp(name,"web_fetch")||!strcmp(name,"web_search")
-        ||!strcmp(name,"shell_output");
+        ||!strcmp(name,"shell_output")||mcp_readonly_tool(name);
 }
 static void recovery(App *a,std::vector<FailedOperation> &unresolved,const char *name,J *args,bool failed){
     const char *kind=domain(name),*target=sget(args,"path");

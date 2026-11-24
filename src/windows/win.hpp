@@ -47,13 +47,23 @@ inline bool win_pipe(WinHandle &read,WinHandle &write){
     SECURITY_ATTRIBUTES attr{sizeof attr,nullptr,TRUE};HANDLE r=nullptr,w=nullptr;
     if(!CreatePipe(&r,&w,&attr,65536))return false;read.reset(r);write.reset(w);return true;
 }
-inline WinHandle kill_job(){
+inline WinHandle kill_job(bool sandboxed=false){
     WinHandle job(CreateJobObjectW(nullptr,nullptr));if(!job)return {};
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};info.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if(!SetInformationJobObject(job.get(),JobObjectExtendedLimitInformation,&info,sizeof info))return {};return job;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+    info.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|(sandboxed?(JOB_OBJECT_LIMIT_ACTIVE_PROCESS|JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION):0);
+    if(sandboxed)info.BasicLimitInformation.ActiveProcessLimit=64;
+    if(!SetInformationJobObject(job.get(),JobObjectExtendedLimitInformation,&info,sizeof info))return {};
+    if(sandboxed){
+        JOBOBJECT_BASIC_UI_RESTRICTIONS ui{};
+        ui.UIRestrictionsClass=JOB_OBJECT_UILIMIT_DESKTOP|JOB_OBJECT_UILIMIT_DISPLAYSETTINGS|JOB_OBJECT_UILIMIT_EXITWINDOWS|
+            JOB_OBJECT_UILIMIT_GLOBALATOMS|JOB_OBJECT_UILIMIT_HANDLES|JOB_OBJECT_UILIMIT_READCLIPBOARD|
+            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS|JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+        (void)SetInformationJobObject(job.get(),JobObjectBasicUIRestrictions,&ui,sizeof ui);
+    }
+    return job;
 }
-std::vector<wchar_t> command_environment();
-bool win_spawn(const std::wstring &executable,std::wstring command,const std::wstring &directory,HANDLE input,HANDLE output,const std::vector<HANDLE> &inherit,HANDLE job,WinHandle &process);
+std::vector<wchar_t> command_environment(bool no_net=false);
+bool win_spawn(const std::wstring &executable,std::wstring command,const std::wstring &directory,HANDLE input,HANDLE output,const std::vector<HANDLE> &inherit,HANDLE job,WinHandle &process,bool sandboxed=false,bool no_net=false);
 inline std::wstring quote_arg(std::wstring_view arg){
     std::wstring result=L"\"";size_t slashes=0;
     for(wchar_t c:arg){if(c==L'\\'){slashes++;continue;}if(c==L'\"')result.append(slashes*2+1,L'\\');else result.append(slashes,L'\\');slashes=0;result+=c;}

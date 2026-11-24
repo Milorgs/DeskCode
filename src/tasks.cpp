@@ -246,7 +246,7 @@ int Tasks::start(App &app,const std::string &task,const std::string &workspace){
     put(data.get(),"language",str(language_code()));put(data.get(),"config",copy(app.config));put(data.get(),"root",str(root));put(data.get(),"config_dir",str(app.config_dir));
     put(data.get(),"conversation",json_object_new_boolean(app.conversation_worker));put(data.get(),"task",str(task.c_str()));put(data.get(),"yes",json_object_new_boolean(app.yes));put(data.get(),"auto_edit",json_object_new_boolean(app.auto_edit));
     put(data.get(),"guided_approval",json_object_new_boolean(app.guided_approval));
-    put(data.get(),"shell",json_object_new_boolean(app.shell));put(data.get(),"sandbox",json_object_new_boolean(app.sandbox));put(data.get(),"desktop",json_object_new_boolean(app.desktop));
+    put(data.get(),"shell",json_object_new_boolean(app.shell));put(data.get(),"sandbox",json_object_new_boolean(app.sandbox));put(data.get(),"sandbox_no_net",json_object_new_boolean(app.sandbox_no_net));put(data.get(),"notify",json_object_new_boolean(app.notify));put(data.get(),"desktop",json_object_new_boolean(app.desktop));
     put(data.get(),"record",json_object_new_boolean(app.record));put(data.get(),"verbose",json_object_new_boolean(app.verbose));put(data.get(),"max_steps",json_object_new_int(app.max_steps));
     put(data.get(),"plan_mode",json_object_new_boolean(app.plan_mode));
     put(data.get(),"events",json_object_new_int(events[1]));
@@ -357,6 +357,8 @@ int task_worker(std::intptr_t fd){
     snprintf(app.config_dir,sizeof app.config_dir,"%s",sget(data.get(),"config_dir"));
     app.yes=bget(data.get(),"yes");app.auto_edit=bget(data.get(),"auto_edit");app.shell=bget(data.get(),"shell");
     if(get(data.get(),"sandbox"))app.sandbox=bget(data.get(),"sandbox");
+    if(get(data.get(),"sandbox_no_net"))app.sandbox_no_net=bget(data.get(),"sandbox_no_net");
+    if(get(data.get(),"notify"))app.notify=bget(data.get(),"notify");
     app.desktop=bget(data.get(),"desktop");app.record=bget(data.get(),"record");app.verbose=bget(data.get(),"verbose");
     app.max_steps=iget(data.get(),"max_steps",0);app.task_events=iget(data.get(),"events",-1);
     app.plan_mode=bget(data.get(),"plan_mode");
