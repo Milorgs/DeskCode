@@ -575,9 +575,9 @@ std::string lsp_config_stamp(const App &app){
     const fs::path cfg=fs_path(app.config_dir)/"lsp.json";
     if(fs::exists(cfg,ec)){
         stamp+='\n';
-        stamp+=std::to_string(fs::file_size(cfg,ec));
+        stamp+=std::to_string(static_cast<unsigned long long>(fs::file_size(cfg,ec)));
         stamp+=':';
-        stamp+=std::to_string(fs::last_write_time(cfg,ec).time_since_epoch().count());
+        stamp+=std::to_string(static_cast<long long>(fs::last_write_time(cfg,ec).time_since_epoch().count()));
     }
     return stamp;
 }

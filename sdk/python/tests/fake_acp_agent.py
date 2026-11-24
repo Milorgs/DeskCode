@@ -163,8 +163,8 @@ def main():
             if mode not in {m["id"] for m in MODES}:
                 send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": f"unknown mode {mode}"}})
                 continue
-            send({"jsonrpc": "2.0", "id": rid, "result": {}})
             update(msg["params"]["sessionId"], {"sessionUpdate": "current_mode_update", "currentModeId": mode})
+            send({"jsonrpc": "2.0", "id": rid, "result": {}})
         elif method == "session/prompt":
             handle_prompt(msg)
         elif method == "session/cancel":
