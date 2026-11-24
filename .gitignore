@@ -15,3 +15,4 @@ mcp.json
 *.exe
 *.pdb
 bench/results/
+__pycache__/
