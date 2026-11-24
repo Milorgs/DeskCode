@@ -4296,57 +4296,60 @@ static void test_v1_17_features(){
                                         "git -c user.name=t -c user.email=t@e commit -qm init",10000));
         CHECK(!tool_failed(init_cmd.get())&&iget(init_cmd.get(),"exit_code",-1)==0);
 
-        // Start a ThreadingHTTPServer fake model handling concurrent alpha / beta / noop subagents.
-        const std::string srv_py=std::string(sandbox)+"/wt_model.py";
-        const std::string port_file=std::string(sandbox)+"/wt_port";
-        const char *py_code=
-            "#!/usr/bin/env python3\n"
-            "import json, sys, time\n"
-            "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
-            "class H(BaseHTTPRequestHandler):\n"
-            "    def log_message(self, *a): pass\n"
-            "    def do_POST(self):\n"
-            "        n = int(self.headers.get('Content-Length') or 0)\n"
-            "        body = json.loads(self.rfile.read(n).decode('utf-8'))\n"
-            "        msgs = body.get('messages') or []\n"
-            "        user = ' '.join(m.get('content','') for m in msgs if m.get('role') == 'user')\n"
-            "        has_tool = any(m.get('role') == 'tool' for m in msgs)\n"
-            "        msg = {'role': 'assistant', 'content': None}\n"
-            "        if not has_tool and 'TASK_ALPHA' in user:\n"
-            "            time.sleep(0.15)\n"
-            "            msg['tool_calls'] = [{'id':'c_a','type':'function','function':{\n"
-            "                'name':'write_file','arguments':json.dumps({'path':'alpha.txt','content':'alpha_v1\\n','expected_sha256':None})}}]\n"
-            "            reason = 'tool_calls'\n"
-            "        elif not has_tool and 'TASK_BETA' in user:\n"
-            "            time.sleep(0.15)\n"
-            "            msg['tool_calls'] = [{'id':'c_b','type':'function','function':{\n"
-            "                'name':'write_file','arguments':json.dumps({'path':'beta.txt','content':'beta_v1\\n','expected_sha256':None})}}]\n"
-            "            reason = 'tool_calls'\n"
-            "        else:\n"
-            "            msg['content'] = 'SUBAGENT_DONE'\n"
-            "            reason = 'stop'\n"
-            "        out = json.dumps({'choices':[{'index':0,'message':msg,'finish_reason':reason}],\n"
-            "                          'usage':{'prompt_tokens':50,'completion_tokens':10,'total_tokens':60}}).encode('utf-8')\n"
-            "        self.send_response(200)\n"
-            "        self.send_header('Content-Type','application/json')\n"
-            "        self.send_header('Content-Length',str(len(out)))\n"
-            "        self.end_headers()\n"
-            "        self.wfile.write(out)\n"
-            "srv = ThreadingHTTPServer(('127.0.0.1', 0), H)\n"
-            "open(sys.argv[1], 'w').write(str(srv.server_address[1]))\n"
-            "srv.serve_forever()\n";
-        CHECK(!atomic_file(srv_py.c_str(),py_code,strlen(py_code),0755));
-        pid_t mpid=fork();CHECK(mpid>=0);
-        if(!mpid){execlp("python3","python3","-B",srv_py.c_str(),port_file.c_str(),static_cast<char *>(nullptr));_exit(127);}
-        std::string port;
-        for(int i=0;i<100&&port.empty();i++){
-            char *p=read_bytes(port_file.c_str(),32,nullptr);
-            if(p&&*p)port=p;
-            free(p);
-            if(port.empty())usleep(30000);
-        }
-        CHECK(!port.empty());
-        put(a.config,"base_url",str(("http://127.0.0.1:"+port+"/v1").c_str()));
+        // Start an in-process multi-threaded HTTP server handling concurrent alpha / beta / noop subagents.
+        int listen_fd=socket(AF_INET,SOCK_STREAM,0);
+        CHECK(listen_fd>=0);
+        struct sockaddr_in wt_addr{};
+        wt_addr.sin_family=AF_INET;
+        wt_addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(!bind(listen_fd,reinterpret_cast<struct sockaddr *>(&wt_addr),sizeof wt_addr));
+        socklen_t wt_len=sizeof wt_addr;
+        CHECK(!getsockname(listen_fd,reinterpret_cast<struct sockaddr *>(&wt_addr),&wt_len));
+        CHECK(!listen(listen_fd,16));
+        put(a.config,"base_url",str(("http://127.0.0.1:"+std::to_string(ntohs(wt_addr.sin_port))+"/v1").c_str()));
+
+        std::atomic<bool> srv_stop{false};
+        std::thread srv_thread([listen_fd,&srv_stop]{
+            auto handle_client=[](int cfd){
+                FILE *fp=fdopen(cfd,"r+");
+                if(!fp){close(cfd);return;}
+                char *line=nullptr;
+                size_t cap=0;
+                long clen=0;
+                if(getline(&line,&cap,fp)>0){
+                    while(getline(&line,&cap,fp)>0&&strcmp(line,"\r\n")&&strcmp(line,"\n")){
+                        if(!strncasecmp(line,"Content-Length:",15))clen=strtol(line+15,nullptr,10);
+                    }
+                }
+                free(line);
+                std::string body(clen>0&&clen<500000?static_cast<size_t>(clen):0,'\0');
+                if(!body.empty()&&fread(body.data(),1,body.size(),fp)!=body.size()){fclose(fp);return;}
+                const bool has_tool=body.find("\"role\":\"tool\"")!=std::string::npos||body.find("\"role\": \"tool\"")!=std::string::npos;
+                std::string payload;
+                if(!has_tool&&body.find("TASK_ALPHA")!=std::string::npos){
+                    usleep(120000);
+                    payload=R"({"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c_a","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"alpha.txt\",\"content\":\"alpha_v1\\n\",\"expected_sha256\":null}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":50,"completion_tokens":10,"total_tokens":60}})";
+                }else if(!has_tool&&body.find("TASK_BETA")!=std::string::npos){
+                    usleep(120000);
+                    payload=R"({"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c_b","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"beta.txt\",\"content\":\"beta_v1\\n\",\"expected_sha256\":null}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":50,"completion_tokens":10,"total_tokens":60}})";
+                }else{
+                    payload=R"({"choices":[{"index":0,"message":{"role":"assistant","content":"SUBAGENT_DONE"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":10,"total_tokens":60}})";
+                }
+                fprintf(fp,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n",payload.size());
+                fwrite(payload.data(),1,payload.size(),fp);
+                fflush(fp);
+                fclose(fp);
+            };
+            std::vector<std::thread> workers;
+            while(!srv_stop){
+                struct pollfd pfd{listen_fd,POLLIN,0};
+                if(poll(&pfd,1,50)<=0)continue;
+                int cfd=accept(listen_fd,nullptr,nullptr);
+                if(cfd<0){if(errno==EINTR)continue;break;}
+                workers.emplace_back(handle_client,cfd);
+            }
+            for(auto &w:workers)if(w.joinable())w.join();
+        });
 
         // A no-change worktree subagent cleans up both worktree and temporary branch.
         JsonPtr noop_q(obj());
@@ -4402,7 +4405,9 @@ static void test_v1_17_features(){
         JsonPtr tracked(run_command(&a,"git ls-files",5000));
         CHECK(strstr(sget(tracked.get(),"output"),".desk-agent")==nullptr);
 
-        kill(mpid,SIGTERM);int mst=0;waitpid(mpid,&mst,0);
+        srv_stop=true;
+        if(srv_thread.joinable())srv_thread.join();
+        close(listen_fd);
         app_cleanup(&a);
         CHECK(a.subagents_data==nullptr);
     }
