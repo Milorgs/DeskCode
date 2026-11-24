@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+
+PackageIdentifier: Milorgs.DeskCode
+PackageVersion: 1.17.0
+PackageLocale: en-US
+Publisher: Milorgs
+PublisherUrl: https://github.com/Milorgs
+PackageName: DeskCode
+PackageUrl: https://github.com/Milorgs/DeskCode
+License: MIT
+ShortDescription: Native C++20 terminal and desktop AI coding agent
+Moniker: deskcode
+Tags:
+  - ai
+  - coding-agent
+  - cli
+  - acp
+  - developer-tools
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: desk.exe
+    PortableCommandAlias: desk
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Milorgs/DeskCode/releases/download/v1.17.0/desk-agent-windows-x64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Milorgs/DeskCode/releases/download/v1.17.0/desk-agent-windows-arm64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: singleton
+ManifestVersion: 1.6.0

@@ -1,0 +1,26 @@
+# Maintainer: Milorgs <https://github.com/Milorgs>
+pkgname=deskcode-bin
+pkgver=1.17.0
+pkgrel=1
+pkgdesc="Native C++20 terminal and desktop AI coding agent"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Milorgs/DeskCode"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'curl' 'json-c' 'openssl' 'readline' 'at-spi2-core')
+provides=('deskcode')
+conflicts=('deskcode')
+source_x86_64=("deskcode-${pkgver}-x86_64.tar.gz::https://github.com/Milorgs/DeskCode/releases/download/v${pkgver}/desk-agent-linux-x64.tar.gz")
+source_aarch64=("deskcode-${pkgver}-aarch64.tar.gz::https://github.com/Milorgs/DeskCode/releases/download/v${pkgver}/desk-agent-linux-arm64.tar.gz")
+sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums_aarch64=('0000000000000000000000000000000000000000000000000000000000000000')
+
+package() {
+  local _pkgdir="desk-agent-linux-x64"
+  if [[ "$CARCH" == "aarch64" ]]; then
+    _pkgdir="desk-agent-linux-arm64"
+  fi
+  install -Dm755 "${srcdir}/${_pkgdir}/desk" "${pkgdir}/usr/bin/desk"
+  if [[ -f "${srcdir}/${_pkgdir}/README.txt" ]]; then
+    install -Dm644 "${srcdir}/${_pkgdir}/README.txt" "${pkgdir}/usr/share/doc/${pkgname}/README.txt"
+  fi
+}

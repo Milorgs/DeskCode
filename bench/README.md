@@ -47,6 +47,9 @@ python3 bench/smoke_test.py                        # 用本地假模型端到端
 DESK_BASE_URL=https://api.example.com/v1 DESK_MODEL=<model> DESK_API_TYPE=openai \
 DESK_API_KEY="$(secret-tool lookup service deskcode)" \
 python3 bench/run_local.py --label <model> --repeat 3 --jobs 4
+
+# 将多次跑分结果聚合为 Markdown 榜单表（支持输出到文件）
+python3 bench/render_leaderboard.py bench/results/*.json --out bench/LEADERBOARD.md
 ```
 
 常用参数：`--tasks 'c-*,git-*'`（逗号分隔、支持通配）、`--repeat N`、`--jobs N`、`--timeout S`、`--max-steps N`、
@@ -79,8 +82,8 @@ python3 bench/run_local.py --label <model> --repeat 3 --jobs 4
 
 `harbor/deskcode_agent.py` 中的 `DeskCodeAgent` 是 Harbor 的“已安装 Agent”（`BaseInstalledAgent`）：
 
-1. `install()`：上传并以 root 执行 `harbor/install-deskcode.sh`——安装运行库（apt/dnf/yum），下载
-   `https://github.com/Milorgs/DeskCode/releases/latest/download/desk-agent-linux-x64.tar.gz`，
+1. `install()`：上传并以 root 执行 `harbor/install-deskcode.sh`——自动识别容器架构（`x86_64` / `aarch64`），安装运行库（apt/dnf/yum），下载对应的
+   `desk-agent-linux-x64.tar.gz` 或 `desk-agent-linux-arm64.tar.gz`，
    用包内 `install.sh --prefix /usr/local` 安装，并用 `ldd` 检查依赖；
 2. `run()`：把任务指令上传为文件，在任务工作目录执行
    `desk --json -p - --approval full --no-sandbox --workspace "$PWD" < instruction.md`，
@@ -109,7 +112,7 @@ PYTHONPATH="$PWD" harbor run -d terminal-bench@2.0 \
 - **并发**：`--n-concurrent` 受本机 Docker 资源和模型服务限流约束，建议从 2–4 开始；遇到 429 可配合
   `--max-retries` 重试。
 - **网络**：容器内需要能访问 GitHub Release（安装）和模型接口（运行）；网络受限的环境需要放行对应主机。
-- **兼容性**：预编译二进制要求 x86_64 + glibc ≥ 2.35（Ubuntu 22.04+/Debian 12+），Alpine(musl) 镜像不支持。
+- **兼容性**：预编译二进制支持 `x86_64` 与 `aarch64`（`arm64`）+ glibc ≥ 2.35（Ubuntu 22.04+/Debian 12+），Alpine(musl) 镜像不支持。
 - **密钥**：`--ae` 的值会出现在本机进程列表中；不要把带密钥的命令写进脚本或提交，Harbor 的作业目录（`jobs/`）也不要提交。
 
 ---

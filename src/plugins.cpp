@@ -282,7 +282,7 @@ JsonPtr read_manifest(const std::string &dir){
 bool looks_like_plugin(const std::string &dir){
     if(!manifest_path(dir).empty())return true;
     std::error_code ec;
-    for(const char *sub:{"/commands","/skills","/hooks"})if(fs::is_directory(fs_path(dir+sub),ec))return true;
+    for(const char *sub:{"/commands","/skills","/agents","/hooks"})if(fs::is_directory(fs_path(dir+sub),ec))return true;
     return fs::is_regular_file(fs_path(dir+"/.mcp.json"),ec);
 }
 // Replace ${CLAUDE_PLUGIN_ROOT} / ${DESK_PLUGIN_ROOT} in every string.
@@ -494,7 +494,7 @@ int install_directory(App &app,const std::string &dir,const std::string &source,
     printf(tr("已安装插件 %s%s%s：%zu 个指令，%zu 个技能，%zu 个 MCP 服务%s。\n"),name.c_str(),
            *sget(manifest.get(),"version")?" ":"",sget(manifest.get(),"version"),counts.commands,counts.skills,counts.mcp,
            counts.hooks?tr("，含钩子"):"");
-    if(counts.agents)printf(tr("提示：插件中的 %zu 个子代理定义（agents/）暂不支持，已忽略。\n"),counts.agents);
+    if(counts.agents)printf(tr("已加载插件中的 %zu 个子代理（agents/）。\n"),counts.agents);
     return 0;
 }
 int install_from(App &app,const std::string &source,const std::string &wanted,int depth){
@@ -558,8 +558,8 @@ int plugin_cli(App &app,int argc,char **argv,int first){
         JsonPtr manifest=read_manifest(dir);
         const std::string name=*sget(manifest.get(),"name")?sget(manifest.get(),"name"):path_text(fs_path(dir).filename());
         const Counts counts=count_components(dir);
-        printf("%s %s: %zu cmd · %zu skill · %zu mcp%s%s\n",valid_plugin_name(name)?"✓":"✗",name.c_str(),counts.commands,counts.skills,
-               counts.mcp,counts.hooks?" · hooks":"",counts.agents?" · agents (ignored)":"");
+        printf("%s %s: %zu cmd · %zu skill · %zu agent · %zu mcp%s\n",valid_plugin_name(name)?"✓":"✗",name.c_str(),counts.commands,counts.skills,
+               counts.agents,counts.mcp,counts.hooks?" · hooks":"");
         return valid_plugin_name(name)?0:1;
     }
     fputs(tr("用法：desk plugin [list | install <来源> [插件名] | update <名称> | enable <名称> | disable <名称> | remove <名称> | validate [目录]]\n"),stderr);

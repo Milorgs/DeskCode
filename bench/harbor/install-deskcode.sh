@@ -15,15 +15,16 @@
 # not supported by the prebuilt binary.
 set -euo pipefail
 
-DESK_RELEASE_URL=${DESK_RELEASE_URL:-https://github.com/Milorgs/DeskCode/releases/latest/download/desk-agent-linux-x64.tar.gz}
+case "$(uname -m)" in
+    x86_64|amd64) default_pkg="desk-agent-linux-x64" ;;
+    aarch64|arm64) default_pkg="desk-agent-linux-arm64" ;;
+    *) log "unsupported architecture $(uname -m); DeskCode supports x86_64 and arm64"; exit 1 ;;
+esac
+
+DESK_RELEASE_URL=${DESK_RELEASE_URL:-https://github.com/Milorgs/DeskCode/releases/latest/download/${default_pkg}.tar.gz}
 DESK_PREFIX=${DESK_PREFIX:-/usr/local}
 
 log() { printf '[deskcode-install] %s\n' "$*" >&2; }
-
-case "$(uname -m)" in
-    x86_64|amd64) ;;
-    *) log "unsupported architecture $(uname -m); the DeskCode release is x86_64 only"; exit 1 ;;
-esac
 
 if [ -f /etc/alpine-release ]; then
     log "Alpine (musl) detected: the prebuilt glibc binary cannot run here"
@@ -84,8 +85,8 @@ trap 'rm -rf "$tmp"' EXIT
 log "downloading $DESK_RELEASE_URL"
 download "$DESK_RELEASE_URL" "$tmp/desk.tar.gz"
 tar -xzf "$tmp/desk.tar.gz" -C "$tmp"
-pkg=$(find "$tmp" -maxdepth 2 -name install.sh -path '*desk-agent-linux-x64*' | head -n 1)
-[ -n "$pkg" ] || { log "release archive does not contain desk-agent-linux-x64/install.sh"; exit 1; }
+pkg=$(find "$tmp" -maxdepth 2 -name install.sh -path '*desk-agent-linux-*' | head -n 1)
+[ -n "$pkg" ] || { log "release archive does not contain desk-agent-linux-*/install.sh"; exit 1; }
 
 # install.sh refuses to overwrite a foreign `desk`; a previous DeskCode install is replaced.
 HOME=${HOME:-/root} sh "$pkg" --prefix "$DESK_PREFIX"

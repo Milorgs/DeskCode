@@ -17,13 +17,15 @@ case "$os" in
     Linux)
         case "$arch" in
             X64|x86_64|amd64) asset=desk-agent-linux-x64.tar.gz; dir=desk-agent-linux-x64 ;;
-            *) err "DeskCode does not publish a Linux build for $arch (only x64)." ;;
+            ARM64|aarch64|arm64) asset=desk-agent-linux-arm64.tar.gz; dir=desk-agent-linux-arm64 ;;
+            *) err "DeskCode does not publish a Linux build for $arch (only x64 and arm64)." ;;
         esac ;;
     macOS|Darwin) asset=desk-agent-macos-universal.tar.gz; dir=desk-agent-macos-universal ;;
     Windows|MINGW*|MSYS*|CYGWIN*)
         case "$arch" in
             X64|x86_64|amd64) asset=desk-agent-windows-x64.zip; dir= ;;
-            *) err "DeskCode does not publish a Windows build for $arch (only x64)." ;;
+            ARM64|aarch64|arm64) asset=desk-agent-windows-arm64.zip; dir= ;;
+            *) err "DeskCode does not publish a Windows build for $arch (only x64 and arm64)." ;;
         esac ;;
     *) err "Unsupported runner OS: $os" ;;
 esac

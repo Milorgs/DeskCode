@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 420" width="920" height="420" role="img" aria-label="DeskCode native desktop GUI accessibility automation demo">
+  <defs>
+    <style>
+      .bg { fill: #0f131a; }
+      .panel { fill: #161b24; stroke: #2c3547; stroke-width: 1.5; }
+      .win { fill: #1e2430; stroke: #3d4a63; stroke-width: 1.5; }
+      .input { fill: #121720; stroke: #3c485e; stroke-width: 1; }
+      .input-hi { fill: #152238; stroke: #6f9fff; stroke-width: 1.5; }
+      .btn { fill: #2b59c3; }
+      .btn-done { fill: #238636; }
+      .txt { font-family: 'JetBrains Mono', 'Fira Code', Consolas, 'Noto Sans Mono CJK SC', monospace; font-size: 12.8px; }
+      .ui { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; fill: #dce3ee; }
+      .dim { fill: #8b96ab; }
+      .accent { fill: #6f9fff; font-weight: 600; }
+      .ok { fill: #7ee787; }
+      .plain { fill: #e6edf3; }
+      .g1 { opacity: 0; animation: gshow1 12s infinite; }
+      .g2 { opacity: 0; animation: gshow2 12s infinite; }
+      .g3 { opacity: 0; animation: gshow3 12s infinite; }
+      .g4 { opacity: 0; animation: gshow4 12s infinite; }
+      @keyframes gshow1 { 0%,6% { opacity: 0; } 10%,92% { opacity: 1; } 97%,100% { opacity: 0; } }
+      @keyframes gshow2 { 0%,28% { opacity: 0; } 33%,92% { opacity: 1; } 97%,100% { opacity: 0; } }
+      @keyframes gshow3 { 0%,52% { opacity: 0; } 57%,92% { opacity: 1; } 97%,100% { opacity: 0; } }
+      @keyframes gshow4 { 0%,74% { opacity: 0; } 79%,92% { opacity: 1; } 97%,100% { opacity: 0; } }
+    </style>
+  </defs>
+
+  <rect width="920" height="420" rx="12" class="bg"/>
+
+  <!-- Left: DeskCode Terminal -->
+  <rect x="14" y="14" width="510" height="392" rx="10" class="panel"/>
+  <text x="30" y="42" class="txt accent">DeskCode Terminal · Native GUI Accessibility</text>
+  <text x="30" y="64" class="txt dim">AT-SPI (Linux) · UI Automation (Win) · System Events (macOS)</text>
+
+  <text x="30" y="96" class="txt accent">❯</text>
+  <text x="48" y="96" class="txt plain">把 config.json 的端口和网关填进「Deploy Console」窗口并点击 Apply。</text>
+
+  <g class="g1">
+    <text x="30" y="130" class="txt accent">⏺ 读取桌面(app="Deploy Console")</text>
+    <text x="44" y="150" class="txt dim">  ⎿  完成 · 12 个无障碍控件 (@e3 Host, @e5 Port, @e8 Apply) · 0.1s</text>
+  </g>
+
+  <g class="g2">
+    <text x="30" y="182" class="txt accent">⏺ 操作桌面(@e3 → "10.24.0.8", @e5 → "8443")</text>
+    <text x="44" y="202" class="txt dim">  ⎿  完成 · desktop_set_text 已写入可编辑控件 · 0.2s</text>
+  </g>
+
+  <g class="g3">
+    <text x="30" y="234" class="txt accent">⏺ 操作桌面(@e8 action="click") + 截取桌面</text>
+    <text x="44" y="254" class="txt ok">  ⎿  完成 · 已点击 Apply 并附带活动窗口截图多模态核验 · 0.4s</text>
+  </g>
+
+  <g class="g4">
+    <text x="30" y="292" class="txt ok">●</text>
+    <text x="48" y="292" class="txt plain">已填入网关 `10.24.0.8:8443` 并触发 Apply，截图确认状态已变为 Active。</text>
+  </g>
+
+  <!-- Right: Native Desktop App Window -->
+  <rect x="542" y="14" width="364" height="392" rx="10" class="win"/>
+  <rect x="542" y="14" width="364" height="34" rx="10" fill="#273042"/>
+  <text x="724" y="36" text-anchor="middle" class="ui" style="font-weight:600">Deploy Console (Native Desktop App)</text>
+
+  <text x="566" y="82" class="ui dim">Gateway Host  [@e3]</text>
+  <rect x="566" y="92" width="316" height="34" rx="6" class="input"/>
+  <text x="578" y="114" class="txt dim">127.0.0.1</text>
+  <g class="g2">
+    <rect x="566" y="92" width="316" height="34" rx="6" class="input-hi"/>
+    <text x="578" y="114" class="txt plain">10.24.0.8</text>
+  </g>
+
+  <text x="566" y="156" class="ui dim">TLS Listen Port  [@e5]</text>
+  <rect x="566" y="166" width="316" height="34" rx="6" class="input"/>
+  <text x="578" y="188" class="txt dim">8080</text>
+  <g class="g2">
+    <rect x="566" y="166" width="316" height="34" rx="6" class="input-hi"/>
+    <text x="578" y="188" class="txt plain">8443</text>
+  </g>
+
+  <rect x="566" y="226" width="316" height="38" rx="6" class="btn"/>
+  <text x="724" y="250" text-anchor="middle" class="ui" style="font-weight:600;fill:#ffffff">Apply Configuration  [@e8]</text>
+
+  <g class="g3">
+    <rect x="566" y="226" width="316" height="38" rx="6" class="btn-done"/>
+    <text x="724" y="250" text-anchor="middle" class="ui" style="font-weight:600;fill:#ffffff">✓ Configuration Applied</text>
+  </g>
+
+  <rect x="566" y="288" width="316" height="92" rx="6" fill="#131822" stroke="#2c3547"/>
+  <text x="580" y="314" class="txt dim">Status: Idle (port 8080)</text>
+  <g class="g3">
+    <rect x="566" y="288" width="316" height="92" rx="6" fill="#12211c" stroke="#2ea043"/>
+    <text x="580" y="316" class="txt ok">● Status: Active (TLS 10.24.0.8:8443)</text>
+    <text x="580" y="340" class="txt dim">Verified via desktop_screenshot</text>
+    <text x="580" y="362" class="txt dim">Zero browser/Playwright dependency</text>
+  </g>
+</svg>

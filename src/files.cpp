@@ -906,6 +906,8 @@ static J *builtin_tools(){
         literal(R"({"type":"function","function":{"name":"shell_output","description":"Read new output and the status (running, or exit_code once finished) of a background command started by run_shell with background=true.","parameters":{"type":"object","properties":{"shell_id":{"type":"string","description":"The shell_id returned when the command was started."}},"required":["shell_id"],"additionalProperties":false}}})");
         literal(R"({"type":"function","function":{"name":"shell_kill","description":"Stop a background command and its child processes.","parameters":{"type":"object","properties":{"shell_id":{"type":"string","description":"The shell_id returned when the command was started."}},"required":["shell_id"],"additionalProperties":false}}})");
         literal(R"({"type":"function","function":{"name":"lsp","description":"Ask the project's language server (compiler-grade analysis). diagnostics: current errors and warnings of a file; definition / references / hover: for the symbol at line and column; symbols: outline of a file. Edits already return diagnostics automatically when a server is available.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"diagnostics, definition, references, hover or symbols."},"path":{"type":"string","description":"Workspace-relative file path."},"line":{"type":"integer","description":"1-based line of the symbol (definition, references, hover)."},"column":{"type":"integer","description":"1-based character column of the symbol (default 1)."}},"required":["action","path"],"additionalProperties":false}}})");
+        literal(R"({"type":"function","function":{"name":"delegate_task","description":"Delegate a self-contained coding or research subtask to an isolated subagent. Built-in agents: 'coder' (default, can edit files and run commands) and 'research' (read-only). Set worktree=true to run inside a temporary git worktree branch (desk/<agent>-<id>) so parallel tasks can edit files simultaneously without conflicts; if changes are made, the branch name and commit are returned so you can git merge it. Set background=true to start up to 4 subagents in parallel and collect each result with subagent_output.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"Self-contained task instructions for the subagent."},"agent":{"type":"string","description":"Agent name: 'coder' (default), 'research', or a custom agent name."},"worktree":{"type":"boolean","description":"Run in an isolated git worktree branch from HEAD."},"background":{"type":"boolean","description":"Run asynchronously in the background and return an agent_id immediately."}},"required":["prompt"],"additionalProperties":false}}})");
+        literal(R"({"type":"function","function":{"name":"subagent_output","description":"Wait for or inspect the result of a background subagent started by delegate_task(background=true), returning its reply, status, and git worktree branch/commit when files were changed.","parameters":{"type":"object","properties":{"agent_id":{"type":"string","description":"The agent_id returned by delegate_task."},"wait":{"type":"boolean","description":"Wait until finished (default true); set false to poll without blocking."}},"required":["agent_id"],"additionalProperties":false}}})");
         return tools;
     }());
     return catalog.get();
@@ -919,8 +921,17 @@ bool plan_safe_tool(const char *name){
 static bool tool_enabled(const App &app,const char *name){
     if(!strcmp(name,"lsp")&&!lsp_available(app))return false;
     if(app.subagent){
-        return !strcmp(name,"list_files")||!strcmp(name,"search_text")
-            ||!strcmp(name,"read_file")||!strcmp(name,"code_outline")||!strcmp(name,"lsp");
+        if(!strcmp(name,"delegate_research")||!strcmp(name,"delegate_task")||!strcmp(name,"subagent_output")
+           ||!strcmp(name,"submit_plan")||!strncmp(name,"desktop_",8))return false;
+        if(!app.subagent_tools.empty()){
+            if(std::find(app.subagent_tools.begin(),app.subagent_tools.end(),name)==app.subagent_tools.end())return false;
+        }
+        if(!app.subagent_writable){
+            return !strcmp(name,"list_files")||!strcmp(name,"search_text")
+                ||!strcmp(name,"read_file")||!strcmp(name,"code_outline")||!strcmp(name,"lsp");
+        }
+        if(!strcmp(name,"run_shell")||!strcmp(name,"shell_output")||!strcmp(name,"shell_kill"))return app.shell;
+        return true;
     }
     if(!strcmp(name,"submit_plan"))return app.plan_mode;
     // Plan mode keeps run_shell for read-only commands; tool_call refuses the rest.
@@ -935,22 +946,34 @@ J *schemas(App *a){
     J *catalog=builtin_tools();
     for(size_t i=0;i<alen(catalog);i++){
         J *item=at(catalog,i);
-        if(tool_enabled(*a,sget(get(item,"function"),"name")))add(tools.get(),copy(item));
+        const char *tname=sget(get(item,"function"),"name");
+        if(!tool_enabled(*a,tname))continue;
+        J *cloned=copy(item);
+        if(!strcmp(tname,"delegate_task")){
+            const std::string dyn=delegate_task_description(*a);
+            put(get(cloned,"function"),"description",str(dyn.c_str()));
+        }
+        add(tools.get(),cloned);
     }
     // Skills are listed in their tool's description, so it exists only when
     // there is at least one.
-    if(!a->subagent)if(J *skill=skill_tool_definition(*a))add(tools.get(),skill);
-    // An MCP tool can change anything, so plan mode leaves them out.
-    if(!a->plan_mode)mcp_append_tools(*a,tools.get());
+    if((!a->subagent||(a->subagent_writable&&(a->subagent_tools.empty()||
+       std::find(a->subagent_tools.begin(),a->subagent_tools.end(),"skill")!=a->subagent_tools.end())))){
+        if(J *skill=skill_tool_definition(*a))add(tools.get(),skill);
+    }
+    // An MCP tool can change anything, so plan mode and subagents leave them out.
+    if(!a->plan_mode&&!a->subagent)mcp_append_tools(*a,tools.get());
     return tools.release();
 }
 J *tool_call(App *a,const char *name,J *args){
     if(!strncmp(name,"mcp_",4)){
-        if(a->plan_mode)return err(tr("计划模式下不能调用 MCP 工具；请写入计划，批准后再执行。"));
+        if(a->plan_mode||a->subagent)return err(tr("计划模式下不能调用 MCP 工具；请写入计划，批准后再执行。"));
         return mcp_call(*a,name,args);
     }
     if(!strcmp(name,"skill")){
-        if(a->subagent||!json_object_is_type(args,json_type_object))return err(tr("未知或未启用的工具，或参数不是对象。"));
+        const bool skill_ok=!a->subagent||(a->subagent_writable&&(a->subagent_tools.empty()||
+            std::find(a->subagent_tools.begin(),a->subagent_tools.end(),"skill")!=a->subagent_tools.end()));
+        if(!skill_ok||!json_object_is_type(args,json_type_object))return err(tr("未知或未启用的工具，或参数不是对象。"));
         return tool_skill(a,args);
     }
     J *defs=builtin_tools(),*spec=NULL;
@@ -1022,6 +1045,8 @@ J *tool_call(App *a,const char *name,J *args){
     if(!strcmp(name,"shell_output"))return tool_shell_output(a,args);
     if(!strcmp(name,"shell_kill"))return tool_shell_kill(a,args);
     if(!strcmp(name,"lsp"))return tool_lsp(a,args);
+    if(!strcmp(name,"delegate_task"))return tool_delegate_task(a,args);
+    if(!strcmp(name,"subagent_output"))return tool_subagent_output(a,args);
     std::unique_ptr<ResourceLock> lock;
     if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit")||!strcmp(name,"run_shell")){
         lock=std::make_unique<ResourceLock>(*a,false);

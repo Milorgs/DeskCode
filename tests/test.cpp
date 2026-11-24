@@ -563,23 +563,25 @@ static void test_context_and_validation(void){
 }
 static void test_tool_configuration(){
     App a=fresh();a.shell=true;a.desktop=true;
-    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==18);
+    JsonPtr enabled(schemas(&a));CHECK(alen(enabled.get())==20);
     // Mutating one caller's schema must not change validation or other callers.
     json_object_object_del(get(get(get(at(enabled.get(),0),"function"),"parameters"),"properties"),"path");
     JsonPtr untouched(schemas(&a));
     CHECK(get(get(get(get(at(untouched.get(),0),"function"),"parameters"),"properties"),"path"));
     JsonPtr empty(obj()),result(tool_call(&a,"list_files",empty.get()));CHECK(tool_failed(result.get()));
     a.shell=false;a.desktop=false;
-    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==11);
+    JsonPtr disabled(schemas(&a));CHECK(alen(disabled.get())==13);
     JsonPtr shell_args(obj());put(shell_args.get(),"command",str("exit 0"));
     result.reset(tool_call(&a,"run_shell",shell_args.get()));CHECK(tool_failed(result.get()));
     JsonPtr desktop_args(obj());put(desktop_args.get(),"app",str(""));
     result.reset(tool_call(&a,"desktop_snapshot",desktop_args.get()));CHECK(tool_failed(result.get()));
-    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==14);
-    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==11);
+    a.shell=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==16);
+    a.shell=false;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==13);
     a.subagent=true;enabled.reset(schemas(&a));CHECK(alen(enabled.get())==4);
     JsonPtr research_args(obj());put(research_args.get(),"question",str("nested?"));
     result.reset(tool_call(&a,"delegate_research",research_args.get()));CHECK(tool_failed(result.get()));
+    JsonPtr task_args(obj());put(task_args.get(),"prompt",str("nested task"));
+    result.reset(tool_call(&a,"delegate_task",task_args.get()));CHECK(tool_failed(result.get()));
     a.subagent=false;
     app_cleanup(&a);
 }
@@ -1321,12 +1323,14 @@ static void test_settings_redraw(){
     CHECK(screen.find("Add a model and enter an API key first.")!=std::string::npos);CHECK(screen.find("[1] Interface language")!=std::string::npos);
     // Saving a language preference should produce one visible notice, not a duplicate.
     output.clear();CHECK(write(master,"1\n2\n",4)==4);
-    CHECK(terminal_until(master,output,"Language changed to English."));CHECK(terminal_until(master,output,"Select a number:"));
+    CHECK(terminal_until(master,output,"Language changed to English."));
     size_t first_notice=output.find("Language changed to English."),last_notice=output.rfind("Language changed to English.");
     CHECK(first_notice==last_notice);
+    output.erase(0,first_notice);CHECK(terminal_until(master,output,"Select a number:"));
     // EOF from a settings submenu must terminate without redrawing forever.
     output.clear();CHECK(write(master,"2\n",2)==2);CHECK(terminal_until(master,output,"[1] Enable"));
-    // Wait for the input prompt before sending the EOF key.
+    // Wait for the submenu's own input prompt (after [1] Enable) before sending EOF.
+    output.erase(0,output.rfind("[1] Enable"));
     CHECK(terminal_until(master,output,"Select a number:"));
     CHECK(write(master,"\x04",1)==1);
     CHECK(reap_pty(master,child)==0);app_cleanup(&a);
@@ -2656,7 +2660,7 @@ static void test_mcp(){
     child=restarted;
     JsonPtr failed(mcp_call(a,fail.c_str(),input.get()));CHECK(tool_failed(failed.get()));
     CHECK(!workflow(&a,{model_tool("external",echo.c_str(),copy(input.get())),model_reply(nullptr,"MCP model integration complete")}));
-    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==16);
+    JsonPtr request(capture(&a,0));J *defs=get(get(request.get(),"body"),"tools");CHECK(alen(defs)==18);
     JsonPtr follow(capture(&a,1));J *messages=get(get(follow.get(),"body"),"messages");CHECK(strstr(sget(at(messages,alen(messages)-1),"content"),"MCP_ECHO_OK"));
     mcp_close(a);CHECK(kill(child,0)<0&&errno==ESRCH);
     put(get(loaded.get(),"fixture"),"disabled",json_object_new_boolean(true));CHECK(mcp_save(a,loaded.get()));CHECK(mcp_prepare(a));tools.reset(mcp_tools(a));CHECK(alen(tools.get())==0);
@@ -4216,6 +4220,193 @@ static void test_v1_16_features(){
         app_cleanup(&a);
     }
 }
+static void test_v1_17_features(){
+    // 1. Custom subagents (.deskcode/agents/*.md, .claude/agents/*.md, plugin agents/*.md) + tool mapping.
+    {
+        App a=fresh();a.yes=true;a.shell=true;
+        CHECK(!mkdirs((std::string(a.root)+"/.deskcode/agents").c_str(),0700));
+        CHECK(!mkdirs((std::string(a.root)+"/.claude/agents").c_str(),0700));
+        const char *auditor_md=
+            "---\n"
+            "name: auditor\n"
+            "description: Read-only security auditor\n"
+            "tools: Read, Grep\n"
+            "---\n"
+            "Inspect security boundaries.\n";
+        const char *fixer_md=
+            "---\n"
+            "description: Isolated worktree bug fixer\n"
+            "tools: [Read, Edit, Write, Bash]\n"
+            "isolation: worktree\n"
+            "max_steps: 12\n"
+            "---\n"
+            "Fix the bug in your isolated worktree.\n";
+        CHECK(!atomic_file((std::string(a.root)+"/.deskcode/agents/auditor.md").c_str(),auditor_md,strlen(auditor_md),0600));
+        CHECK(!atomic_file((std::string(a.root)+"/.claude/agents/fixer.md").c_str(),fixer_md,strlen(fixer_md),0600));
+
+        // Plugin with agents/
+        const std::string pdir=std::string(sandbox)+"/agent-plugin";
+        CHECK(!mkdirs((pdir+"/.claude-plugin").c_str(),0700));
+        CHECK(!mkdirs((pdir+"/agents").c_str(),0700));
+        const char *pjson=R"({"name":"ag-pack","version":"1.0.0"})";
+        const char *pag_md="---\ndescription: Plugin refactor specialist\n---\nRefactor cleanly.\n";
+        CHECK(!atomic_file((pdir+"/.claude-plugin/plugin.json").c_str(),pjson,strlen(pjson),0600));
+        CHECK(!atomic_file((pdir+"/agents/refactor.md").c_str(),pag_md,strlen(pag_md),0600));
+        char *av_install[]={const_cast<char *>("desk"),const_cast<char *>("plugin"),const_cast<char *>("install"),const_cast<char *>(pdir.c_str())};
+        CHECK(plugin_cli(a,4,av_install,2)==0);
+
+        auto agents=list_subagents(a);
+        CHECK(agents.size()==3);
+        bool saw_auditor=false,saw_fixer=false,saw_plugin_ag=false;
+        for(const auto &ag:agents){
+            if(ag.name=="auditor")saw_auditor=ag.readonly&&!ag.worktree&&ag.tools.size()==2;
+            if(ag.name=="fixer")saw_fixer=!ag.readonly&&ag.worktree&&ag.max_steps==12;
+            if(ag.name=="ag-pack:refactor")saw_plugin_ag=!ag.readonly&&ag.scope=="plugin";
+        }
+        CHECK(saw_auditor&&saw_fixer&&saw_plugin_ag);
+
+        JsonPtr defs(schemas(&a));
+        std::string dt_desc;
+        for(size_t i=0;i<alen(defs.get());i++){
+            J *fn=get(at(defs.get(),i),"function");
+            if(!strcmp(sget(fn,"name"),"delegate_task"))dt_desc=sget(fn,"description");
+        }
+        CHECK(dt_desc.find("auditor [read-only]")!=std::string::npos);
+        CHECK(dt_desc.find("fixer [worktree]")!=std::string::npos);
+        CHECK(dt_desc.find("ag-pack:refactor")!=std::string::npos);
+
+        // Approval & mode gates: plan_mode blocks writable delegate_task; ask mode denies without terminal.
+        a.plan_mode=true;
+        JsonPtr req(obj());put(req.get(),"prompt",str("change code"));
+        JsonPtr blocked(tool_call(&a,"delegate_task",req.get()));
+        CHECK(tool_failed(blocked.get()));
+        a.plan_mode=false;
+        a.yes=false;a.auto_edit=false;
+        blocked.reset(tool_call(&a,"delegate_task",req.get()));
+        CHECK(tool_failed(blocked.get())&&bget(blocked.get(),"denied"));
+        app_cleanup(&a);
+    }
+
+    // 2. Parallel background Git worktree subagents (`background=true, worktree=true` x 2) + branch merge!
+    {
+        App a=fresh();json_object_put(a.config);a.config=config("wt-parallel","openai");
+        a.yes=true;a.shell=true;
+        // Initialize a real git repository in `a.root` with an initial commit on `main`.
+        JsonPtr init_cmd(run_command(&a,"git init -q -b main && printf 'base\\n' > base.txt && git add base.txt && "
+                                        "git -c user.name=t -c user.email=t@e commit -qm init",10000));
+        CHECK(!tool_failed(init_cmd.get())&&iget(init_cmd.get(),"exit_code",-1)==0);
+
+        // Start a ThreadingHTTPServer fake model handling concurrent alpha / beta / noop subagents.
+        const std::string srv_py=std::string(sandbox)+"/wt_model.py";
+        const std::string port_file=std::string(sandbox)+"/wt_port";
+        const char *py_code=
+            "#!/usr/bin/env python3\n"
+            "import json, sys, time\n"
+            "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+            "class H(BaseHTTPRequestHandler):\n"
+            "    def log_message(self, *a): pass\n"
+            "    def do_POST(self):\n"
+            "        n = int(self.headers.get('Content-Length') or 0)\n"
+            "        body = json.loads(self.rfile.read(n).decode('utf-8'))\n"
+            "        msgs = body.get('messages') or []\n"
+            "        user = ' '.join(m.get('content','') for m in msgs if m.get('role') == 'user')\n"
+            "        has_tool = any(m.get('role') == 'tool' for m in msgs)\n"
+            "        msg = {'role': 'assistant', 'content': None}\n"
+            "        if not has_tool and 'TASK_ALPHA' in user:\n"
+            "            time.sleep(0.15)\n"
+            "            msg['tool_calls'] = [{'id':'c_a','type':'function','function':{\n"
+            "                'name':'write_file','arguments':json.dumps({'path':'alpha.txt','content':'alpha_v1\\n','expected_sha256':None})}}]\n"
+            "            reason = 'tool_calls'\n"
+            "        elif not has_tool and 'TASK_BETA' in user:\n"
+            "            time.sleep(0.15)\n"
+            "            msg['tool_calls'] = [{'id':'c_b','type':'function','function':{\n"
+            "                'name':'write_file','arguments':json.dumps({'path':'beta.txt','content':'beta_v1\\n','expected_sha256':None})}}]\n"
+            "            reason = 'tool_calls'\n"
+            "        else:\n"
+            "            msg['content'] = 'SUBAGENT_DONE'\n"
+            "            reason = 'stop'\n"
+            "        out = json.dumps({'choices':[{'index':0,'message':msg,'finish_reason':reason}],\n"
+            "                          'usage':{'prompt_tokens':50,'completion_tokens':10,'total_tokens':60}}).encode('utf-8')\n"
+            "        self.send_response(200)\n"
+            "        self.send_header('Content-Type','application/json')\n"
+            "        self.send_header('Content-Length',str(len(out)))\n"
+            "        self.end_headers()\n"
+            "        self.wfile.write(out)\n"
+            "srv = ThreadingHTTPServer(('127.0.0.1', 0), H)\n"
+            "open(sys.argv[1], 'w').write(str(srv.server_address[1]))\n"
+            "srv.serve_forever()\n";
+        CHECK(!atomic_file(srv_py.c_str(),py_code,strlen(py_code),0755));
+        pid_t mpid=fork();CHECK(mpid>=0);
+        if(!mpid){execlp("python3","python3","-B",srv_py.c_str(),port_file.c_str(),static_cast<char *>(nullptr));_exit(127);}
+        std::string port;
+        for(int i=0;i<100&&port.empty();i++){
+            char *p=read_bytes(port_file.c_str(),32,nullptr);
+            if(p&&*p)port=p;
+            free(p);
+            if(port.empty())usleep(30000);
+        }
+        CHECK(!port.empty());
+        put(a.config,"base_url",str(("http://127.0.0.1:"+port+"/v1").c_str()));
+
+        // A no-change worktree subagent cleans up both worktree and temporary branch.
+        JsonPtr noop_q(obj());
+        put(noop_q.get(),"prompt",str("TASK_NOOP inspect only"));
+        put(noop_q.get(),"agent",str("research"));
+        put(noop_q.get(),"worktree",json_object_new_boolean(1));
+        JsonPtr noop_r(tool_call(&a,"delegate_task",noop_q.get()));
+        CHECK(!tool_failed(noop_r.get())&&!get(noop_r.get(),"branch"));
+        JsonPtr branches_chk(run_command(&a,"git branch --list 'desk/*'",5000));
+        CHECK(strlen(sget(branches_chk.get(),"output"))==0);
+
+        // Launch two writable worktree subagents in parallel in the background!
+        JsonPtr q1(obj()),q2(obj());
+        put(q1.get(),"prompt",str("TASK_ALPHA create alpha.txt"));
+        put(q1.get(),"worktree",json_object_new_boolean(1));
+        put(q1.get(),"background",json_object_new_boolean(1));
+        put(q2.get(),"prompt",str("TASK_BETA create beta.txt"));
+        put(q2.get(),"worktree",json_object_new_boolean(1));
+        put(q2.get(),"background",json_object_new_boolean(1));
+
+        JsonPtr s1(tool_call(&a,"delegate_task",q1.get()));
+        JsonPtr s2(tool_call(&a,"delegate_task",q2.get()));
+        CHECK(!tool_failed(s1.get())&&bget(s1.get(),"running")&&!strcmp(sget(s1.get(),"agent_id"),"agent-2"));
+        CHECK(!tool_failed(s2.get())&&bget(s2.get(),"running")&&!strcmp(sget(s2.get(),"agent_id"),"agent-3"));
+        // Main workspace stays clean while both worktree subagents run!
+        CHECK(access((std::string(a.root)+"/alpha.txt").c_str(),F_OK)!=0);
+        CHECK(access((std::string(a.root)+"/beta.txt").c_str(),F_OK)!=0);
+
+        JsonPtr w1(obj()),w2(obj());
+        put(w1.get(),"agent_id",str("agent-2"));
+        put(w2.get(),"agent_id",str("agent-3"));
+        JsonPtr o1(tool_call(&a,"subagent_output",w1.get()));
+        JsonPtr o2(tool_call(&a,"subagent_output",w2.get()));
+        CHECK(!tool_failed(o1.get())&&!bget(o1.get(),"running")&&!strcmp(sget(o1.get(),"reply"),"SUBAGENT_DONE"));
+        CHECK(!tool_failed(o2.get())&&!bget(o2.get(),"running")&&!strcmp(sget(o2.get(),"reply"),"SUBAGENT_DONE"));
+        const std::string b1=sget(o1.get(),"branch"),b2=sget(o2.get(),"branch");
+        CHECK(b1.starts_with("desk/coder-")&&b2.starts_with("desk/coder-")&&b1!=b2);
+        CHECK(alen(get(o1.get(),"changed_files"))==1&&!strcmp(json_object_get_string(at(get(o1.get(),"changed_files"),0)),"alpha.txt"));
+        CHECK(alen(get(o2.get(),"changed_files"))==1&&!strcmp(json_object_get_string(at(get(o2.get(),"changed_files"),0)),"beta.txt"));
+        // Token usage from both parallel subagents accumulated into parent App!
+        CHECK(a.task_tokens>=240);
+
+        // Merge both branches cleanly into `main` in the parent workspace!
+        std::string merge_cmd="git -c user.name=t -c user.email=t@e merge -q --no-edit "+b1+" && "
+                              "git -c user.name=t -c user.email=t@e merge -q --no-edit "+b2;
+        JsonPtr merged(run_command(&a,merge_cmd.c_str(),10000));
+        CHECK(!tool_failed(merged.get())&&iget(merged.get(),"exit_code",-1)==0);
+        char *fa=read_bytes((std::string(a.root)+"/alpha.txt").c_str(),64,nullptr);
+        char *fb=read_bytes((std::string(a.root)+"/beta.txt").c_str(),64,nullptr);
+        CHECK(fa&&!strcmp(fa,"alpha_v1\n")&&fb&&!strcmp(fb,"beta_v1\n"));
+        free(fa);free(fb);
+        // Ensure .desk-agent internal files were never committed into git!
+        JsonPtr tracked(run_command(&a,"git ls-files",5000));
+        CHECK(strstr(sget(tracked.get(),"output"),".desk-agent")==nullptr);
+
+        kill(mpid,SIGTERM);int mst=0;waitpid(mpid,&mst,0);
+        app_cleanup(&a);
+        CHECK(a.subagents_data==nullptr);
+    }
+}
 static void test_plan_rewind_session(){
     // End to end through the conversation worker: /plan, submit_plan, /go,
     // /price and /cost, then /rewind replaces the worker's context.
@@ -4328,6 +4519,7 @@ int main(int argc,char **argv){
     RUN_STEP(test_v1_14_features());
     RUN_STEP(test_v1_15_features());
     RUN_STEP(test_v1_16_features());
+    RUN_STEP(test_v1_17_features());
     RUN_STEP(test_plan_rewind_session());
     RUN_STEP(test_chat_actions_layout());
     RUN_STEP(test_menu_navigation_and_resize());

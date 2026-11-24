@@ -1,4 +1,4 @@
-DeskCode for Linux x86_64
+DeskCode for Linux (x86_64 & arm64)
 
 Built on Ubuntu 22.04. Requires glibc 2.35 or later and the system runtime
 libraries for libcurl, json-c, OpenSSL 3, GNU Readline 8 and AT-SPI.

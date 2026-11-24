@@ -1,0 +1,146 @@
+{
+  "name": "deskcode-vscode",
+  "displayName": "DeskCode AI Coding Agent",
+  "description": "Native VS Code integration for DeskCode (desk acp) — streaming sessions, live tool execution, side-by-side file diffs, and fine-grained permission controls.",
+  "publisher": "milorgs",
+  "version": "1.17.0",
+  "license": "MIT",
+  "homepage": "https://github.com/Milorgs/DeskCode",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Milorgs/DeskCode.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/Milorgs/DeskCode/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "deskcode",
+    "ai",
+    "coding-agent",
+    "acp",
+    "agent-client-protocol"
+  ],
+  "activationEvents": [],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "deskcode",
+          "title": "DeskCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "deskcode": [
+        {
+          "type": "webview",
+          "id": "deskcode.chatView",
+          "name": "DeskCode"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "deskcode.newSession",
+        "title": "DeskCode: New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "deskcode.cancelTurn",
+        "title": "DeskCode: Stop Current Turn",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "deskcode.setMode",
+        "title": "DeskCode: Switch Mode (Ask / Edit / Full / Plan)",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "deskcode.askSelection",
+        "title": "DeskCode: Ask About Selection"
+      },
+      {
+        "command": "deskcode.fixDiagnostics",
+        "title": "DeskCode: Fix Problems in Active File"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "deskcode.newSession",
+          "when": "view == deskcode.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "deskcode.setMode",
+          "when": "view == deskcode.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "deskcode.cancelTurn",
+          "when": "view == deskcode.chatView",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "deskcode.askSelection",
+          "when": "editorHasSelection",
+          "group": "deskcode@1"
+        },
+        {
+          "command": "deskcode.fixDiagnostics",
+          "when": "editorTextFocus",
+          "group": "deskcode@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "DeskCode",
+      "properties": {
+        "deskcode.executablePath": {
+          "type": "string",
+          "default": "desk",
+          "description": "Path to desk binary"
+        },
+        "deskcode.defaultMode": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "edit",
+            "full",
+            "plan"
+          ],
+          "enumDescriptions": [
+            "Confirm every edit, command, and other change.",
+            "Approve workspace file edits and read-only commands automatically; ask before other commands.",
+            "Run every enabled tool inside the workspace without asking.",
+            "Investigate with read-only tools and propose a plan without changing files."
+          ],
+          "default": "edit",
+          "description": "Default approval mode for new DeskCode sessions."
+        },
+        "deskcode.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra CLI arguments passed to desk before the 'acp' subcommand."
+        }
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <set>
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
@@ -1307,7 +1308,7 @@ bool builtin_slash_name(std::string_view name){
     static constexpr std::string_view reserved[]={
         "help","status","clear","undo","compact","paste","model",
         "reasoning","approval","perm","mcp","new","commands","sandbox",
-        "plan","go","rewind","cost","price","bg","todos","skills","plugins"
+        "plan","go","rewind","cost","price","bg","todos","skills","plugins","agents"
     };
     for(auto r:reserved)if(name==r)return true;
     return false;
@@ -1322,9 +1323,12 @@ bool valid_command_slug(std::string_view name){
 }
 } // namespace
 
+static std::mutex hook_env_mutex;
+
 bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason){
     auto hooks=collect_hook_commands(app,"pre_shell",command);
     if(hooks.empty())return true;
+    std::lock_guard env_guard(hook_env_mutex);
     App probe{};
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
@@ -1351,6 +1355,7 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
     if(!result||!rel_path||!*rel_path)return;
     auto hooks=collect_hook_commands(app,"post_edit",rel_path);
     if(hooks.empty())return;
+    std::lock_guard env_guard(hook_env_mutex);
     App probe{};
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;

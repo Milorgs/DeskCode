@@ -71,8 +71,9 @@ class RealDeskIntegrationTests(unittest.TestCase):
             env=self.env,
             timeout=30,
         )
+        expected_ver = subprocess.check_output([str(DESK), "--version"], text=True).strip()
         self.assertTrue(res.ok, res.error or res.stderr)
-        self.assertEqual(res.version, "1.16.0")
+        self.assertEqual(res.version, expected_ver)
         self.assertIn("Updated config/app.ini", res.reply)
         self.assertEqual(res.tokens, 1920)
         self.assertEqual(res.usage.cache_read, 600)
@@ -93,11 +94,12 @@ class RealDeskIntegrationTests(unittest.TestCase):
             seen_permissions.append(req)
             return allow_all(req)
 
+        expected_ver = subprocess.check_output([str(DESK), "--version"], text=True).strip()
         with DeskAgent(desk_path=[str(DESK), "--no-sandbox"], env=acp_env, cwd=self.ws,
                        on_permission=record_and_allow) as agent:
             self.assertEqual(agent.protocol_version, 1)
             self.assertEqual(agent.agent_info.get("name"), "deskcode")
-            self.assertEqual(agent.agent_info.get("version"), "1.16.0")
+            self.assertEqual(agent.agent_info.get("version"), expected_ver)
             session = agent.new_session(cwd=self.ws, mode="ask")
             self.assertEqual([m.id for m in session.available_modes], ["ask", "edit", "full", "plan"])
 

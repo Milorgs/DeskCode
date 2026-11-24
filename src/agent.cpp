@@ -519,9 +519,11 @@ static void show_call(const char *name,J *args){
         !strcmp(name,"desktop_screenshot")?tr("截取桌面"):!strcmp(name,"todo_write")?tr("更新任务清单"):
         !strcmp(name,"submit_plan")?tr("提交计划"):!strcmp(name,"shell_output")?tr("查看后台命令"):
         !strcmp(name,"shell_kill")?tr("停止后台命令"):!strcmp(name,"lsp")?tr("语言服务分析"):
-        !strcmp(name,"skill")?tr("加载技能"):!strncmp(name,"mcp_",4)?tr("调用 MCP 工具"):tr("操作桌面");
+        !strcmp(name,"skill")?tr("加载技能"):!strcmp(name,"delegate_task")?tr("委派子代理"):
+        !strcmp(name,"subagent_output")?tr("查看子代理结果"):!strncmp(name,"mcp_",4)?tr("调用 MCP 工具"):tr("操作桌面");
     const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
-        !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"web_fetch")?sget(args,"url"):
+        !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"delegate_task")?sget(args,"prompt"):
+        *sget(args,"agent_id")?sget(args,"agent_id"):!strcmp(name,"web_fetch")?sget(args,"url"):
         !strcmp(name,"web_search")?sget(args,"query"):*sget(args,"shell_id")?sget(args,"shell_id"):sget(args,"app");
     const int width=std::max(24,terminal_columns()-6);
     std::string head=std::string(ui_bullet())+" "+label;
@@ -563,8 +565,9 @@ static void show_result(const char *name,J *r,double elapsed){
         snprintf(text,sizeof text,tr(" · %zu 个符号"),alen(get(r,"symbols")));
         detail=text;
     }
-    else if(!strcmp(name,"delegate_research")){
-        snprintf(text,sizeof text,tr(" · %d 步"),iget(r,"steps",0));
+    else if(!strcmp(name,"delegate_research")||!strcmp(name,"delegate_task")||!strcmp(name,"subagent_output")){
+        if(bget(r,"running"))snprintf(text,sizeof text,tr(" · 后台运行中 %s"),sget(r,"agent_id"));
+        else snprintf(text,sizeof text,tr(" · %d 步"),iget(r,"steps",0));
         detail=text;
     }
     else if(!strcmp(name,"web_search")){
@@ -605,6 +608,7 @@ static const char *activity(const char *name){
     if(!strcmp(name,"shell_output")||!strcmp(name,"shell_kill"))return tr("正在查看后台命令…");
     if(!strcmp(name,"lsp"))return tr("正在分析代码结构…");
     if(!strcmp(name,"skill"))return tr("正在加载技能…");
+    if(!strcmp(name,"delegate_task")||!strcmp(name,"subagent_output"))return tr("正在运行子代理…");
     return tr("正在操作桌面…");
 }
 #ifndef _WIN32
@@ -802,7 +806,8 @@ int run_task(App *a,const char *task){
                 J *entry=obj();
                 put(entry,"name",str(name));
                 const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
-                    !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"web_fetch")?sget(args,"url"):
+                    !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"delegate_task")?sget(args,"prompt"):
+                    *sget(args,"agent_id")?sget(args,"agent_id"):!strcmp(name,"web_fetch")?sget(args,"url"):
                     !strcmp(name,"web_search")?sget(args,"query"):sget(args,"app");
                 if(*target)put(entry,"target",str(excerpt(target,240).c_str()));
                 put(entry,"ok",json_object_new_boolean(!failed));

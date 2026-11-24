@@ -5,9 +5,16 @@
 [![Build and tests](https://github.com/Milorgs/DeskCode/actions/workflows/test.yml/badge.svg)](https://github.com/Milorgs/DeskCode/actions/workflows/test.yml)
 [![Latest Release](https://img.shields.io/github/v/release/Milorgs/DeskCode?label=release)](https://github.com/Milorgs/DeskCode/releases)
 [![Standard](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](CMakeLists.txt)
-[![Platforms](https://img.shields.io/badge/platform-Linux%20x64%20%7C%20Windows%20x64%20%7C%20macOS-4c8bf5)](https://github.com/Milorgs/DeskCode/releases)
+[![Platforms](https://img.shields.io/badge/platform-Linux%20x64%2FARM64%20%7C%20Windows%20x64%2FARM64%20%7C%20macOS-4c8bf5)](https://github.com/Milorgs/DeskCode/releases)
 
 [简体中文](README.md) | English
+
+<p align="center">
+  <img src="docs/assets/deskcode-terminal.svg" width="880" alt="DeskCode parallel Git worktree subagents & live LSP diagnostics demo" />
+</p>
+<p align="center">
+  <img src="docs/assets/deskcode-gui.svg" width="880" alt="DeskCode native cross-platform desktop GUI accessibility automation demo" />
+</p>
 
 ---
 
@@ -21,30 +28,31 @@
 - **Cross-Platform Desktop Automation + Vision**: Bridges terminal and GUI workflows via Linux `AT-SPI`, Windows `UI Automation`, and macOS `System Events` (up to 500 controls with `filter` support), paired with multimodal `desktop_screenshot` inspection, `/paste` clipboard image attachment, and inline `@image` mentions.
 - **Native Dual-Protocol Streaming & Prompt Caching**: Speaks both OpenAI Chat Completions and the native Anthropic Messages API (including native `reasoning_effort` / adaptive `thinking` controls and automatic Anthropic `cache_control` prompt-caching breakpoints), with built-in presets for OpenAI, Anthropic, DeepSeek, Kimi, Qwen, Zhipu GLM, SiliconFlow, OpenRouter, and local Ollama.
 - **Compiler-Grade LSP Diagnostics & Navigation**: Automatically discovers installed language servers (`clangd`, `pyright-langserver` / `pylsp`, `typescript-language-server`, `gopls`, `rust-analyzer`, or custom `lsp.json`), attaches compiler errors and warnings after every `edit_file` / `multi_edit` / `write_file`, and exposes `diagnostics`, `definition`, `references`, `hover`, and `symbols` via the `lsp` tool.
-- **IDE Integration (ACP), Skills/Plugins, GitHub Action & Python SDK**: Built-in `desk acp` (Agent Client Protocol v1) connects directly to **Zed** and **JetBrains IDEs**; supports `SKILL.md` skills and `desk plugin` (compatible with Claude Code plugin bundles and `PreToolUse` / `PostToolUse` hooks); ships with an official [GitHub Action](action/README.md) (`Milorgs/DeskCode/action@main`) and zero-dependency [Python SDK](sdk/python/README.md) (`deskcode`).
+- **Writable Parallel Subagents & Git Worktree Isolation**: `delegate_task` and `subagent_output` launch up to 4 concurrent subagents (supporting `.deskcode/agents/*.md`, `.claude/agents/*.md`, and plugin `agents/*.md` custom roles) in isolated `git worktree` branches (`desk/<agent>-<id>`), editing code and running tests in parallel before merging cleanly.
+- **Native VS Code Extension, ACP IDEs, Skills/Plugins, GitHub Action & Python SDK**: Ships a native [VS Code extension](editors/vscode/README.md) (`.vsix`) alongside built-in `desk acp` for **Zed** and **JetBrains IDEs**; supports `SKILL.md` skills and `desk plugin` (compatible with Claude Code plugin bundles and `PreToolUse` / `PostToolUse` hooks); includes an official [GitHub Action](action/README.md) (`Milorgs/DeskCode/action@main`) and zero-dependency [Python SDK](sdk/python/README.md) (`deskcode`).
 - **Concurrent Background Chats & MCP Ecosystem**: Keep multiple conversations running in parallel in the background (up to 4 active workers and 32 session slots—press `Ctrl+D` to switch without interrupting work), with first-class local `stdio` and remote `Streamable HTTP` **MCP servers**.
 
 ---
 
 ## Quick Install
 
-Latest version: **1.16.0** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
+Latest version: **1.17.0** (five pre-built platform archives + VS Code `.vsix`: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
 
-### Linux (x86_64)
+### Linux (`x86_64` & `arm64`)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-linux.sh | sh
 ```
 
-Downloads the latest Linux release to `~/.local/bin/desk` and adds `~/.local/bin` to your user `PATH` when needed. Open a new terminal and run `desk`.
+Automatically detects `x86_64` / `aarch64`, downloads the latest Linux release to `~/.local/bin/desk`, and adds `~/.local/bin` to your user `PATH` when needed. Open a new terminal and run `desk`.
 
-### Windows 10/11 (PowerShell x64)
+### Windows 10/11 (PowerShell `x64` & `ARM64`)
 
 ```powershell
 irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 | iex
 ```
 
-Downloads the latest Windows x64 package to your user profile directory and adds it to your user `PATH`. Open a new PowerShell window and run `desk`.
+Automatically detects `x64` / `ARM64`, downloads the latest Windows package to your user profile directory, and adds it to your user `PATH`. Open a new PowerShell window and run `desk`.
 
 ### macOS (Apple Silicon & Intel Universal)
 
@@ -53,6 +61,20 @@ curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos
 ```
 
 Downloads the Universal 2 (`arm64` + `x86_64`) self-contained release binary (statically linked—no Homebrew runtime required) to `~/.local/bin/desk` and adds it to your user `PATH` when needed. Open a new terminal and run `desk`.
+
+### Package Managers (Homebrew / Scoop / WinGet / AUR)
+
+```sh
+# macOS / Linux (Homebrew)
+brew install https://github.com/Milorgs/DeskCode/releases/latest/download/deskcode.rb
+
+# Windows (Scoop)
+scoop install https://github.com/Milorgs/DeskCode/releases/latest/download/deskcode.json
+
+# Arch Linux (AUR PKGBUILD)
+cd packaging/aur && makepkg -si
+```
+See [`packaging/README.md`](packaging/README.md) for WinGet and custom tap/bucket maintenance details.
 
 ---
 
@@ -75,16 +97,17 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 
 ---
 
-## Built-in Tools (21 + MCP)
+## Built-in Tools (23 + MCP)
 
 | Category | Tool | Description |
 |---|---|---|
-| **Codebase Exploration** | `list_files` | List workspace entries with directory-first sorting and byte sizes (`max_depth` `1..4`) |
+| **Exploration & Subagents** | `list_files` | List workspace entries with directory-first sorting and byte sizes (`max_depth` `1..4`) |
 | | `read_file` | Read full UTF-8 files (`<= 256 KB`) or `start_line..end_line` slices up to `16 MB` (includes full-file `SHA256` up to `4 MB`) |
 | | `search_text` | Recursive literal or ECMAScript regex search with `file_pattern` globs (`*.{cpp,hpp}`) and `.gitignore` filtering |
 | | `code_outline` | Extract classes, structs, interfaces, enums, functions, and methods with 1-based line numbers |
 | | `lsp` | Query the project's language server for `diagnostics`, `definition`, `references`, `hover`, and `symbols` (enabled on demand) |
 | | `delegate_research` | Spawn an isolated read-only subagent to investigate multi-file questions without bloating main context |
+| | `delegate_task` / `subagent_output` | Spawn writable or custom subagents (`.deskcode/agents/*.md`) with `worktree: true` Git branch isolation and up to 4 concurrent `background: true` workers |
 | **Verified Editing** | `edit_file` | Replace a unique exact text match in files up to `4 MB` under `SHA256` verification, attaching fresh LSP diagnostics |
 | | `multi_edit` | Atomically apply `1..20` `{old_text, new_text}` hunks to a file under one `SHA256` check, diff preview, and backup |
 | | `write_file` | Create or replace a UTF-8 file with automatic `.bak` backup, read-back verification, and LSP diagnostics |
@@ -121,7 +144,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | `/compact` | Summarize long conversation history into a dense continuation brief |
 | `/paste [prompt]` | Attach an image directly from the system clipboard (or press `Ctrl+V`) |
 | `/sandbox` | Toggle the Linux Landlock kernel filesystem sandbox for the current session |
-| `/commands` · `/skills` · `/plugins` | List custom slash commands · List discovered `SKILL.md` skills · List installed plugins |
+| `/commands` · `/skills` · `/plugins` · `/agents` | List custom slash commands · List discovered `SKILL.md` skills · List installed plugins · List built-in & custom subagents |
 | `/approval` (or `/perm`) | Switch approval mode (`Ask for approval` / `Auto-approve edits` / `Full access`) |
 | `/model` · `/reasoning` | Switch active model profile · Adjust native reasoning effort |
 | `/mcp` · `/status` · `/clear` · `/new` · `/help` | Manage MCP servers · Show status & token usage · Clear context · New chat · Shortcut help |
@@ -189,7 +212,7 @@ Import from a file, paste multiline JSON, or enter a remote URL via `/mcp`:
 
 ### 5. Skills & Plugin Ecosystem (Claude Code-Compatible)
 - **Skills (`SKILL.md`)**: Place `<name>/SKILL.md` (with YAML frontmatter `name` / `description` and optional reference files) under `.deskcode/skills/`, `.claude/skills/`, or `~/.config/desk-agent/skills/`. The model loads instructions on demand via `skill`, or invoke directly with `/<name> [request]`.
-- **Plugins (`desk plugin`)**: Install bundles containing `commands/`, `skills/`, `hooks/hooks.json` (supporting both `pre_shell`/`post_edit` and Claude `PreToolUse`/`PostToolUse` matchers), and `.mcp.json`:
+- **Plugins (`desk plugin`)**: Install bundles containing `commands/`, `skills/`, `agents/`, `hooks/hooks.json` (supporting both `pre_shell`/`post_edit` and Claude `PreToolUse`/`PostToolUse` matchers), and `.mcp.json`:
 
 ```sh
 desk plugin install owner/repo             # Install from GitHub owner/repo, Git URL, or local directory
@@ -199,8 +222,9 @@ desk plugin disable pkg && desk plugin enable pkg
 desk plugin validate ./my-plugin           # Validate manifest and bundle layout
 ```
 
-### 6. IDE Integration (Agent Client Protocol — `desk acp`)
-Run `desk acp` to expose DeskCode over ACP v1 (`stdio` newline-delimited JSON-RPC 2.0) in **Zed**, **JetBrains IDEs**, and other ACP-capable editors—including streaming responses, inline diffs, live checklists, and interactive permission prompts. Example Zed `settings.json`:
+### 6. IDE Integration (Native VS Code Extension + Zed / JetBrains `desk acp`)
+- **VS Code Extension ([`editors/vscode/`](editors/vscode/README.md))**: Download `deskcode-vscode-1.17.0.vsix` from [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) and run `code --install-extension deskcode-vscode-1.17.0.vsix` for a native sidebar chat with 4 modes, native side-by-side diffs, inline permission approvals, and editor context actions (*Ask DeskCode About Selection* / *Fix Diagnostics in File*).
+- **Zed / JetBrains ACP**: Run `desk acp` to expose DeskCode over ACP v1 (`stdio` newline-delimited JSON-RPC 2.0) in **Zed**, **JetBrains IDEs**, and other ACP-capable editors. Example Zed `settings.json`:
 
 ```json
 {
@@ -247,7 +271,7 @@ desk doctor --json
 
 ## Agent Benchmarks
 
-[`bench/`](bench/README.md) provides reproducible scoring: an offline local task suite (`python3 bench/run_local.py`, model chosen through `DESK_*` variables, run with isolated configuration directories, reporting pass rate, time and tokens) and a Terminal-Bench 2.0 / Harbor adapter.
+[`bench/`](bench/README.md) provides reproducible scoring: an offline local task suite (`python3 bench/run_local.py`, model chosen through `DESK_*` variables, run with isolated configuration directories, reporting pass rate, time and tokens), a Terminal-Bench 2.0 / Harbor adapter (`x86_64` & `arm64`), and a multi-model leaderboard generator (`python3 bench/render_leaderboard.py`).
 
 ---
 
@@ -258,7 +282,7 @@ Dependencies: C++20 compiler (GCC 11+ / Clang 14+), `make`, `pkg-config`, `libcu
 
 ```sh
 make -j"$(nproc)"          # Build build/desk
-make test                  # Run the unit & integration test suite (~4960+ assertions)
+make test                  # Run the unit & integration test suite (~5310+ assertions)
 make test-mcp-http         # Run OpenAI / Anthropic + MCP Streamable HTTP end-to-end tests
 make sanitize              # Run with AddressSanitizer + UndefinedBehaviorSanitizer
 ./install.sh               # Install to ~/.local/bin/desk

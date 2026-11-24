@@ -1191,7 +1191,7 @@ static void show_inline_status(const App &app){
 }
 static void show_inline_help(){
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令 · /skills 技能 · /plugins 插件\n  Shift+Tab 或 /plan 计划模式 · /go 批准计划 · /rewind 回退 · /cost 用量 · /price 价格 · Ctrl+B 命令转后台\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令 · /skills 技能 · /plugins 插件 · /agents 子代理\n  Shift+Tab 或 /plan 计划模式 · /go 批准计划 · /rewind 回退 · /cost 用量 · /price 价格 · Ctrl+B 命令转后台\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1558,6 +1558,16 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
             }
             if(body.empty())body=tr("尚未安装插件。使用 desk plugin install <目录 | Git 地址 | owner/repo> 安装。");
             inline_box(tr("插件"),body);
+            continue;
+        }
+        if(trimmed=="/agents"){
+            std::string body=std::string("coder (built-in) — ")+tr("可写编码子代理（支持独立 git worktree 与后台并行）")+"\n"
+                +"research (built-in) — "+tr("只读代码库调研子代理");
+            for(const auto &ag:list_subagents(*a)){
+                body+="\n"+ag.name+" ("+ag.scope+(ag.readonly?", read-only":"")+(ag.worktree?", worktree":"")+")";
+                if(!ag.description.empty())body+=" — "+ui_clip(ag.description,80);
+            }
+            inline_box(tr("子代理"),body);
             continue;
         }
         if(trimmed=="/sandbox"){

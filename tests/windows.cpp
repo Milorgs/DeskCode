@@ -102,6 +102,11 @@ static void test_files_config(){
     CHECK(list_skills(app).size()==1);
     args.reset(obj());put(args.get(),"name",str("win-skill"));
     result.reset(tool_call(&app,"skill",args.get()));CHECK(checked(result.get()));CHECK(strstr(sget(result.get(),"instructions"),"Follow Windows steps."));
+    const fs::path agent_dir=fs_path(app.root)/".deskcode"/"agents";
+    CHECK(!mkdirs(path_text(agent_dir).c_str(),0700));
+    const char *agent_md="---\nname: win-fixer\ndescription: Windows worktree agent\nisolation: worktree\n---\nFix Windows issues.\n";
+    CHECK(!atomic_file(path_text(agent_dir/"win-fixer.md").c_str(),agent_md,strlen(agent_md),0600));
+    auto agents=list_subagents(app);CHECK(agents.size()==1&&agents[0].name=="win-fixer"&&agents[0].worktree);
 }
 static void test_commands(){
     Fixture fixture;App &app=fixture.app;

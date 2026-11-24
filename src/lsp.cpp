@@ -15,6 +15,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 #ifdef _WIN32
@@ -755,14 +756,19 @@ void flatten_symbols(J *list,J *out,int depth,const std::string &container){
 bool lsp_available(const App &app){
     if(disabled())return false;
     const std::string key=lsp_config_stamp(app);
+    static std::mutex cache_mutex;
     static std::map<std::string,bool> cache;
-    auto found=cache.find(key);
-    if(found!=cache.end())return found->second;
+    {
+        std::lock_guard lock(cache_mutex);
+        auto found=cache.find(key);
+        if(found!=cache.end())return found->second;
+    }
     bool any=false;
     for(const auto &spec:load_specs(app)){
         for(const auto &candidate:spec.commands)if(!find_program(candidate[0]).empty()){any=true;break;}
         if(any)break;
     }
+    std::lock_guard lock(cache_mutex);
     cache[key]=any;
     return any;
 }

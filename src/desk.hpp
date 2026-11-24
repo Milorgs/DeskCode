@@ -32,7 +32,7 @@
 #include <functional>
 #include <optional>
 #include <map>
-#define VERSION "1.16.0"
+#define VERSION "1.17.0"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -127,8 +127,11 @@ struct App {
     J *trace=nullptr;
     // Set when an approval was needed but no interactive terminal could answer.
     bool approval_unavailable=false;
-    // True inside delegate_research so only read-only tools are exposed.
+    // True inside subagents so recursive delegation and desktop tools stay off.
     bool subagent=false;
+    bool subagent_writable=false;
+    std::vector<std::string> subagent_tools{};
+    void *subagents_data=nullptr;
     bool sandbox=true;
     bool workspace_hooks_approved=false;
     std::string turn_id{};
@@ -334,4 +337,16 @@ int plugin_cli(App &app,int argc,char **argv,int first);
 bool parse_frontmatter(std::string_view text,std::map<std::string,std::string> &fields,std::string_view &body);
 // Agent Client Protocol server on stdin/stdout (acp.cpp).
 int acp_main(App &app);
+// Custom & parallel writable subagents with git worktree isolation (agents.cpp).
+struct SubagentInfo {
+    std::string name,description,instructions,scope,file,model;
+    std::vector<std::string> tools;
+    bool readonly=false,worktree=false;
+    int max_steps=16;
+};
+std::vector<SubagentInfo> list_subagents(const App &app);
+std::string delegate_task_description(const App &app);
+J *tool_delegate_task(App *app,J *args);
+J *tool_subagent_output(App *app,J *args);
+void subagents_destroy(App *app);
 #endif

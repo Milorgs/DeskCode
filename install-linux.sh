@@ -2,14 +2,15 @@
 set -eu
 
 repo='Milorgs/DeskCode'
-asset="https://github.com/$repo/releases/latest/download/desk-agent-linux-x64.tar.gz"
+case "$(uname -m)" in
+    x86_64|amd64) pkg='desk-agent-linux-x64' ;;
+    aarch64|arm64) pkg='desk-agent-linux-arm64' ;;
+    *) echo "DeskCode Linux packages support x86_64 and arm64 (got $(uname -m))." >&2; exit 1 ;;
+esac
+
+asset="https://github.com/$repo/releases/latest/download/$pkg.tar.gz"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/desk-agent-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-
-case "$(uname -m)" in
-    x86_64|amd64) ;;
-    *) echo 'DeskCode Linux packages currently support x86_64 only.' >&2; exit 1 ;;
-esac
 
 download() {
     if command -v curl >/dev/null 2>&1; then
@@ -23,5 +24,5 @@ download() {
 command -v tar >/dev/null 2>&1 || { echo 'Install tar first.' >&2; exit 1; }
 download "$asset" "$tmp/desk-agent.tar.gz"
 tar -xzf "$tmp/desk-agent.tar.gz" -C "$tmp"
-[ -f "$tmp/desk-agent-linux-x64/install.sh" ] || { echo 'Invalid DeskCode package.' >&2; exit 1; }
-sh "$tmp/desk-agent-linux-x64/install.sh" --setup-path
+[ -f "$tmp/$pkg/install.sh" ] || { echo 'Invalid DeskCode package.' >&2; exit 1; }
+sh "$tmp/$pkg/install.sh" --setup-path

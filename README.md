@@ -5,9 +5,16 @@
 [![Build and tests](https://github.com/Milorgs/DeskCode/actions/workflows/test.yml/badge.svg)](https://github.com/Milorgs/DeskCode/actions/workflows/test.yml)
 [![Latest Release](https://img.shields.io/github/v/release/Milorgs/DeskCode?label=release)](https://github.com/Milorgs/DeskCode/releases)
 [![Standard](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)](CMakeLists.txt)
-[![Platforms](https://img.shields.io/badge/platform-Linux%20x64%20%7C%20Windows%20x64%20%7C%20macOS-4c8bf5)](https://github.com/Milorgs/DeskCode/releases)
+[![Platforms](https://img.shields.io/badge/platform-Linux%20x64%2FARM64%20%7C%20Windows%20x64%2FARM64%20%7C%20macOS-4c8bf5)](https://github.com/Milorgs/DeskCode/releases)
 
 简体中文 | [English](README_EN.md)
+
+<p align="center">
+  <img src="docs/assets/deskcode-terminal.svg" width="880" alt="DeskCode 并行 Git Worktree 与 LSP 自动诊断演示" />
+</p>
+<p align="center">
+  <img src="docs/assets/deskcode-gui.svg" width="880" alt="DeskCode 跨平台原生桌面 GUI 无障碍操控演示" />
+</p>
 
 ---
 
@@ -21,30 +28,31 @@
 - **跨平台桌面无障碍自动化 + 多模态视觉**：原生对接 Linux `AT-SPI`、Windows `UI Automation` 与 macOS `System Events`（支持最多 500 个控件节点与 `filter` 过滤），配合 `desktop_screenshot` 桌面视觉截图、`/paste` 剪贴板贴图与 `@图片` 内联输入，打通终端与 GUI 应用边界。
 - **双协议原生推理与提示词缓存**：原生支持 OpenAI Chat Completions 与 Anthropic Messages API（含自适应推理强度 `reasoning_effort` / `thinking` 与 Anthropic 自动 `cache_control` 提示词缓存断点），内置 OpenAI、Anthropic、DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter 与本地 Ollama 预设。
 - **LSP 代码诊断与导航**：自动发现本机语言服务（`clangd`、`pyright-langserver` / `pylsp`、`typescript-language-server`、`gopls`、`rust-analyzer` 或自定义 `lsp.json`），每次 `edit_file` / `multi_edit` / `write_file` 后自动回传编译器错误与警告，并通过 `lsp` 工具支持跳转定义、查找引用、悬停类型与文档符号。
-- **IDE 接入（ACP）、Skills/插件生态、GitHub Action 与 Python SDK**：内置 `desk acp`（Agent Client Protocol v1）直连 **Zed** 与 **JetBrains IDEs**；支持 `SKILL.md` 技能与 `desk plugin` 插件管理器（兼容 Claude Code 插件包与 `PreToolUse` / `PostToolUse` 钩子）；随附官方 [GitHub Action](action/README.md)（`Milorgs/DeskCode/action@main`）与零依赖 [Python SDK](sdk/python/README.md)（`deskcode`）。
+- **可写并行子代理与 Git Worktree 隔离**：通过 `delegate_task` + `subagent_output` 可并发启动最多 4 个独立子代理（支持 `.deskcode/agents/*.md`、`.claude/agents/*.md` 与插件 `agents/*.md` 自定义角色），在各自临时 `git worktree` 分支（`desk/<agent>-<id>`）中并行改代码跑测试，完成后零冲突合并回主分支。
+- **IDE 原生扩展（VS Code + ACP）、Skills/插件生态、GitHub Action 与 Python SDK**：提供 [VS Code 原生扩展](editors/vscode/README.md)（`.vsix`）以及内置 `desk acp` 直连 **Zed** 与 **JetBrains IDEs**；支持 `SKILL.md` 技能与 `desk plugin` 插件管理器（兼容 Claude Code 插件包与 `PreToolUse` / `PostToolUse` 钩子）；随附官方 [GitHub Action](action/README.md)（`Milorgs/DeskCode/action@main`）与零依赖 [Python SDK](sdk/python/README.md)（`deskcode`）。
 - **多对话后台并发与 MCP 扩展**：支持同时挂起多个后台对话（最多 4 路并发执行、32 个会话槽），`Ctrl+D` 返回列表不中断后台任务；原生支持跨平台本地 `stdio` 与远程 `Streamable HTTP` **MCP 服务**。
 
 ---
 
 ## 快速安装
 
-当前最新版本：**1.16.0**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+当前最新版本：**1.17.0**（五平台预编译包与 VS Code `.vsix`：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
 
-### Linux (x86_64)
+### Linux (`x86_64` & `arm64`)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-linux.sh | sh
 ```
 
-脚本自动下载最新 Linux 发行包并安装至 `~/.local/bin/desk`（必要时自动写入当前用户 `PATH`）。重新打开终端后输入 `desk` 即可启动。
+脚本自动识别 `x86_64` / `aarch64` 下载最新 Linux 发行包并安装至 `~/.local/bin/desk`。重新打开终端后输入 `desk` 即可启动。
 
-### Windows 10/11 (PowerShell x64)
+### Windows 10/11 (PowerShell `x64` & `ARM64`)
 
 ```powershell
 irm https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-windows.ps1 | iex
 ```
 
-脚本自动下载最新 Windows 发行包到当前用户目录并加入用户 `PATH`。重新打开 PowerShell 后输入 `desk` 即可启动。
+脚本自动识别 `x64` / `ARM64` 下载最新 Windows 发行包到当前用户目录并加入用户 `PATH`。重新打开 PowerShell 后输入 `desk` 即可启动。
 
 ### macOS (Apple Silicon & Intel Universal)
 
@@ -53,6 +61,20 @@ curl -fsSL https://raw.githubusercontent.com/Milorgs/DeskCode/main/install-macos
 ```
 
 脚本自动下载通用（`arm64` + `x86_64` Universal 2）独立发行包（已静态链接依赖，无需安装 Homebrew 运行库）并安装至 `~/.local/bin/desk`。重新打开终端后输入 `desk` 即可启动。
+
+### 包管理器安装（Homebrew / Scoop / WinGet / AUR）
+
+```sh
+# macOS / Linux (Homebrew)
+brew install https://github.com/Milorgs/DeskCode/releases/latest/download/deskcode.rb
+
+# Windows (Scoop)
+scoop install https://github.com/Milorgs/DeskCode/releases/latest/download/deskcode.json
+
+# Arch Linux (AUR PKGBUILD)
+cd packaging/aur && makepkg -si
+```
+更多 WinGet 与自建软件源维护说明见 [`packaging/README.md`](packaging/README.md)。
 
 ---
 
@@ -75,16 +97,17 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 
 ---
 
-## 内置工具矩阵（21 项 + MCP）
+## 内置工具矩阵（23 项 + MCP）
 
 | 类别 | 工具名 | 功能说明 |
 |---|---|---|
-| **代码浏览与调研** | `list_files` | 列出工作区目录结构与文件字节大小（支持 `max_depth` `1..4`） |
+| **代码浏览与子代理** | `list_files` | 列出工作区目录结构与文件字节大小（支持 `max_depth` `1..4`） |
 | | `read_file` | 读取 UTF-8 文件全文（`256 KB` 内）或按 `start_line..end_line` 分段读取最大 `16 MB` 文件（`4 MB` 内均返回全文 `SHA256`） |
 | | `search_text` | 递归全文/ECMAScript 正则搜索，支持 `file_pattern` 通配符（如 `*.{cpp,hpp}`）并自动遵守 `.gitignore` |
 | | `code_outline` | 提取源码中的类、结构体、接口、枚举、函数与方法定义及行号大纲 |
 | | `lsp` | 调用项目语言服务获取编译器级 `diagnostics`、`definition`、`references`、`hover` 与 `symbols`（按需启用） |
 | | `delegate_research` | 启动独立上下文的只读调研子代理完成跨文件排查，避免撑满主会话上下文 |
+| | `delegate_task` / `subagent_output` | 启动可写或自定义子代理（`.deskcode/agents/*.md`），支持 `worktree: true` 独立 Git 分支隔离与 `background: true` 最多 4 路后台并行 |
 | **安全代码编辑** | `edit_file` | 校验 `SHA256` 后对文件（最大 `4 MB`）做唯一精确替换，并自动附带最新 LSP 编译诊断 |
 | | `multi_edit` | 单次 `SHA256` 校验下对同一文件原子应用 `1..20` 处修改（任一分块不匹配则整体零写入回滚） |
 | | `write_file` | 新建或完整替换 UTF-8 文件，自动生成 `.bak` 备份、回读校验并附带 LSP 诊断 |
@@ -121,7 +144,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | `/compact` | 主动调用当前模型将长对话压缩为高密度工程续接摘要 |
 | `/paste [说明]` | 从系统剪贴板读取图片并附带到当前输入（或按 `Ctrl+V`） |
 | `/sandbox` | 开启或关闭当前会话的 Linux Landlock 内核文件系统沙箱 |
-| `/commands` · `/skills` · `/plugins` | 查看已加载的自定义指令 · 查看可用 `SKILL.md` 技能 · 查看已安装插件状态 |
+| `/commands` · `/skills` · `/plugins` · `/agents` | 查看自定义指令 · 查看 `SKILL.md` 技能 · 查看已安装插件 · 查看内置与自定义子代理 |
 | `/approval`（或 `/perm`） | 切换当前对话批准模式（请求批准 / 帮我批准 / 完全访问权限） |
 | `/model` · `/reasoning` | 切换模型配置 · 调整模型原生推理强度档位 |
 | `/mcp` · `/status` · `/clear` · `/new` · `/help` | 管理 MCP 服务 · 查看会话与词元状态 · 清空上下文 · 新建对话 · 查看快捷键帮助 |
@@ -189,7 +212,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 
 ### 5. Skills 技能与插件生态（兼容 Claude Code 插件）
 - **Skills（`SKILL.md`）**：在 `.deskcode/skills/<名称>/SKILL.md`、`.claude/skills/<名称>/SKILL.md` 或用户目录 `~/.config/desk-agent/skills/` 下编写带 YAML Frontmatter（`name` / `description`）的技能说明与参考文件，模型可通过 `skill` 工具按需读取，用户也可直接输入 `/<名称> [需求]` 触发。
-- **插件包管理（`desk plugin`）**：一键安装包含 `commands/`、`skills/`、`hooks/hooks.json`（同时兼容 `pre_shell`/`post_edit` 与 Claude `PreToolUse`/`PostToolUse` 格式）和 `.mcp.json` 的插件包或插件市场：
+- **插件包管理（`desk plugin`）**：一键安装包含 `commands/`、`skills/`、`agents/`、`hooks/hooks.json`（同时兼容 `pre_shell`/`post_edit` 与 Claude `PreToolUse`/`PostToolUse` 格式）和 `.mcp.json` 的插件包或插件市场：
 
 ```sh
 desk plugin install owner/repo             # 从 GitHub 仓库、Git 地址或本地目录安装插件
@@ -199,8 +222,9 @@ desk plugin disable pkg && desk plugin enable pkg
 desk plugin validate ./my-plugin           # 校验插件目录结构与清单
 ```
 
-### 6. IDE 接入（Agent Client Protocol — `desk acp`）
-运行 `desk acp` 即可启动标准 ACP v1 服务端，直接在 **Zed**、**JetBrains IDEs**（IntelliJ / CLion / PyCharm）等编辑器中使用 DeskCode 的流式对话、Diff 审阅、任务清单与交互式权限批准。例如在 Zed `settings.json` 中添加：
+### 6. IDE 接入（VS Code 原生扩展 + Zed / JetBrains `desk acp`）
+- **VS Code 扩展（[`editors/vscode/`](editors/vscode/README.md)）**：从 [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) 下载 `deskcode-vscode-1.17.0.vsix` 后执行 `code --install-extension deskcode-vscode-1.17.0.vsix`，即可在侧边栏使用流式对话、四档模式切换、双栏原生 Diff 审阅、权限审批以及右键「选中代码提问 / 修复当前文件报错」。
+- **Zed / JetBrains ACP 接入**：运行 `desk acp` 启动标准 ACP v1 服务端。例如在 Zed `settings.json` 中添加：
 
 ```json
 {
@@ -247,7 +271,7 @@ desk doctor --json
 
 ## Agent 质量跑分
 
-[`bench/`](bench/README.md) 提供可复现的跑分体系：本地离线任务集（`python3 bench/run_local.py`，用 `DESK_*` 环境变量指定模型，隔离配置目录运行并输出通过率、耗时与词元报告）以及 Terminal-Bench 2.0 / Harbor 适配器。
+[`bench/`](bench/README.md) 提供可复现的跑分体系：本地离线任务集（`python3 bench/run_local.py`，用 `DESK_*` 环境变量指定模型，隔离配置目录运行并输出通过率、耗时与词元报告）、Terminal-Bench 2.0 / Harbor 适配器（支持 `x86_64` 与 `arm64` 容器）以及多模型榜单聚合脚本（`python3 bench/render_leaderboard.py`）。
 
 ---
 
@@ -258,7 +282,7 @@ desk doctor --json
 
 ```sh
 make -j"$(nproc)"          # 编译 build/desk
-make test                  # 运行单元与集成回归测试套件（约 4960+ 项断言）
+make test                  # 运行单元与集成回归测试套件（约 5310+ 项断言）
 make test-mcp-http         # 运行 OpenAI / Anthropic + MCP Streamable HTTP 端到端测试
 make sanitize              # 运行 ASan + UBSan 内存与未定义行为检测
 ./install.sh               # 安装到 ~/.local/bin/desk

@@ -216,7 +216,7 @@ const char *tool_kind(std::string_view name){
     if(name=="edit_file"||name=="multi_edit"||name=="write_file")return "edit";
     if(name=="run_shell"||name=="shell_kill")return "execute";
     if(name=="web_fetch")return "fetch";
-    if(name=="delegate_research"||name=="todo_write"||name=="submit_plan"||name=="skill")return "think";
+    if(name=="delegate_research"||name=="delegate_task"||name=="subagent_output"||name=="todo_write"||name=="submit_plan"||name=="skill")return "think";
     return "other";
 }
 std::string tool_title(std::string_view name,J *args){
@@ -231,6 +231,8 @@ std::string tool_title(std::string_view name,J *args){
     if(name=="web_fetch")return "Fetch "+clip(sget(args,"url"),100);
     if(name=="web_search")return "Search the web: "+clip(sget(args,"query"),80);
     if(name=="delegate_research")return "Research: "+clip(sget(args,"question"),80);
+    if(name=="delegate_task")return "Subagent ("+std::string(*sget(args,"agent")?sget(args,"agent"):"coder")+"): "+clip(sget(args,"prompt"),72);
+    if(name=="subagent_output")return std::string("Await ")+sget(args,"agent_id");
     if(name=="todo_write")return "Update plan";
     if(name=="submit_plan")return "Submit plan";
     if(name=="lsp")return std::string("LSP ")+sget(args,"action")+" "+path;

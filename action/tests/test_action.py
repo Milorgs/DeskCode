@@ -469,10 +469,10 @@ class InstallScript(unittest.TestCase):
         proc = self.install("v9.9.9")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("Checksum mismatch", proc.stderr)
-        self.env["RUNNER_ARCH"] = "ARM64"
+        self.env["RUNNER_ARCH"] = "s390x"
         proc = self.install("latest")
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("only x64", proc.stderr)
+        self.assertIn("only x64 and arm64", proc.stderr)
 
 
 class StaticChecks(unittest.TestCase):

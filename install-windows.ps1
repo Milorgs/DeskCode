@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $repo = 'Milorgs/DeskCode'
-$asset = "https://github.com/$repo/releases/latest/download/desk-agent-windows-x64.zip"
+$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'arm64' } else { 'x64' }
+$asset = "https://github.com/$repo/releases/latest/download/desk-agent-windows-$arch.zip"
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('desk-agent-install-' + [Guid]::NewGuid().ToString('N'))
 $zip = Join-Path $temp 'desk-agent.zip'
 $package = Join-Path $temp 'package'

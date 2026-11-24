@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 500" width="920" height="500" role="img" aria-label="DeskCode terminal workflow demo">
+  <defs>
+    <style>
+      .bg { fill: #12151c; }
+      .bar { fill: #1b202b; }
+      .border { stroke: #2c3344; stroke-width: 1.5; fill: none; }
+      .composer { fill: #171c26; stroke: #3b465e; stroke-width: 1; }
+      .txt { font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, 'Noto Sans Mono CJK SC', monospace; font-size: 13.5px; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 12.5px; fill: #9aa5be; font-weight: 600; }
+      .plain { fill: #e6edf3; }
+      .dim { fill: #939db0; }
+      .accent { fill: #6f9fff; font-weight: 600; }
+      .ok { fill: #7ee787; }
+      .warn { fill: #f2cc60; }
+      .err { fill: #ff7b72; }
+      .badge { fill: #1f2b42; stroke: #44659e; stroke-width: 1; }
+      .s1 { opacity: 0; animation: show1 14s infinite; }
+      .s2 { opacity: 0; animation: show2 14s infinite; }
+      .s3 { opacity: 0; animation: show3 14s infinite; }
+      .s4 { opacity: 0; animation: show4 14s infinite; }
+      .s5 { opacity: 0; animation: show5 14s infinite; }
+      @keyframes show1 { 0%,4% { opacity: 0; } 7%,94% { opacity: 1; } 98%,100% { opacity: 0; } }
+      @keyframes show2 { 0%,20% { opacity: 0; } 24%,94% { opacity: 1; } 98%,100% { opacity: 0; } }
+      @keyframes show3 { 0%,40% { opacity: 0; } 44%,94% { opacity: 1; } 98%,100% { opacity: 0; } }
+      @keyframes show4 { 0%,60% { opacity: 0; } 64%,94% { opacity: 1; } 98%,100% { opacity: 0; } }
+      @keyframes show5 { 0%,76% { opacity: 0; } 80%,94% { opacity: 1; } 98%,100% { opacity: 0; } }
+    </style>
+  </defs>
+
+  <rect width="920" height="500" rx="12" class="bg"/>
+  <path d="M12 0 H908 A12 12 0 0 1 920 12 V38 H0 V12 A12 12 0 0 1 12 0 Z" class="bar"/>
+  <circle cx="22" cy="19" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="19" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="19" r="6" fill="#27c93f"/>
+  <text x="460" y="24" text-anchor="middle" class="title">DeskCode 1.17.0 — Parallel Git Worktrees · LSP Auto-Diagnostics · Plan Mode</text>
+  <rect x="0.75" y="0.75" width="918.5" height="498.5" rx="12" class="border"/>
+
+  <!-- Header -->
+  <text x="24" y="66" class="txt accent">DeskCode 1.17.0</text>
+  <text x="160" y="66" class="txt dim">· claude-sonnet-4 · ~/srv/gateway · Landlock sandbox ✓ · 2 background chats</text>
+
+  <!-- Step 1: User request -->
+  <g class="s1">
+    <text x="24" y="98" class="txt accent">❯</text>
+    <text x="44" y="98" class="txt plain">并行用两个独立 worktree 子代理重构限流中间件与补齐单元测，合并前过一遍 clangd 诊断。</text>
+  </g>
+
+  <!-- Step 2: Checklist + parallel worktree subagents -->
+  <g class="s2">
+    <text x="24" y="130" class="txt accent">⏺ 更新任务清单 0/3</text>
+    <text x="40" y="152" class="txt accent">  [~] 并行启动两个 git worktree 子代理（重构限流模块 / 编写回归单测）</text>
+    <text x="40" y="172" class="txt dim">  [ ] 合并两个子代理分支并核查 clangd LSP 诊断</text>
+    <text x="40" y="192" class="txt dim">  [ ] 运行全量 CTest 并汇总结果</text>
+    <text x="24" y="220" class="txt accent">⏺ 委派子代理(rate_limiter.cpp: 令牌桶重构 · worktree · background)</text>
+    <text x="40" y="240" class="txt dim">  ⎿  完成 · 后台运行中 agent-1 (desk/coder-7f2a9c10) · 0.1s</text>
+    <text x="24" y="264" class="txt accent">⏺ 委派子代理(tests/limiter_test.cpp: 并发边界单测 · worktree · background)</text>
+    <text x="40" y="284" class="txt dim">  ⎿  完成 · 后台运行中 agent-2 (desk/coder-3e8b1d04) · 0.1s</text>
+  </g>
+
+  <!-- Step 3: Harvest subagent branches & merge -->
+  <g class="s3">
+    <text x="24" y="312" class="txt accent">⏺ 查看子代理结果(agent-1, agent-2)</text>
+    <text x="40" y="332" class="txt ok">  ⎿  完成 · 2 个 worktree 分支已提交就绪（+148 −62 行，零冲突合并至 main） · 2.4s</text>
+  </g>
+
+  <!-- Step 4: LSP diagnostics caught & fixed automatically -->
+  <g class="s4">
+    <text x="24" y="360" class="txt accent">⏺ 修改文件(src/rate_limiter.cpp)</text>
+    <text x="40" y="380" class="txt ok">  ⎿  完成 · 已回读核对 · clangd: no errors or warnings · 0.3s</text>
+  </g>
+
+  <!-- Step 5: Final reply -->
+  <g class="s5">
+    <text x="24" y="410" class="txt ok">●</text>
+    <text x="44" y="410" class="txt plain">已完成令牌桶限流重构与 14 项并发回归测试，`clangd` 零告警，`ctest` 14/14 全部通过。</text>
+    <text x="44" y="430" class="txt dim">用时 3.8s · 输入 4.2k · 缓存命中 18.6k · 输出 0.9k 词元 · ≈$0.031 · 完成</text>
+  </g>
+
+  <!-- Pinned Composer -->
+  <rect x="18" y="450" width="884" height="34" rx="6" class="composer"/>
+  <text x="32" y="472" class="txt accent">❯</text>
+  <text x="52" y="472" class="txt dim">/ 命令面板 · Shift+Tab 计划模式 · /rewind 回退 · /agents 子代理 · @+Tab 补全文件</text>
+  <rect x="748" y="456" width="144" height="22" rx="4" class="badge"/>
+  <text x="820" y="471" text-anchor="middle" class="txt accent" style="font-size:11.5px">批准：自动批准编辑</text>
+</svg>

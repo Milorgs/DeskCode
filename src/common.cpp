@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 std::atomic<int> interrupted{0};
 std::atomic<bool> background_requested{false};
@@ -146,6 +147,7 @@ void seterr(App *a,const char *m){
 double monotime(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
 void id_string(char out[33]){unsigned char bytes[16];if(RAND_bytes(bytes,16)!=1)throw std::runtime_error("Random generation failed");for(size_t i=0;i<16;i++)snprintf(out+i*2,3,"%02x",bytes[i]);}
 void app_cleanup(App *a){
+    subagents_destroy(a);
     shells_destroy(a);
     lsp_destroy(a);
     mcp_close(*a);
@@ -321,6 +323,8 @@ std::uint64_t model_tokens(J *usage,J *config){
 bool record_tokens(App &app,J *config,std::uint64_t amount){
     if(!amount)return true;
     if(!*app.config_dir||mkdirs(app.config_dir,0700))return false;
+    static std::mutex process_token_mutex;
+    std::lock_guard guard_proc(process_token_mutex);
     ResourceLock lock(app.config_dir);
     if(!lock.acquired())return false;
     JsonPtr usage(load_tokens(app));
