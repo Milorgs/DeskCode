@@ -31,7 +31,8 @@
 #include <vector>
 #include <functional>
 #include <optional>
-#define VERSION "1.15.0"
+#include <map>
+#define VERSION "1.16.0"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -99,6 +100,23 @@ struct App {
     J *todos=nullptr;
     // Commands left running in the background (run_shell background or Ctrl+B).
     void *shell_data=nullptr;
+    // Language servers started for this workspace (lsp.cpp).
+    void *lsp_data=nullptr;
+    // MCP servers supplied by the front end (ACP session/new), merged with the
+    // saved configuration and enabled plugins; owned.
+    J *extra_mcp=nullptr;
+    // Front ends that embed the agent (ACP) observe and steer a turn through
+    // these; all are optional and unset in the terminal interface.
+    // approval_hook answers approve(): 1 allow, 0 deny.
+    std::function<int(const char *title,const char *description,int operation)> approval_hook{};
+    std::function<void(const char *id,const char *name,J *args)> on_tool_start{};
+    std::function<void(const char *id,const char *name,J *args,J *result)> on_tool_end{};
+    // Assistant text of one model step; streamed tells whether stream_observer
+    // already received it chunk by chunk.
+    std::function<void(const char *text,bool streamed)> on_assistant_text{};
+    // Receives streamed text alongside stream_text, which run_task owns.
+    std::function<void(const std::string &)> stream_observer{};
+    size_t streamed_chunks=0;
     bool progress_line=false;
     CurlHandle api_http{};
     // Headless runs (stdout redirected or --json): the final reply goes to
@@ -295,4 +313,25 @@ J *tool_shell_output(App *a,J *args);
 J *tool_shell_kill(App *a,J *args);
 size_t background_shell_count(App *a);
 void shells_destroy(App *a);
+// Language servers (lsp.cpp): diagnostics after edits and code navigation.
+bool lsp_available(const App &app);
+void lsp_attach_diagnostics(App &app,const char *full_path,J *result);
+J *tool_lsp(App *a,J *args);
+void lsp_destroy(App *a);
+// Skills and plugins (plugins.cpp).
+struct SkillInfo {std::string name,description,directory,scope;};
+std::vector<SkillInfo> list_skills(const App &app);
+J *skill_tool_definition(const App &app);
+J *tool_skill(App *a,J *args);
+bool expand_skill_command(const App &app,std::string_view input,std::string &expanded,std::string &label);
+struct PluginInfo {std::string name,version,description,directory,source;bool enabled=true;};
+std::vector<PluginInfo> list_plugins(const App &app);
+// Roots of enabled plugins, for their commands, skills, hooks and MCP servers.
+std::vector<PluginInfo> enabled_plugins(const App &app);
+J *plugin_mcp_servers(const App &app);
+int plugin_cli(App &app,int argc,char **argv,int first);
+// Markdown front matter (--- key: value ---) used by skills and commands.
+bool parse_frontmatter(std::string_view text,std::map<std::string,std::string> &fields,std::string_view &body);
+// Agent Client Protocol server on stdin/stdout (acp.cpp).
+int acp_main(App &app);
 #endif

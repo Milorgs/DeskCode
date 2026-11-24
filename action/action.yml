@@ -1,0 +1,110 @@
+name: DeskCode Agent
+description: Run the DeskCode AI coding agent from issues, PR comments or workflow_dispatch and open a pull request with its changes.
+author: Milorgs
+branding:
+  icon: terminal
+  color: blue
+
+inputs:
+  prompt:
+    description: Task for DeskCode. When empty the request is parsed from the triggering issue / comment (text after `trigger`).
+    required: false
+    default: ""
+  trigger:
+    description: Phrase that must appear in a comment or issue to start DeskCode.
+    required: false
+    default: "@desk"
+  api_key:
+    description: Model API key (pass a secret, e.g. secrets.DESK_API_KEY).
+    required: true
+  base_url:
+    description: Model API base URL (DESK_BASE_URL), e.g. https://api.openai.com/v1.
+    required: false
+    default: ""
+  model:
+    description: Model name (DESK_MODEL).
+    required: false
+    default: ""
+  api_type:
+    description: API protocol, openai or anthropic (DESK_API_TYPE).
+    required: false
+    default: openai
+  approval:
+    description: DeskCode approval mode (ask | edit | full). The runner is disposable, so `full` is the default.
+    required: false
+    default: full
+  max_steps:
+    description: Maximum agent steps (0-100, 0 = unlimited).
+    required: false
+    default: "40"
+  plan:
+    description: Plan mode - only investigate and comment a plan, never modify or commit.
+    required: false
+    default: "false"
+  github_token:
+    description: Token used for comments, pushes and pull requests.
+    required: false
+    default: ${{ github.token }}
+  version:
+    description: DeskCode release tag to install (e.g. v1.16.0) or `latest`.
+    required: false
+    default: latest
+  create_pr:
+    description: Commit changes to a new branch and open a pull request (ignored for PR comments, which push to the PR branch).
+    required: false
+    default: "true"
+  branch_prefix:
+    description: Prefix of branches created by DeskCode.
+    required: false
+    default: desk/
+
+outputs:
+  status:
+    description: DeskCode status (completed, failed, step_limit, ..., skipped, error).
+    value: ${{ steps.desk.outputs.status }}
+  reply:
+    description: DeskCode final reply (Markdown).
+    value: ${{ steps.desk.outputs.reply }}
+  pr_url:
+    description: URL of the created pull request, if any.
+    value: ${{ steps.desk.outputs.pr_url }}
+  branch:
+    description: Branch that received the commit, if any.
+    value: ${{ steps.desk.outputs.branch }}
+  tokens:
+    description: Total tokens used.
+    value: ${{ steps.desk.outputs.tokens }}
+  cost:
+    description: Reported cost (empty when the provider does not report one).
+    value: ${{ steps.desk.outputs.cost }}
+
+runs:
+  using: composite
+  steps:
+    - name: Mask secrets
+      shell: bash
+      env:
+        DESK_SECRET: ${{ inputs.api_key }}
+      run: |
+        if [ -n "$DESK_SECRET" ]; then echo "::add-mask::$DESK_SECRET"; fi
+
+    - name: Run DeskCode
+      id: desk
+      shell: bash
+      env:
+        INPUT_PROMPT: ${{ inputs.prompt }}
+        INPUT_TRIGGER: ${{ inputs.trigger }}
+        INPUT_API_KEY: ${{ inputs.api_key }}
+        INPUT_BASE_URL: ${{ inputs.base_url }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_API_TYPE: ${{ inputs.api_type }}
+        INPUT_APPROVAL: ${{ inputs.approval }}
+        INPUT_MAX_STEPS: ${{ inputs.max_steps }}
+        INPUT_PLAN: ${{ inputs.plan }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github_token }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_CREATE_PR: ${{ inputs.create_pr }}
+        INPUT_BRANCH_PREFIX: ${{ inputs.branch_prefix }}
+      run: |
+        py=$(command -v python3 || command -v python)
+        "$py" "$GITHUB_ACTION_PATH/scripts/desk_action.py"

@@ -3780,6 +3780,442 @@ static void test_v1_15_features(){
         app_cleanup(&a);
     }
 }
+static void test_v1_16_features(){
+    // 1. LSP auto-diagnostics after file writes + tool_lsp navigation & UTF-16 <-> UTF-8 columns.
+    {
+        App a=fresh();a.yes=true;a.shell=true;
+        const std::string lsp_py=std::string(sandbox)+"/mock_lsp.py";
+        const char *lsp_script=
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "assert 'DESK_API_KEY' not in os.environ, 'secret leaked to LSP'\n"
+            "docs = {}\n"
+            "def send(msg):\n"
+            "    b = json.dumps(msg).encode('utf-8')\n"
+            "    sys.stdout.buffer.write(f'Content-Length: {len(b)}\\r\\n\\r\\n'.encode('ascii') + b)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "def read_msg():\n"
+            "    headers = b''\n"
+            "    while b'\\r\\n\\r\\n' not in headers:\n"
+            "        ch = sys.stdin.buffer.read(1)\n"
+            "        if not ch: return None\n"
+            "        headers += ch\n"
+            "    length = 0\n"
+            "    for line in headers.decode('ascii', 'replace').split('\\r\\n'):\n"
+            "        if line.lower().startswith('content-length:'):\n"
+            "            length = int(line.split(':', 1)[1].strip())\n"
+            "    body = sys.stdin.buffer.read(length)\n"
+            "    return json.loads(body.decode('utf-8'))\n"
+            "def publish(uri, ver, text):\n"
+            "    diags = []\n"
+            "    if 'BROKEN' in text:\n"
+            "        # '/*中文*/ ' is 7 UTF-8 chars and 7 UTF-16 code units; 1-based char col is 8.\n"
+            "        diags = [\n"
+            "            {'range':{'start':{'line':0,'character':7},'end':{'line':0,'character':13}},\n"
+            "             'severity':1,'source':'mockc','code':'E001','message':'undeclared identifier BROKEN'},\n"
+            "            {'range':{'start':{'line':0,'character':7},'end':{'line':0,'character':8}},\n"
+            "             'severity':2,'source':'mockc','message':'unused variable x'},\n"
+            "            {'range':{'start':{'line':0,'character':0},'end':{'line':0,'character':1}},\n"
+            "             'severity':4,'message':'hint ignored'}\n"
+            "        ]\n"
+            "    send({'jsonrpc':'2.0','method':'textDocument/publishDiagnostics',\n"
+            "          'params':{'uri':uri,'version':ver,'diagnostics':diags}})\n"
+            "while True:\n"
+            "    msg = read_msg()\n"
+            "    if msg is None: break\n"
+            "    method = msg.get('method', '')\n"
+            "    if method == 'initialize':\n"
+            "        send({'jsonrpc':'2.0','id':msg['id'],'result':{'capabilities':{\n"
+            "            'textDocumentSync':1,'definitionProvider':True,'referencesProvider':True,\n"
+            "            'hoverProvider':True,'documentSymbolProvider':True}}})\n"
+            "    elif method == 'initialized':\n"
+            "        send({'jsonrpc':'2.0','id':99,'method':'workspace/configuration','params':{'items':[{}]}})\n"
+            "    elif method == 'textDocument/didOpen':\n"
+            "        td = msg['params']['textDocument']\n"
+            "        docs[td['uri']] = (td['version'], td['text'])\n"
+            "        publish(td['uri'], td['version'], td['text'])\n"
+            "    elif method == 'textDocument/didChange':\n"
+            "        td = msg['params']['textDocument']\n"
+            "        text = msg['params']['contentChanges'][0]['text']\n"
+            "        docs[td['uri']] = (td['version'], text)\n"
+            "        publish(td['uri'], td['version'], text)\n"
+            "    elif method == 'textDocument/definition':\n"
+            "        uri = msg['params']['textDocument']['uri']\n"
+            "        pos = msg['params']['position']\n"
+            "        send({'jsonrpc':'2.0','id':msg['id'],'result':[{\n"
+            "            'targetUri':uri,\n"
+            "            'targetRange':{'start':{'line':0,'character':pos['character']},'end':{'line':0,'character':pos['character']+1}},\n"
+            "            'targetSelectionRange':{'start':{'line':0,'character':pos['character']},'end':{'line':0,'character':pos['character']+1}}}]})\n"
+            "    elif method == 'textDocument/references':\n"
+            "        uri = msg['params']['textDocument']['uri']\n"
+            "        send({'jsonrpc':'2.0','id':msg['id'],'result':[\n"
+            "            {'uri':uri,'range':{'start':{'line':0,'character':7},'end':{'line':0,'character':8}}},\n"
+            "            {'uri':uri,'range':{'start':{'line':1,'character':4},'end':{'line':1,'character':5}}}]})\n"
+            "    elif method == 'textDocument/hover':\n"
+            "        send({'jsonrpc':'2.0','id':msg['id'],'result':{'contents':{'kind':'markdown','value':'`int x`' }}})\n"
+            "    elif method == 'textDocument/documentSymbol':\n"
+            "        send({'jsonrpc':'2.0','id':msg['id'],'result':[{\n"
+            "            'name':'demo_ns','kind':3,\n"
+            "            'range':{'start':{'line':0,'character':0},'end':{'line':1,'character':1}},\n"
+            "            'selectionRange':{'start':{'line':0,'character':0},'end':{'line':0,'character':7}},\n"
+            "            'children':[{'name':'calc','kind':12,\n"
+            "                'range':{'start':{'line':1,'character':0},'end':{'line':1,'character':10}},\n"
+            "                'selectionRange':{'start':{'line':1,'character':0},'end':{'line':1,'character':4}}}]}]})\n"
+            "    elif method == 'shutdown':\n"
+            "        send({'jsonrpc':'2.0','id':msg['id'],'result':None})\n"
+            "    elif method == 'exit':\n"
+            "        break\n";
+        CHECK(!atomic_file(lsp_py.c_str(),lsp_script,strlen(lsp_script),0755));
+        CHECK(!mkdirs(a.config_dir,0700));
+        std::string lsp_cfg=std::string("{\"servers\":{\"clangd\":{\"disabled\":true},\"python\":{\"disabled\":true},"
+            "\"typescript\":{\"disabled\":true},\"go\":{\"disabled\":true},\"rust\":{\"disabled\":true},"
+            "\"mock\":{\"command\":\"")+lsp_py+"\",\"args\":[],\"extensions\":[\".cpp\"]}}}";
+        CHECK(!atomic_file((std::string(a.config_dir)+"/lsp.json").c_str(),lsp_cfg.c_str(),lsp_cfg.size(),0600));
+
+        setenv("DESK_API_KEY","sk-never-leak-to-lsp",1);
+        setenv("DESK_LSP_TIMEOUT_MS","1500",1);
+        unsetenv("DESK_NO_LSP");
+        CHECK(lsp_available(a));
+        JsonPtr tools(schemas(&a));
+        bool has_lsp=false;
+        for(size_t i=0;i<alen(tools.get());i++)has_lsp|=!strcmp(sget(get(at(tools.get(),i),"function"),"name"),"lsp");
+        CHECK(has_lsp);
+        a.subagent=true;
+        JsonPtr sub_tools(schemas(&a));
+        CHECK(alen(sub_tools.get())==5);
+        a.subagent=false;
+
+        J *wr=args("demo.cpp");
+        put(wr,"content",str("/*中文*/ int x = BROKEN;\nint y = x;\n"));
+        put(wr,"expected_sha256",nullptr);
+        JsonPtr wr_args(wr),wr_res(tool_call(&a,"write_file",wr_args.get()));
+        CHECK(!tool_failed(wr_res.get()));
+        CHECK(!strcmp(sget(wr_res.get(),"diagnostics_summary"),"mock: 1 error, 1 warning"));
+        J *diags=get(wr_res.get(),"diagnostics");
+        CHECK(alen(diags)==2);
+        CHECK(iget(at(diags,0),"line",0)==1&&iget(at(diags,0),"column",0)==8);
+        CHECK(!strcmp(sget(at(diags,0),"severity"),"error")&&strstr(sget(at(diags,0),"message"),"BROKEN"));
+
+        JsonPtr def_q(obj());
+        put(def_q.get(),"action",str("definition"));put(def_q.get(),"path",str("demo.cpp"));
+        put(def_q.get(),"line",json_object_new_int(1));put(def_q.get(),"column",json_object_new_int(8));
+        JsonPtr def_r(tool_call(&a,"lsp",def_q.get()));
+        CHECK(!tool_failed(def_r.get())&&alen(get(def_r.get(),"definitions"))==1);
+        CHECK(iget(at(get(def_r.get(),"definitions"),0),"column",0)==8);
+
+        JsonPtr ref_q(obj());
+        put(ref_q.get(),"action",str("references"));put(ref_q.get(),"path",str("demo.cpp"));
+        put(ref_q.get(),"line",json_object_new_int(1));put(ref_q.get(),"column",json_object_new_int(8));
+        JsonPtr ref_r(tool_call(&a,"lsp",ref_q.get()));
+        CHECK(!tool_failed(ref_r.get())&&iget(ref_r.get(),"total",0)==2&&alen(get(ref_r.get(),"references"))==2);
+
+        JsonPtr hov_q(obj());
+        put(hov_q.get(),"action",str("hover"));put(hov_q.get(),"path",str("demo.cpp"));
+        put(hov_q.get(),"line",json_object_new_int(1));put(hov_q.get(),"column",json_object_new_int(8));
+        JsonPtr hov_r(tool_call(&a,"lsp",hov_q.get()));
+        CHECK(!tool_failed(hov_r.get())&&!strcmp(sget(hov_r.get(),"hover"),"`int x`"));
+
+        JsonPtr sym_q(obj());
+        put(sym_q.get(),"action",str("symbols"));put(sym_q.get(),"path",str("demo.cpp"));
+        JsonPtr sym_r(tool_call(&a,"lsp",sym_q.get()));
+        CHECK(!tool_failed(sym_r.get())&&alen(get(sym_r.get(),"symbols"))==2);
+        CHECK(!strcmp(sget(at(get(sym_r.get(),"symbols"),1),"name"),"calc"));
+        CHECK(!strcmp(sget(at(get(sym_r.get(),"symbols"),1),"container"),"demo_ns"));
+
+        JsonPtr rd(tool_call(&a,"read_file",JsonPtr(args("demo.cpp")).get()));
+        JsonPtr ed(args("demo.cpp"));
+        put(ed.get(),"expected_sha256",str(sget(rd.get(),"sha256")));
+        put(ed.get(),"old_text",str("BROKEN"));put(ed.get(),"new_text",str("42"));
+        JsonPtr ed_res(tool_call(&a,"edit_file",ed.get()));
+        CHECK(!tool_failed(ed_res.get()));
+        CHECK(!strcmp(sget(ed_res.get(),"diagnostics_summary"),"mock: no errors or warnings"));
+        CHECK(alen(get(ed_res.get(),"diagnostics"))==0);
+
+        setenv("DESK_NO_LSP","1",1);
+        unsetenv("DESK_LSP_TIMEOUT_MS");
+        unsetenv("DESK_API_KEY");
+        app_cleanup(&a);
+        CHECK(a.lsp_data==nullptr);
+    }
+
+    // 2. Skills (SKILL.md), plugin marketplace & CLI, plugin MCP expansion, and Claude-format hooks.json.
+    {
+        std::map<std::string,std::string> fm;
+        std::string_view fm_body;
+        CHECK(parse_frontmatter("---\nname: \"demo-skill\"\ndescription: |\n  First line\n  Second line\n---\nBody text\n",fm,fm_body));
+        CHECK(fm["name"]=="demo-skill"&&fm["description"]=="First line\nSecond line"&&fm_body=="Body text\n");
+
+        App a=fresh();a.yes=true;a.shell=true;a.workspace_hooks_approved=true;
+        const std::string skill_dir=std::string(a.root)+"/.deskcode/skills/release-check";
+        CHECK(!mkdirs((skill_dir+"/refs").c_str(),0700));
+        const char *skill_md="---\nname: release-check\ndescription: Verify release artifacts before tagging.\n---\n1. Run tests\n2. Check version\n";
+        CHECK(!atomic_file((skill_dir+"/SKILL.md").c_str(),skill_md,strlen(skill_md),0600));
+        CHECK(!atomic_file((skill_dir+"/refs/notes.md").c_str(),"checklist-item-alpha\n",21,0600));
+
+        auto skills=list_skills(a);
+        CHECK(skills.size()==1&&skills[0].name=="release-check"&&skills[0].scope=="workspace");
+        JsonPtr tools(schemas(&a));
+        bool has_skill_tool=false;
+        for(size_t i=0;i<alen(tools.get());i++)has_skill_tool|=!strcmp(sget(get(at(tools.get(),i),"function"),"name"),"skill");
+        CHECK(has_skill_tool);
+        // Zero-system-prompt invariant preserved when only skills exist without DESKCODE.md.
+        J *u=obj();put(u,"role",str("user"));put(u,"content",str("hi"));add(a.messages,u);
+        JsonPtr ctx(context(&a,tools.get()));
+        CHECK(alen(ctx.get())==1&&!strcmp(sget(at(ctx.get(),0),"role"),"user"));
+        reset_session(&a);
+
+        JsonPtr sq(obj());put(sq.get(),"name",str("release-check"));
+        JsonPtr sr(tool_call(&a,"skill",sq.get()));
+        CHECK(!tool_failed(sr.get())&&strstr(sget(sr.get(),"instructions"),"1. Run tests"));
+        CHECK(alen(get(sr.get(),"files"))==1&&!strcmp(json_object_get_string(at(get(sr.get(),"files"),0)),"refs/notes.md"));
+
+        put(sq.get(),"file",str("refs/notes.md"));
+        sr.reset(tool_call(&a,"skill",sq.get()));
+        CHECK(!tool_failed(sr.get())&&strstr(sget(sr.get(),"content"),"checklist-item-alpha"));
+
+        put(sq.get(),"file",str("../SKILL.md"));
+        sr.reset(tool_call(&a,"skill",sq.get()));
+        CHECK(tool_failed(sr.get()));
+
+        std::string expanded,label;
+        CHECK(expand_skill_command(a,"/release-check v1.16.0",expanded,label));
+        CHECK(label=="/release-check v1.16.0"&&expanded.find("1. Run tests")!=std::string::npos&&expanded.find("Request: v1.16.0")!=std::string::npos);
+
+        // Build a local marketplace containing plugin `team-kit`.
+        const std::string mp=std::string(sandbox)+"/marketplace";
+        const std::string pk=mp+"/plugins/team-kit";
+        CHECK(!mkdirs((mp+"/.claude-plugin").c_str(),0700));
+        CHECK(!mkdirs((pk+"/.claude-plugin").c_str(),0700));
+        CHECK(!mkdirs((pk+"/commands").c_str(),0700));
+        CHECK(!mkdirs((pk+"/skills/sec-audit").c_str(),0700));
+        CHECK(!mkdirs((pk+"/hooks").c_str(),0700));
+        const char *mp_json=R"({"name":"corp-market","plugins":[{"name":"team-kit","source":"./plugins/team-kit"},{"name":"other-kit","source":"./plugins/other-kit"}]})";
+        CHECK(!atomic_file((mp+"/.claude-plugin/marketplace.json").c_str(),mp_json,strlen(mp_json),0600));
+        const char *pk_json=R"({"name":"team-kit","version":"2.1.0","description":"Team security & review bundle"})";
+        CHECK(!atomic_file((pk+"/.claude-plugin/plugin.json").c_str(),pk_json,strlen(pk_json),0600));
+        const char *cmd_md="---\ndescription: Security review\n---\nReview $ARGUMENTS carefully.\n";
+        CHECK(!atomic_file((pk+"/commands/review.md").c_str(),cmd_md,strlen(cmd_md),0600));
+        const char *psk_md="---\nname: sec-audit\ndescription: Audit auth paths.\n---\nCheck auth tokens.\n";
+        CHECK(!atomic_file((pk+"/skills/sec-audit/SKILL.md").c_str(),psk_md,strlen(psk_md),0600));
+        const char *mcp_json=R"({"mcpServers":{"helper":{"command":"python3","args":["${CLAUDE_PLUGIN_ROOT}/srv.py"]}}})";
+        CHECK(!atomic_file((pk+"/.mcp.json").c_str(),mcp_json,strlen(mcp_json),0600));
+        const char *hook_py=
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "payload = json.loads(sys.stdin.read())\n"
+            "cmd = (payload.get('tool_input') or {}).get('command', '')\n"
+            "if 'FORBID_CLAUDE_HOOK' in cmd:\n"
+            "    sys.stderr.write('Blocked by plugin PreToolUse hook\\n')\n"
+            "    sys.exit(2)\n"
+            "sys.exit(0)\n";
+        CHECK(!atomic_file((pk+"/hooks/guard.py").c_str(),hook_py,strlen(hook_py),0755));
+        const char *hooks_json=
+            "{\"hooks\":{"
+            "\"PreToolUse\":[{\"matcher\":\"Bash|run_shell\",\"hooks\":[{\"type\":\"command\",\"command\":\"python3 \\\"${CLAUDE_PLUGIN_ROOT}/hooks/guard.py\\\"\"}]}],"
+            "\"PostToolUse\":[{\"matcher\":\"Edit|Write\",\"hooks\":[{\"type\":\"command\",\"command\":\"printf PLUGIN_POST_EDIT:%s \\\"$DESK_HOOK_FILE\\\"\"}]}]"
+            "}}";
+        CHECK(!atomic_file((pk+"/hooks/hooks.json").c_str(),hooks_json,strlen(hooks_json),0600));
+
+        auto run_plugin=[&](std::vector<const char *> args_vec){
+            std::vector<char *> av;
+            av.push_back(const_cast<char *>("desk"));
+            av.push_back(const_cast<char *>("plugin"));
+            for(const char *s:args_vec)av.push_back(const_cast<char *>(s));
+            return plugin_cli(a,static_cast<int>(av.size()),av.data(),2);
+        };
+        CHECK(run_plugin({"validate",pk.c_str()})==0);
+        // Marketplace without plugin name asks which plugin to install.
+        CHECK(run_plugin({"install",mp.c_str()})!=0);
+        CHECK(run_plugin({"install",mp.c_str(),"team-kit"})==0);
+
+        auto installed=list_plugins(a);
+        CHECK(installed.size()==1&&installed[0].name=="team-kit"&&installed[0].version=="2.1.0"&&installed[0].enabled);
+        CHECK(expand_custom_command(a,"/team-kit:review login.cpp",expanded,label));
+        CHECK(expanded.find("Review login.cpp carefully.")!=std::string::npos);
+
+        auto all_skills=list_skills(a);
+        CHECK(all_skills.size()==2);
+        JsonPtr psq(obj());put(psq.get(),"name",str("team-kit:sec-audit"));
+        JsonPtr psr(tool_call(&a,"skill",psq.get()));
+        CHECK(!tool_failed(psr.get())&&strstr(sget(psr.get(),"instructions"),"Check auth tokens."));
+
+        JsonPtr pmcp(plugin_mcp_servers(a));
+        J *helper=get(pmcp.get(),"team-kit:helper");
+        CHECK(helper!=nullptr);
+        std::string expanded_arg=json_object_get_string(at(get(helper,"args"),0));
+        CHECK(expanded_arg.find("${CLAUDE_PLUGIN_ROOT}")==std::string::npos&&expanded_arg.ends_with("/team-kit/srv.py"));
+
+        // Claude-format PreToolUse exit 2 blocks command; exit 0 allows; PostToolUse runs after write_file.
+        JsonPtr bad_sh(command("echo FORBID_CLAUDE_HOOK"));
+        JsonPtr bad_res(tool_call(&a,"run_shell",bad_sh.get()));
+        CHECK(tool_failed(bad_res.get())&&strstr(sget(bad_res.get(),"error"),"Blocked by plugin PreToolUse hook"));
+
+        JsonPtr ok_sh(command("echo SAFE_CMD_OK"));
+        JsonPtr ok_res(tool_call(&a,"run_shell",ok_sh.get()));
+        CHECK(!tool_failed(ok_res.get())&&strstr(sget(ok_res.get(),"output"),"SAFE_CMD_OK"));
+
+        J *wfile=args("hooked.txt");put(wfile,"content",str("hello"));put(wfile,"expected_sha256",nullptr);
+        JsonPtr wf_args(wfile),wf_res(tool_call(&a,"write_file",wf_args.get()));
+        CHECK(!tool_failed(wf_res.get())&&strstr(sget(wf_res.get(),"hook_output"),"PLUGIN_POST_EDIT:hooked.txt"));
+
+        // Disable, enable, and remove plugin.
+        CHECK(run_plugin({"disable","team-kit"})==0);
+        CHECK(enabled_plugins(a).empty()&&list_skills(a).size()==1);
+        CHECK(run_plugin({"enable","team-kit"})==0);
+        CHECK(enabled_plugins(a).size()==1&&list_skills(a).size()==2);
+        CHECK(run_plugin({"remove","team-kit"})==0);
+        CHECK(list_plugins(a).empty());
+        app_cleanup(&a);
+    }
+
+    // 3. Agent Client Protocol (`desk acp`) stdio session, permissions, plan, diff, and cancel.
+    {
+        App a=fresh();json_object_put(a.config);a.config=config("acp-test","openai");
+        CHECK(!atomic_file((std::string(a.root)+"/note.md").c_str(),"linked-note\n",12,0644));
+        J *todos=json_tokener_parse(R"({"todos":[{"content":"Write output","status":"in_progress"}]})");
+        J *write=args("acp_out.txt");put(write,"content",str("acp-file-body\n"));put(write,"expected_sha256",nullptr);
+        std::string r1=model_tool("t_plan","todo_write",todos);
+        std::string r2=model_tool("t_write","write_file",write);
+        std::string r3=model_reply(nullptr,"ACP_TURN_OK");
+        std::string r4=model_tool("t_sleep","run_shell",command("sleep 10"));
+        const char *responses[]={r1.c_str(),r2.c_str(),r3.c_str(),r4.c_str()};
+        pid_t server=fake_server(&a,responses,4);
+
+        int to_acp[2],from_acp[2],err_acp[2];
+        CHECK(!pipe(to_acp)&&!pipe(from_acp)&&!pipe(err_acp));
+        pid_t child=fork();CHECK(child>=0);
+        if(!child){
+            dup2(to_acp[0],0);dup2(from_acp[1],1);dup2(err_acp[1],2);
+            for(int fd:{to_acp[0],to_acp[1],from_acp[0],from_acp[1],err_acp[0],err_acp[1]})close(fd);
+            for(const auto &[k,v]:model_environment(a))setenv(k.c_str(),v.c_str(),1);
+            execl("./build/desk","desk","--no-sandbox","--lang","en","acp",static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        close(to_acp[0]);close(from_acp[1]);close(err_acp[1]);
+        fcntl(from_acp[0],F_SETFL,O_NONBLOCK);
+
+        std::string pending;
+        auto send_line=[&](const std::string &json_line){
+            std::string data=json_line+"\n";
+            CHECK( ::write(to_acp[1],data.data(),data.size())==static_cast<ssize_t>(data.size()) );
+        };
+        auto next_msg=[&](double timeout_sec=10.0)->JsonPtr{
+            const double until=monotime()+timeout_sec;
+            for(;;){
+                auto nl=pending.find('\n');
+                if(nl!=std::string::npos){
+                    std::string line=pending.substr(0,nl);
+                    pending.erase(0,nl+1);
+                    if(line.empty())continue;
+                    JsonPtr parsed(json_tokener_parse(line.c_str()));
+                    CHECK(parsed!=nullptr);
+                    return parsed;
+                }
+                CHECK(monotime()<until);
+                pollfd pfd{from_acp[0],POLLIN,0};
+                if(poll(&pfd,1,50)<=0)continue;
+                char buf[4096];
+                ssize_t n=read(from_acp[0],buf,sizeof buf);
+                if(n>0)pending.append(buf,static_cast<size_t>(n));
+            }
+        };
+
+        send_line(R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}})");
+        JsonPtr init=next_msg();
+        CHECK(iget(get(init.get(),"result"),"protocolVersion",0)==1);
+        CHECK(!strcmp(sget(get(get(init.get(),"result"),"agentInfo"),"name"),"deskcode"));
+        CHECK(!strcmp(sget(get(get(init.get(),"result"),"agentInfo"),"version"),VERSION));
+
+        JsonPtr new_req(obj()),new_params(obj());
+        put(new_req.get(),"jsonrpc",str("2.0"));put(new_req.get(),"id",json_object_new_int(2));
+        put(new_req.get(),"method",str("session/new"));
+        put(new_params.get(),"cwd",str(a.root));put(new_params.get(),"mcpServers",arr());
+        put(new_req.get(),"params",new_params.release());
+        send_line(json_object_to_json_string_ext(new_req.get(),JSON_C_TO_STRING_PLAIN));
+        JsonPtr created=next_msg();
+        const std::string sid=sget(get(created.get(),"result"),"sessionId");
+        CHECK(!sid.empty());
+        CHECK(!strcmp(sget(get(get(created.get(),"result"),"modes"),"currentModeId"),"ask"));
+        CHECK(alen(get(get(get(created.get(),"result"),"modes"),"availableModes"))==4);
+
+        // Prompt 1: text + resource_link + embedded resource; approves edit with allow_always.
+        std::string note_uri=std::string("file://")+a.root+"/note.md";
+        JsonPtr p1(obj()),p1_params(obj()),blocks(arr());
+        put(p1.get(),"jsonrpc",str("2.0"));put(p1.get(),"id",json_object_new_int(3));
+        put(p1.get(),"method",str("session/prompt"));
+        put(p1_params.get(),"sessionId",str(sid.c_str()));
+        J *b1=obj();put(b1,"type",str("text"));put(b1,"text",str("Create acp_out.txt"));add(blocks.get(),b1);
+        J *b2=obj();put(b2,"type",str("resource_link"));put(b2,"uri",str(note_uri.c_str()));add(blocks.get(),b2);
+        J *b3=obj(),*res_obj=obj();put(b3,"type",str("resource"));
+        put(res_obj,"uri",str("file:///ctx.txt"));put(res_obj,"text",str("EMBEDDED_CTX"));put(b3,"resource",res_obj);add(blocks.get(),b3);
+        put(p1_params.get(),"prompt",blocks.release());
+        put(p1.get(),"params",p1_params.release());
+        send_line(json_object_to_json_string_ext(p1.get(),JSON_C_TO_STRING_PLAIN));
+
+        bool saw_plan=false,saw_perm=false,saw_mode_edit=false,saw_diff=false;
+        std::string chunks;
+        for(;;){
+            JsonPtr m=next_msg();
+            const char *method=sget(m.get(),"method");
+            if(!strcmp(method,"session/request_permission")){
+                saw_perm=true;
+                J *tc=get(get(m.get(),"params"),"toolCall");
+                CHECK(!strcmp(sget(tc,"kind"),"edit"));
+                JsonPtr rep(obj()),res(obj()),out(obj());
+                put(rep.get(),"jsonrpc",str("2.0"));put(rep.get(),"id",copy(get(m.get(),"id")));
+                put(out.get(),"outcome",str("selected"));put(out.get(),"optionId",str("allow_always"));
+                put(res.get(),"outcome",out.release());put(rep.get(),"result",res.release());
+                send_line(json_object_to_json_string_ext(rep.get(),JSON_C_TO_STRING_PLAIN));
+            }else if(!strcmp(method,"session/update")){
+                J *upd=get(get(m.get(),"params"),"update");
+                const std::string kind=sget(upd,"sessionUpdate");
+                if(kind=="plan")saw_plan=alen(get(upd,"entries"))==1;
+                else if(kind=="current_mode_update")saw_mode_edit=!strcmp(sget(upd,"currentModeId"),"edit");
+                else if(kind=="agent_message_chunk")chunks+=sget(get(upd,"content"),"text");
+                else if(kind=="tool_call_update"&&!strcmp(sget(upd,"status"),"completed")){
+                    J *cnt=get(upd,"content");
+                    for(size_t i=0;i<alen(cnt);i++)
+                        if(!strcmp(sget(at(cnt,i),"type"),"diff")&&strstr(sget(at(cnt,i),"newText"),"acp-file-body"))saw_diff=true;
+                }
+            }else if(iget(m.get(),"id",0)==3){
+                CHECK(!strcmp(sget(get(m.get(),"result"),"stopReason"),"end_turn"));
+                break;
+            }
+        }
+        CHECK(saw_plan&&saw_perm&&saw_mode_edit&&saw_diff&&chunks.find("ACP_TURN_OK")!=std::string::npos);
+        char *written=read_bytes((std::string(a.root)+"/acp_out.txt").c_str(),256,nullptr);
+        CHECK(written&&!strcmp(written,"acp-file-body\n"));free(written);
+
+        // Switch to full mode, start a slow command, and cancel mid-turn.
+        send_line(std::string("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"session/set_mode\",\"params\":{\"sessionId\":\"")+sid+"\",\"modeId\":\"full\"}}");
+        JsonPtr mode_resp=next_msg();
+        CHECK(iget(mode_resp.get(),"id",0)==4&&get(mode_resp.get(),"result")!=nullptr);
+
+        send_line(std::string("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"")+sid+
+                  "\",\"prompt\":[{\"type\":\"text\",\"text\":\"sleep now\"}]}}");
+        for(;;){
+            JsonPtr m=next_msg();
+            if(!strcmp(sget(m.get(),"method"),"session/update")){
+                J *upd=get(get(m.get(),"params"),"update");
+                if(!strcmp(sget(upd,"sessionUpdate"),"tool_call")&&!strcmp(sget(upd,"kind"),"execute")){
+                    send_line(std::string("{\"jsonrpc\":\"2.0\",\"method\":\"session/cancel\",\"params\":{\"sessionId\":\"")+sid+"\"}}");
+                }
+            }else if(iget(m.get(),"id",0)==5){
+                CHECK(!strcmp(sget(get(m.get(),"result"),"stopReason"),"cancelled"));
+                break;
+            }
+        }
+
+        close(to_acp[1]);close(from_acp[0]);close(err_acp[0]);
+        int st=0;CHECK(waitpid(child,&st,0)==child&&WIFEXITED(st)&&WEXITSTATUS(st)==0);
+        server_done(server);
+
+        JsonPtr first_req(capture(&a,0));
+        std::string user_sent=sget(at(get(get(first_req.get(),"body"),"messages"),0),"content");
+        CHECK(user_sent.find("linked-note")!=std::string::npos&&user_sent.find("EMBEDDED_CTX")!=std::string::npos);
+        app_cleanup(&a);
+    }
+}
 static void test_plan_rewind_session(){
     // End to end through the conversation worker: /plan, submit_plan, /go,
     // /price and /cost, then /rewind replaces the worker's context.
@@ -3855,6 +4291,8 @@ int main(int argc,char **argv){
     // The pty harness cannot emulate a pinned composer region at the bottom of
     // the screen, so keep the inline status line for the assertions.
     setenv("DESK_NO_COMPOSER","1",1);
+    setenv("DESK_NO_LSP","1",1);
+    setenv("DESK_NO_USER_SKILLS","1",1);
     char directory[]="/tmp/desk-c-test-XXXXXX";
     CHECK(mkdtemp(directory));
     CHECK(realpath(directory,sandbox));
@@ -3889,6 +4327,7 @@ int main(int argc,char **argv){
     RUN_STEP(test_v1_13_features());
     RUN_STEP(test_v1_14_features());
     RUN_STEP(test_v1_15_features());
+    RUN_STEP(test_v1_16_features());
     RUN_STEP(test_plan_rewind_session());
     RUN_STEP(test_chat_actions_layout());
     RUN_STEP(test_menu_navigation_and_resize());

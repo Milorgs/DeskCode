@@ -21,6 +21,9 @@ jobs:
           else
             make test
             make test-mcp-http
+            PYTHONDONTWRITEBYTECODE=1 python3 -B bench/smoke_test.py
+            PYTHONDONTWRITEBYTECODE=1 python3 -B action/tests/test_action.py
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=sdk/python/src:sdk/python/tests python3 -B -m unittest discover -s sdk/python/tests
             ./build/desk --version
             ./install.sh --prefix "$RUNNER_TEMP/desk-install"
             "$RUNNER_TEMP/desk-install/bin/desk" --version

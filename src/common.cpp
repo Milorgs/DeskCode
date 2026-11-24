@@ -147,6 +147,7 @@ double monotime(){return std::chrono::duration<double>(std::chrono::steady_clock
 void id_string(char out[33]){unsigned char bytes[16];if(RAND_bytes(bytes,16)!=1)throw std::runtime_error("Random generation failed");for(size_t i=0;i<16;i++)snprintf(out+i*2,3,"%02x",bytes[i]);}
 void app_cleanup(App *a){
     shells_destroy(a);
+    lsp_destroy(a);
     mcp_close(*a);
     a->api_http.reset();
     desktop_destroy(a);
@@ -155,6 +156,8 @@ void app_cleanup(App *a){
     json_object_put(a->messages);
     json_object_put(a->trace);
     json_object_put(a->todos);
+    json_object_put(a->extra_mcp);
+    a->extra_mcp=nullptr;
     a->todos=nullptr;
     a->trace=nullptr;
 }
@@ -200,6 +203,7 @@ std::vector<std::string> approval_choices(bool preview,bool allow_session_rule){
 int approve(App *a,const char *description,Operation operation,const char *title){
     if(interrupted)return 0;
     if(!approval_required(*a,operation)){if(a->verbose)printf("\n%s\n",description);return 1;}
+    if(a->approval_hook)return a->approval_hook(title?title:"",description,static_cast<int>(operation));
     progress_clear(a);
     bool compact=!a->verbose&&(a->task_events<0||a->conversation_worker);
     // One panel per request, like a permission dialog: the operation kind on

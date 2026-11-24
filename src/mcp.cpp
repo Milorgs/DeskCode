@@ -568,8 +568,24 @@ bool mcp_import(App &app,const char *path){
     return mcp_import_json(app,std::string(bytes.get(),length));
 }
 void mcp_close(App &app){delete static_cast<Registry *>(app.mcp_data);app.mcp_data=nullptr;}
+// Saved servers, then those of enabled plugins and of the front end (ACP).
+// Each extra source is validated on its own; names never replace saved ones.
+static J *effective_servers(App &app,bool only_saved){
+    JsonPtr servers(mcp_load(app));
+    if(!servers||only_saved)return servers.release();
+    auto merge=[&](J *extra){
+        if(!json_object_is_type(extra,json_type_object)||!json_object_object_length(extra))return;
+        try{validate(extra);}
+        catch(const std::exception &error){fprintf(stderr,"%s\n",error.what());return;}
+        json_object_object_foreach(extra,name,entry)if(!get(servers.get(),name))put(servers.get(),name,copy(entry));
+    };
+    JsonPtr plugins(plugin_mcp_servers(app));
+    merge(plugins.get());
+    merge(app.extra_mcp);
+    return servers.release();
+}
 bool mcp_prepare(App &app,bool explicit_test,const char *only){
-    JsonPtr servers(mcp_load(app));if(!servers)return false;
+    JsonPtr servers(effective_servers(app,false));if(!servers)return false;
     std::string configuration=encoded(servers.get());auto *previous=static_cast<Registry *>(app.mcp_data);
     if(!explicit_test&&previous&&previous->configuration==configuration
        &&std::all_of(previous->clients.begin(),previous->clients.end(),[](const auto &c){return c->healthy();}))

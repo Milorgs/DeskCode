@@ -20,13 +20,15 @@
 - **Linux Landlock 内核沙箱与细粒度审批**：Linux 下默认启用 Landlock 内核级文件系统沙箱，限制子进程仅可写入当前工作区与 `/tmp`；支持 `ask` / `edit` / `full` 三档批准模式，`edit` 模式自动放行只读检查命令，命令审批支持「本对话允许同类」，并实时显示耗时命令最新输出行。
 - **跨平台桌面无障碍自动化 + 多模态视觉**：原生对接 Linux `AT-SPI`、Windows `UI Automation` 与 macOS `System Events`（支持最多 500 个控件节点与 `filter` 过滤），配合 `desktop_screenshot` 桌面视觉截图、`/paste` 剪贴板贴图与 `@图片` 内联输入，打通终端与 GUI 应用边界。
 - **双协议原生推理与提示词缓存**：原生支持 OpenAI Chat Completions 与 Anthropic Messages API（含自适应推理强度 `reasoning_effort` / `thinking` 与 Anthropic 自动 `cache_control` 提示词缓存断点），内置 OpenAI、Anthropic、DeepSeek、Kimi、通义千问、智谱 GLM、硅基流动、OpenRouter 与本地 Ollama 预设。
-- **多对话后台并发与工程化扩展**：支持同时挂起多个后台对话（最多 4 路并发执行、32 个会话槽），`Ctrl+D` 返回列表不中断后台任务；原生支持跨平台本地 `stdio` 与远程 `Streamable HTTP` **MCP 服务**、项目规范 `DESKCODE.md`、生命周期钩子 `hooks.json` 与自定义斜杠指令。
+- **LSP 代码诊断与导航**：自动发现本机语言服务（`clangd`、`pyright-langserver` / `pylsp`、`typescript-language-server`、`gopls`、`rust-analyzer` 或自定义 `lsp.json`），每次 `edit_file` / `multi_edit` / `write_file` 后自动回传编译器错误与警告，并通过 `lsp` 工具支持跳转定义、查找引用、悬停类型与文档符号。
+- **IDE 接入（ACP）、Skills/插件生态、GitHub Action 与 Python SDK**：内置 `desk acp`（Agent Client Protocol v1）直连 **Zed** 与 **JetBrains IDEs**；支持 `SKILL.md` 技能与 `desk plugin` 插件管理器（兼容 Claude Code 插件包与 `PreToolUse` / `PostToolUse` 钩子）；随附官方 [GitHub Action](action/README.md)（`Milorgs/DeskCode/action@main`）与零依赖 [Python SDK](sdk/python/README.md)（`deskcode`）。
+- **多对话后台并发与 MCP 扩展**：支持同时挂起多个后台对话（最多 4 路并发执行、32 个会话槽），`Ctrl+D` 返回列表不中断后台任务；原生支持跨平台本地 `stdio` 与远程 `Streamable HTTP` **MCP 服务**。
 
 ---
 
 ## 快速安装
 
-当前最新版本：**1.15.0**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+当前最新版本：**1.16.0**（手动下载安装包：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
 
 ### Linux (x86_64)
 
@@ -73,7 +75,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 
 ---
 
-## 内置工具矩阵（19 项 + MCP）
+## 内置工具矩阵（21 项 + MCP）
 
 | 类别 | 工具名 | 功能说明 |
 |---|---|---|
@@ -81,10 +83,11 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | | `read_file` | 读取 UTF-8 文件全文（`256 KB` 内）或按 `start_line..end_line` 分段读取最大 `16 MB` 文件（`4 MB` 内均返回全文 `SHA256`） |
 | | `search_text` | 递归全文/ECMAScript 正则搜索，支持 `file_pattern` 通配符（如 `*.{cpp,hpp}`）并自动遵守 `.gitignore` |
 | | `code_outline` | 提取源码中的类、结构体、接口、枚举、函数与方法定义及行号大纲 |
+| | `lsp` | 调用项目语言服务获取编译器级 `diagnostics`、`definition`、`references`、`hover` 与 `symbols`（按需启用） |
 | | `delegate_research` | 启动独立上下文的只读调研子代理完成跨文件排查，避免撑满主会话上下文 |
-| **安全代码编辑** | `edit_file` | 校验 `SHA256` 后对文件（最大 `4 MB`）做唯一精确替换，歧义时返回候选行号 |
+| **安全代码编辑** | `edit_file` | 校验 `SHA256` 后对文件（最大 `4 MB`）做唯一精确替换，并自动附带最新 LSP 编译诊断 |
 | | `multi_edit` | 单次 `SHA256` 校验下对同一文件原子应用 `1..20` 处修改（任一分块不匹配则整体零写入回滚） |
-| | `write_file` | 新建或完整替换 UTF-8 文件，自动生成 `.bak` 备份并回读校验 |
+| | `write_file` | 新建或完整替换 UTF-8 文件，自动生成 `.bak` 备份、回读校验并附带 LSP 诊断 |
 | **终端与联网** | `run_shell` | 执行非交互式命令（默认 30s，最高 300s），支持实时输出进度与 Linux Landlock 内核写保护；`background: true` 时在后台启动长时间运行的命令 |
 | | `shell_output` / `shell_kill` | 读取后台命令的新增输出与退出状态 / 停止后台命令及其子进程（同时最多 8 个，对话结束自动清理） |
 | | `web_search` | 关键词联网检索并返回标题、链接与摘要（支持通过 `DESK_SEARCH_URL` 接入自建检索端） |
@@ -93,7 +96,8 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | | `desktop_action` | 触发最新快照中指定控件暴露的原语动作（点击、激活等） |
 | | `desktop_set_text` | 设置可编辑桌面控件的文本内容 |
 | | `desktop_screenshot` | 截取当前活动窗口或全屏 PNG 图像并按多模态图像块送入模型进行视觉核验 |
-| **MCP 生态扩展** | `mcp_<server>_<tool>` | 动态挂载本地 `stdio` 或远程 `Streamable HTTP` MCP 服务暴露的工具（支持分页发现、会话鉴权与自动清理） |
+| **技能与 MCP 扩展** | `skill` | 按需加载工作区、用户或插件中的 `SKILL.md` 专业技能及配套参考文件（无技能时不占用上下文） |
+| | `mcp_<server>_<tool>` | 动态挂载本地 `stdio`、远程 `Streamable HTTP`、插件 `.mcp.json` 或 ACP 会话透传的 MCP 工具 |
 | **规划与进度** | `todo_write` | 模型为多步任务维护任务清单（待办 / 进行中 / 已完成），终端实时显示进度 |
 | | `submit_plan` | 仅在计划模式提供：提交完整实施方案等待用户批准，批准前不会修改任何文件 |
 
@@ -117,7 +121,7 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
 | `/compact` | 主动调用当前模型将长对话压缩为高密度工程续接摘要 |
 | `/paste [说明]` | 从系统剪贴板读取图片并附带到当前输入（或按 `Ctrl+V`） |
 | `/sandbox` | 开启或关闭当前会话的 Linux Landlock 内核文件系统沙箱 |
-| `/commands` | 查看已加载的工作区与用户级自定义斜杠指令 |
+| `/commands` · `/skills` · `/plugins` | 查看已加载的自定义指令 · 查看可用 `SKILL.md` 技能 · 查看已安装插件状态 |
 | `/approval`（或 `/perm`） | 切换当前对话批准模式（请求批准 / 帮我批准 / 完全访问权限） |
 | `/model` · `/reasoning` | 切换模型配置 · 调整模型原生推理强度档位 |
 | `/mcp` · `/status` · `/clear` · `/new` · `/help` | 管理 MCP 服务 · 查看会话与词元状态 · 清空上下文 · 新建对话 · 查看快捷键帮助 |
@@ -182,6 +186,36 @@ desk doctor                 # 检查工作区权限、模型配置、沙箱与�
   }
 }
 ```
+
+### 5. Skills 技能与插件生态（兼容 Claude Code 插件）
+- **Skills（`SKILL.md`）**：在 `.deskcode/skills/<名称>/SKILL.md`、`.claude/skills/<名称>/SKILL.md` 或用户目录 `~/.config/desk-agent/skills/` 下编写带 YAML Frontmatter（`name` / `description`）的技能说明与参考文件，模型可通过 `skill` 工具按需读取，用户也可直接输入 `/<名称> [需求]` 触发。
+- **插件包管理（`desk plugin`）**：一键安装包含 `commands/`、`skills/`、`hooks/hooks.json`（同时兼容 `pre_shell`/`post_edit` 与 Claude `PreToolUse`/`PostToolUse` 格式）和 `.mcp.json` 的插件包或插件市场：
+
+```sh
+desk plugin install owner/repo             # 从 GitHub 仓库、Git 地址或本地目录安装插件
+desk plugin install owner/marketplace pkg  # 从插件市场安装指定插件
+desk plugin list                           # 查看已安装插件及包含的 cmd / skill / mcp / hooks
+desk plugin disable pkg && desk plugin enable pkg
+desk plugin validate ./my-plugin           # 校验插件目录结构与清单
+```
+
+### 6. IDE 接入（Agent Client Protocol — `desk acp`）
+运行 `desk acp` 即可启动标准 ACP v1 服务端，直接在 **Zed**、**JetBrains IDEs**（IntelliJ / CLion / PyCharm）等编辑器中使用 DeskCode 的流式对话、Diff 审阅、任务清单与交互式权限批准。例如在 Zed `settings.json` 中添加：
+
+```json
+{
+  "agent_servers": {
+    "DeskCode": {
+      "command": "desk",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+### 7. GitHub Action 与 Python SDK
+- **GitHub Action（[`action/`](action/README.md)）**：在仓库 Workflow 中接入 `uses: Milorgs/DeskCode/action@main`，即可在 Issue / PR 评论中输入 `@desk 需求` 自动完成代码修改并创建 PR（含协作者写权限校验与密钥脱敏）。
+- **Python SDK（[`sdk/python/`](sdk/python/README.md)）**：`pip install ./sdk/python` 安装零外部依赖的 `deskcode` 包，支持单次 `deskcode.run(...)` / `arun(...)` 与基于 `desk acp` 的流式多轮会话 `DeskAgent` / `AsyncDeskAgent`。
 
 ---
 

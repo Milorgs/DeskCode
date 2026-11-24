@@ -18,6 +18,7 @@ struct Fixture {
     Fixture(){
         auto root=sandbox/(L"case-"+std::to_wstring(sequence++));CHECK(!mkdirs(path_text(root).c_str(),0700));CHECK(canonical_directory(path_text(root).c_str(),app.root));
         environment(L"XDG_CONFIG_HOME",path_text(root/"config"));environment(L"XDG_STATE_HOME",path_text(root/"state"));
+        environment(L"DESK_NO_LSP","1");environment(L"DESK_NO_USER_SKILLS","1");
         for(const wchar_t *key:{L"DESK_API_KEY",L"DESK_BASE_URL",L"DESK_MODEL",L"DESK_API_TYPE",L"DESK_LANG"})CHECK(SetEnvironmentVariableW(key,nullptr)!=FALSE||GetLastError()==ERROR_ENVVAR_NOT_FOUND);
         CHECK(!store_load(&app));reset_session(&app);app.yes=true;app.max_steps=8;
         json_object_put(app.config);app.config=config_default("windows-test");put(app.config,"model",str("model-test"));put(app.config,"api_key",str("fake-windows-test-key"));
@@ -94,6 +95,13 @@ static void test_files_config(){
     std::string original=json_object_to_json_string_ext(app.config,JSON_C_TO_STRING_PLAIN);CHECK(save_language(app,"en"));CHECK(original==json_object_to_json_string_ext(app.config,JSON_C_TO_STRING_PLAIN));CHECK(private_acl(fs_path(app.config_dir)/"ui.json"));CHECK(set_language("zh"));
     args.reset(path_args(path_text(fs_path(app.config_dir)/"settings.json").c_str()));result.reset(tool_call(&app,"read_file",args.get()));CHECK(get(result.get(),"error"));
     CHECK(!atomic_file(path_text(fs_path(app.root)/"empty.txt").c_str(),"",0,0600));size_t size=99;char *empty=read_bytes(path_text(fs_path(app.root)/"empty.txt").c_str(),10,&size);CHECK(empty&&size==0);free(empty);
+    const fs::path skill_dir=fs_path(app.root)/".deskcode"/"skills"/"win-skill";
+    CHECK(!mkdirs(path_text(skill_dir).c_str(),0700));
+    const char *skill_md="---\nname: win-skill\ndescription: Windows UTF-8 skill check\n---\nFollow Windows steps.\n";
+    CHECK(!atomic_file(path_text(skill_dir/"SKILL.md").c_str(),skill_md,strlen(skill_md),0600));
+    CHECK(list_skills(app).size()==1);
+    args.reset(obj());put(args.get(),"name",str("win-skill"));
+    result.reset(tool_call(&app,"skill",args.get()));CHECK(checked(result.get()));CHECK(strstr(sget(result.get(),"instructions"),"Follow Windows steps."));
 }
 static void test_commands(){
     Fixture fixture;App &app=fixture.app;

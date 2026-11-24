@@ -9,6 +9,21 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+#include <regex>
+static bool hook_matcher_matches(const char *matcher,const std::vector<std::string> &tool_names){
+    try{
+        const std::regex pattern(matcher);
+        for(const auto &tool:tool_names)if(std::regex_search(tool,pattern))return true;
+    }catch(const std::regex_error &){}
+    return false;
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -1195,9 +1210,29 @@ void set_temp_env(const char *key,const char *val){
 #endif
 }
 
-std::vector<std::string> collect_hook_commands(App &app,const char *event_name,std::string_view target){
-    std::vector<std::string> cmds;
-    auto parse_file=[&](const std::string &path,bool workspace_scoped){
+struct HookCommand {
+    std::string command;
+    // Claude Code format: JSON on stdin, and only exit code 2 blocks.
+    bool claude=false;
+};
+// DeskCode hooks.json ({"pre_shell": ..., "post_edit": [...]}) or the Claude
+// Code shape ({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":...}]}]}}).
+std::vector<HookCommand> collect_hook_commands(App &app,const char *event_name,std::string_view target){
+    std::vector<HookCommand> cmds;
+    const bool pre=!strcmp(event_name,"pre_shell");
+    const char *claude_event=pre?"PreToolUse":"PostToolUse";
+    const std::vector<std::string> tool_names=pre?std::vector<std::string>{"Bash","run_shell"}:std::vector<std::string>{"Edit","Write","MultiEdit","edit_file","write_file","multi_edit"};
+    auto claude_matches=[&](const char *matcher){
+        if(!*matcher||!strcmp(matcher,"*"))return true;
+        return hook_matcher_matches(matcher,tool_names);
+    };
+    auto substitute=[](std::string command,const std::string &root){
+        if(root.empty())return command;
+        for(const std::string token:{"${CLAUDE_PLUGIN_ROOT}","${DESK_PLUGIN_ROOT}"})
+            for(size_t pos=0;(pos=command.find(token,pos))!=std::string::npos;pos+=root.size())command.replace(pos,token.size(),root);
+        return command;
+    };
+    auto parse_file=[&](const std::string &path,bool workspace_scoped,const std::string &plugin_root){
         if(path_link(fs_path(path)))return;
         size_t len=0;
         char *bytes=read_bytes(path.c_str(),65536,&len);
@@ -1205,42 +1240,74 @@ std::vector<std::string> collect_hook_commands(App &app,const char *event_name,s
         JsonPtr doc(json_tokener_parse(bytes));
         free(bytes);
         if(!doc||!json_object_is_type(doc.get(),json_type_object))return;
+        std::vector<HookCommand> matched;
+        if(J *claude=get(doc.get(),"hooks");json_object_is_type(claude,json_type_object)){
+            J *groups=get(claude,claude_event);
+            for(size_t i=0;i<alen(groups)&&matched.size()<8;i++){
+                J *group=at(groups,i);
+                if(!claude_matches(sget(group,"matcher")))continue;
+                J *hooks=get(group,"hooks");
+                for(size_t k=0;k<alen(hooks)&&matched.size()<8;k++){
+                    J *hook=at(hooks,k);
+                    if(*sget(hook,"type")&&strcmp(sget(hook,"type"),"command"))continue;
+                    if(*sget(hook,"command"))matched.push_back({substitute(sget(hook,"command"),plugin_root),true});
+                }
+            }
+        }
         J *spec=get(doc.get(),event_name);
-        if(!spec)return;
-        std::vector<std::string> matched;
         if(json_object_is_type(spec,json_type_string)){
             const char *s=json_object_get_string(spec);
-            if(*s)matched.emplace_back(s);
+            if(*s)matched.push_back({substitute(s,plugin_root),false});
         }else if(json_object_is_type(spec,json_type_array)){
             for(size_t i=0;i<alen(spec)&&matched.size()<8;i++){
                 J *item=at(spec,i);
                 if(json_object_is_type(item,json_type_string)){
-                    if(*json_object_get_string(item))matched.emplace_back(json_object_get_string(item));
+                    if(*json_object_get_string(item))matched.push_back({substitute(json_object_get_string(item),plugin_root),false});
                 }else if(json_object_is_type(item,json_type_object)){
                     const char *pat=sget(item,"pattern");
                     const char *cmd=sget(item,"command");
-                    if(*cmd&&(!*pat||glob_match(pat,target,false)))matched.emplace_back(cmd);
+                    if(*cmd&&(!*pat||glob_match(pat,target,false)))matched.push_back({substitute(cmd,plugin_root),false});
                 }
             }
         }
         if(matched.empty())return;
         if(workspace_scoped&&!app.yes&&!app.workspace_hooks_approved){
-            std::string preview=path+"\n"+matched.front();
+            std::string preview=path+"\n"+matched.front().command;
             if(!approve(&app,preview.c_str(),Operation::Shell,tr("运行项目钩子")))return;
             app.workspace_hooks_approved=true;
         }
         for(auto &m:matched)cmds.push_back(std::move(m));
     };
-    if(*app.config_dir)parse_file(std::string(app.config_dir)+"/hooks.json",false);
-    if(*app.root)parse_file(std::string(app.root)+"/.desk-agent/hooks.json",true);
+    if(*app.config_dir)parse_file(std::string(app.config_dir)+"/hooks.json",false,"");
+    if(*app.root)parse_file(std::string(app.root)+"/.desk-agent/hooks.json",true,"");
+    // Plugins are installed by the user, like the user's own hooks.json.
+    for(const auto &plugin:enabled_plugins(app))parse_file(plugin.directory+"/hooks/hooks.json",false,plugin.directory);
     return cmds;
+}
+// Claude-format hooks read a JSON event on stdin.
+std::string hook_shell(const HookCommand &hook){
+    if(!hook.claude)return hook.command;
+#ifdef _WIN32
+    return "$env:DESK_HOOK_JSON | & {\n"+hook.command+"\n}";
+#else
+    return "printf '%s' \"$DESK_HOOK_JSON\" | {\n"+hook.command+"\n}";
+#endif
+}
+std::string hook_event_json(const App &app,const char *event,const char *tool,const char *key,const char *value){
+    JsonPtr event_json(obj()),input(obj());
+    put(input.get(),key,str(value));
+    put(event_json.get(),"hook_event_name",str(event));
+    put(event_json.get(),"tool_name",str(tool));
+    put(event_json.get(),"tool_input",input.release());
+    put(event_json.get(),"cwd",str(app.root));
+    return json_object_to_json_string_ext(event_json.get(),JSON_C_TO_STRING_PLAIN);
 }
 
 bool builtin_slash_name(std::string_view name){
     static constexpr std::string_view reserved[]={
         "help","status","clear","undo","compact","paste","model",
         "reasoning","approval","perm","mcp","new","commands","sandbox",
-        "plan","go","rewind","cost","price","bg","todos"
+        "plan","go","rewind","cost","price","bg","todos","skills","plugins"
     };
     for(auto r:reserved)if(name==r)return true;
     return false;
@@ -1262,17 +1329,21 @@ bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
     set_temp_env("DESK_HOOK_CMD",command);
-    for(const auto &hcmd:hooks){
-        JsonPtr res(run_command(&probe,hcmd.c_str(),15000));
-        if(!res||iget(res.get(),"exit_code",-1)!=0){
+    set_temp_env("DESK_HOOK_JSON",hook_event_json(app,"PreToolUse","Bash","command",command).c_str());
+    for(const auto &hook:hooks){
+        JsonPtr res(run_command(&probe,hook_shell(hook).c_str(),15000));
+        const int code=res?iget(res.get(),"exit_code",-1):-1;
+        if(hook.claude?code==2:code!=0){
             std::string out=res?sget(res.get(),"output"):"";
             while(!out.empty()&&(out.back()=='\n'||out.back()=='\r'))out.pop_back();
             blocked_reason=out.empty()?std::string(tr("pre_shell 钩子拦截了此次命令。")):out;
             set_temp_env("DESK_HOOK_CMD",nullptr);
+            set_temp_env("DESK_HOOK_JSON",nullptr);
             return false;
         }
     }
     set_temp_env("DESK_HOOK_CMD",nullptr);
+    set_temp_env("DESK_HOOK_JSON",nullptr);
     return true;
 }
 
@@ -1284,10 +1355,12 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
     set_temp_env("DESK_HOOK_FILE",rel_path);
+    const std::string absolute=path_text(fs_path(app.root)/fs_path(rel_path));
+    set_temp_env("DESK_HOOK_JSON",hook_event_json(app,"PostToolUse","Edit","file_path",absolute.c_str()).c_str());
     int final_code=0;
     std::string combined;
-    for(const auto &hcmd:hooks){
-        JsonPtr res(run_command(&probe,hcmd.c_str(),15000));
+    for(const auto &hook:hooks){
+        JsonPtr res(run_command(&probe,hook_shell(hook).c_str(),15000));
         int code=res?iget(res.get(),"exit_code",-1):-1;
         if(code!=0&&final_code==0)final_code=code;
         std::string_view out=res?sget(res.get(),"output"):"";
@@ -1299,6 +1372,7 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
         }
     }
     set_temp_env("DESK_HOOK_FILE",nullptr);
+    set_temp_env("DESK_HOOK_JSON",nullptr);
     put(result,"hook_exit_code",json_object_new_int(final_code));
     if(!combined.empty())put(result,"hook_output",str(combined.c_str()));
 }
@@ -1306,7 +1380,7 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
 std::vector<CustomCommand> list_custom_commands(const App &app){
     std::vector<CustomCommand> out;
     std::set<std::string> seen;
-    auto scan=[&](const std::string &dir,const char *scope){
+    auto scan=[&](const std::string &dir,const char *scope,const std::string &prefix){
         std::error_code ec;
         if(dir.empty()||!fs::is_directory(fs_path(dir),ec)||ec)return;
         std::vector<fs::path> files;
@@ -1319,14 +1393,19 @@ std::vector<CustomCommand> list_custom_commands(const App &app){
         std::sort(files.begin(),files.end());
         for(const auto &fp:files){
             std::string stem=path_text(fp.stem());
-            if(!valid_command_slug(stem)||!seen.insert(stem).second)continue;
+            if(!valid_command_slug(stem))continue;
+            if(!prefix.empty())stem=prefix+":"+stem;
+            if(!seen.insert(stem).second)continue;
             size_t len=0;
             std::string full=path_text(fp);
             char *bytes=read_bytes(full.c_str(),32768,&len);
             if(!bytes)continue;
             std::string summary;
             if(!memchr(bytes,0,len)&&valid_utf8(std::string_view(bytes,len))){
-                std::string_view text(bytes,len);
+                std::map<std::string,std::string> fields;
+                std::string_view text;
+                parse_frontmatter(std::string_view(bytes,len),fields,text);
+                if(!fields["description"].empty())text=fields["description"];
                 for(size_t pos=0;pos<text.size();){
                     auto nl=text.find('\n',pos);
                     std::string_view line=nl==std::string_view::npos?text.substr(pos):text.substr(pos,nl-pos);
@@ -1347,11 +1426,12 @@ std::vector<CustomCommand> list_custom_commands(const App &app){
         }
     };
     if(*app.root){
-        scan(std::string(app.root)+"/.deskcode/commands","workspace");
-        scan(std::string(app.root)+"/.desk-agent/commands","workspace");
-        scan(std::string(app.root)+"/.claude/commands","compat");
+        scan(std::string(app.root)+"/.deskcode/commands","workspace","");
+        scan(std::string(app.root)+"/.desk-agent/commands","workspace","");
+        scan(std::string(app.root)+"/.claude/commands","compat","");
     }
-    if(*app.config_dir)scan(std::string(app.config_dir)+"/commands","user");
+    if(*app.config_dir)scan(std::string(app.config_dir)+"/commands","user","");
+    for(const auto &plugin:enabled_plugins(app))scan(plugin.directory+"/commands","plugin",plugin.name);
     return out;
 }
 
@@ -1360,17 +1440,26 @@ bool expand_custom_command(const App &app,std::string_view input,std::string &ex
     size_t sp=1;
     while(sp<input.size()&&!std::isspace(static_cast<unsigned char>(input[sp])))sp++;
     std::string_view name=input.substr(1,sp-1);
-    if(!valid_command_slug(name))return false;
     std::string_view rest=sp<input.size()?input.substr(sp):std::string_view{};
     while(!rest.empty()&&std::isspace(static_cast<unsigned char>(rest.front())))rest.remove_prefix(1);
 
     std::vector<std::string> dirs;
-    if(*app.root){
-        dirs.push_back(std::string(app.root)+"/.deskcode/commands");
-        dirs.push_back(std::string(app.root)+"/.desk-agent/commands");
-        dirs.push_back(std::string(app.root)+"/.claude/commands");
+    if(auto colon=name.find(':');colon!=std::string_view::npos){
+        // /plugin:command
+        const std::string_view plugin=name.substr(0,colon);
+        name=name.substr(colon+1);
+        if(!valid_command_slug(name))return false;
+        for(const auto &entry:enabled_plugins(app))if(entry.name==plugin)dirs.push_back(entry.directory+"/commands");
+    }else{
+        if(!valid_command_slug(name))return false;
+        if(*app.root){
+            dirs.push_back(std::string(app.root)+"/.deskcode/commands");
+            dirs.push_back(std::string(app.root)+"/.desk-agent/commands");
+            dirs.push_back(std::string(app.root)+"/.claude/commands");
+        }
+        if(*app.config_dir)dirs.push_back(std::string(app.config_dir)+"/commands");
+        for(const auto &entry:enabled_plugins(app))dirs.push_back(entry.directory+"/commands");
     }
-    if(*app.config_dir)dirs.push_back(std::string(app.config_dir)+"/commands");
 
     for(const auto &dir:dirs){
         fs::path fp=fs_path(dir)/(std::string(name)+".md");
@@ -1380,7 +1469,14 @@ bool expand_custom_command(const App &app,std::string_view input,std::string &ex
         char *bytes=read_bytes(full.c_str(),32768,&len);
         if(!bytes)continue;
         bool ok=!memchr(bytes,0,len)&&valid_utf8(std::string_view(bytes,len));
-        std::string tpl=ok?std::string(bytes,len):std::string();
+        std::string tpl;
+        if(ok){
+            std::map<std::string,std::string> fields;
+            std::string_view body;
+            parse_frontmatter(std::string_view(bytes,len),fields,body);
+            tpl=std::string(body);
+            while(!tpl.empty()&&(tpl.front()=='\n'||tpl.front()=='\r'))tpl.erase(0,1);
+        }
         free(bytes);
         if(!ok||tpl.empty())continue;
 

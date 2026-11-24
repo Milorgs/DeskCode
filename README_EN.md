@@ -20,13 +20,15 @@
 - **Linux Landlock Kernel Sandbox & Smart Approvals**: Restricts shell child processes at the kernel level on Linux so writes outside the workspace and `/tmp` are blocked by default. Offers `ask` / `edit` / `full` approval modes, zero-friction execution of verified read-only inspection commands in `edit` mode, per-chat `Allow similar` shell rules, and live latest-line progress for long-running commands.
 - **Cross-Platform Desktop Automation + Vision**: Bridges terminal and GUI workflows via Linux `AT-SPI`, Windows `UI Automation`, and macOS `System Events` (up to 500 controls with `filter` support), paired with multimodal `desktop_screenshot` inspection, `/paste` clipboard image attachment, and inline `@image` mentions.
 - **Native Dual-Protocol Streaming & Prompt Caching**: Speaks both OpenAI Chat Completions and the native Anthropic Messages API (including native `reasoning_effort` / adaptive `thinking` controls and automatic Anthropic `cache_control` prompt-caching breakpoints), with built-in presets for OpenAI, Anthropic, DeepSeek, Kimi, Qwen, Zhipu GLM, SiliconFlow, OpenRouter, and local Ollama.
-- **Concurrent Background Chats & Extensibility**: Keep multiple conversations running in parallel in the background (up to 4 active workers and 32 session slots—press `Ctrl+D` to switch without interrupting work). First-class support for local `stdio` and remote `Streamable HTTP` **MCP servers**, `DESKCODE.md` workspace instructions, `hooks.json` lifecycle hooks, and custom slash commands.
+- **Compiler-Grade LSP Diagnostics & Navigation**: Automatically discovers installed language servers (`clangd`, `pyright-langserver` / `pylsp`, `typescript-language-server`, `gopls`, `rust-analyzer`, or custom `lsp.json`), attaches compiler errors and warnings after every `edit_file` / `multi_edit` / `write_file`, and exposes `diagnostics`, `definition`, `references`, `hover`, and `symbols` via the `lsp` tool.
+- **IDE Integration (ACP), Skills/Plugins, GitHub Action & Python SDK**: Built-in `desk acp` (Agent Client Protocol v1) connects directly to **Zed** and **JetBrains IDEs**; supports `SKILL.md` skills and `desk plugin` (compatible with Claude Code plugin bundles and `PreToolUse` / `PostToolUse` hooks); ships with an official [GitHub Action](action/README.md) (`Milorgs/DeskCode/action@main`) and zero-dependency [Python SDK](sdk/python/README.md) (`deskcode`).
+- **Concurrent Background Chats & MCP Ecosystem**: Keep multiple conversations running in parallel in the background (up to 4 active workers and 32 session slots—press `Ctrl+D` to switch without interrupting work), with first-class local `stdio` and remote `Streamable HTTP` **MCP servers**.
 
 ---
 
 ## Quick Install
 
-Latest version: **1.15.0** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
+Latest version: **1.16.0** (pre-built archives: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
 
 ### Linux (x86_64)
 
@@ -73,7 +75,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 
 ---
 
-## Built-in Tools (19 + MCP)
+## Built-in Tools (21 + MCP)
 
 | Category | Tool | Description |
 |---|---|---|
@@ -81,10 +83,11 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | | `read_file` | Read full UTF-8 files (`<= 256 KB`) or `start_line..end_line` slices up to `16 MB` (includes full-file `SHA256` up to `4 MB`) |
 | | `search_text` | Recursive literal or ECMAScript regex search with `file_pattern` globs (`*.{cpp,hpp}`) and `.gitignore` filtering |
 | | `code_outline` | Extract classes, structs, interfaces, enums, functions, and methods with 1-based line numbers |
+| | `lsp` | Query the project's language server for `diagnostics`, `definition`, `references`, `hover`, and `symbols` (enabled on demand) |
 | | `delegate_research` | Spawn an isolated read-only subagent to investigate multi-file questions without bloating main context |
-| **Verified Editing** | `edit_file` | Replace a unique exact text match in files up to `4 MB` under `SHA256` verification |
+| **Verified Editing** | `edit_file` | Replace a unique exact text match in files up to `4 MB` under `SHA256` verification, attaching fresh LSP diagnostics |
 | | `multi_edit` | Atomically apply `1..20` `{old_text, new_text}` hunks to a file under one `SHA256` check, diff preview, and backup |
-| | `write_file` | Create or replace a UTF-8 file with automatic `.bak` backup and read-back verification |
+| | `write_file` | Create or replace a UTF-8 file with automatic `.bak` backup, read-back verification, and LSP diagnostics |
 | **Shell & Web** | `run_shell` | Execute noninteractive commands (`30s` default, up to `300s`) with live output progress and Linux Landlock write sandboxing; `background: true` starts long-running commands in the background |
 | | `shell_output` / `shell_kill` | Read new output and exit status of a background command / stop it and its children (up to 8, cleaned up when the conversation ends) |
 | | `web_search` | Search the web for titles, URLs, and snippets (customizable via `DESK_SEARCH_URL`) |
@@ -93,7 +96,8 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | | `desktop_action` | Trigger an accessibility action advertised by a control in the latest snapshot |
 | | `desktop_set_text` | Replace text in an editable desktop control |
 | | `desktop_screenshot` | Capture the active window or desktop as PNG and attach it as a multimodal vision block |
-| **MCP Ecosystem** | `mcp_<server>_<tool>` | Dynamically attach tools from local `stdio` or remote `Streamable HTTP` MCP servers |
+| **Skills & MCP Ecosystem** | `skill` | Load on-demand `SKILL.md` domain skills and bundled reference files from workspace, user, or plugins (omitted when none exist) |
+| | `mcp_<server>_<tool>` | Dynamically attach tools from local `stdio`, remote `Streamable HTTP`, plugin `.mcp.json`, or ACP session MCP servers |
 | **Planning & Progress** | `todo_write` | The model keeps a checklist (pending / in progress / completed) for multi-step work, shown live in the terminal |
 | | `submit_plan` | Plan mode only: submit the full implementation plan for approval; no file changes before approval |
 
@@ -117,7 +121,7 @@ desk doctor                               # Inspect workspace, model, sandbox & 
 | `/compact` | Summarize long conversation history into a dense continuation brief |
 | `/paste [prompt]` | Attach an image directly from the system clipboard (or press `Ctrl+V`) |
 | `/sandbox` | Toggle the Linux Landlock kernel filesystem sandbox for the current session |
-| `/commands` | List custom slash commands discovered in workspace and user directories |
+| `/commands` · `/skills` · `/plugins` | List custom slash commands · List discovered `SKILL.md` skills · List installed plugins |
 | `/approval` (or `/perm`) | Switch approval mode (`Ask for approval` / `Auto-approve edits` / `Full access`) |
 | `/model` · `/reasoning` | Switch active model profile · Adjust native reasoning effort |
 | `/mcp` · `/status` · `/clear` · `/new` · `/help` | Manage MCP servers · Show status & token usage · Clear context · New chat · Shortcut help |
@@ -182,6 +186,36 @@ Import from a file, paste multiline JSON, or enter a remote URL via `/mcp`:
   }
 }
 ```
+
+### 5. Skills & Plugin Ecosystem (Claude Code-Compatible)
+- **Skills (`SKILL.md`)**: Place `<name>/SKILL.md` (with YAML frontmatter `name` / `description` and optional reference files) under `.deskcode/skills/`, `.claude/skills/`, or `~/.config/desk-agent/skills/`. The model loads instructions on demand via `skill`, or invoke directly with `/<name> [request]`.
+- **Plugins (`desk plugin`)**: Install bundles containing `commands/`, `skills/`, `hooks/hooks.json` (supporting both `pre_shell`/`post_edit` and Claude `PreToolUse`/`PostToolUse` matchers), and `.mcp.json`:
+
+```sh
+desk plugin install owner/repo             # Install from GitHub owner/repo, Git URL, or local directory
+desk plugin install owner/marketplace pkg  # Install a named plugin from a marketplace
+desk plugin list                           # Inspect installed plugins and component counts
+desk plugin disable pkg && desk plugin enable pkg
+desk plugin validate ./my-plugin           # Validate manifest and bundle layout
+```
+
+### 6. IDE Integration (Agent Client Protocol — `desk acp`)
+Run `desk acp` to expose DeskCode over ACP v1 (`stdio` newline-delimited JSON-RPC 2.0) in **Zed**, **JetBrains IDEs**, and other ACP-capable editors—including streaming responses, inline diffs, live checklists, and interactive permission prompts. Example Zed `settings.json`:
+
+```json
+{
+  "agent_servers": {
+    "DeskCode": {
+      "command": "desk",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+### 7. GitHub Action & Python SDK
+- **GitHub Action ([`action/`](action/README.md))**: Add `uses: Milorgs/DeskCode/action@main` to respond to `@desk <request>` on issues and PRs, automatically verifying collaborator write access, redacting secrets, and opening pull requests.
+- **Python SDK ([`sdk/python/`](sdk/python/README.md))**: `pip install ./sdk/python` installs the zero-dependency `deskcode` package with one-shot `deskcode.run(...)` / `arun(...)` and streaming ACP sessions via `DeskAgent` / `AsyncDeskAgent`.
 
 ---
 

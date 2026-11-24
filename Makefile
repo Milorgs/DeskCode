@@ -18,7 +18,7 @@ LDLIBS += $(PKG_LIBS)
 ifneq ($(ATSPI),)
 CPPFLAGS += -DWITH_ATSPI
 endif
-CORE = src/history.cpp src/mcp.cpp src/common.cpp src/platform.cpp src/ui.cpp src/tasks_ui.cpp src/util.cpp src/config.cpp src/api.cpp src/files.cpp src/workspace.cpp src/tools_ext.cpp src/process.cpp src/desktop.cpp src/agent.cpp src/tasks.cpp src/i18n.cpp
+CORE = src/history.cpp src/mcp.cpp src/common.cpp src/platform.cpp src/ui.cpp src/tasks_ui.cpp src/util.cpp src/config.cpp src/api.cpp src/files.cpp src/workspace.cpp src/tools_ext.cpp src/process.cpp src/desktop.cpp src/agent.cpp src/tasks.cpp src/i18n.cpp src/lsp.cpp src/plugins.cpp src/acp.cpp
 CORE_OBJ = $(CORE:%.cpp=build/obj/%.o)
 APP_OBJ = build/obj/src/main.o
 TEST_OBJ = build/obj/tests/test.o

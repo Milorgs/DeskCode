@@ -534,6 +534,7 @@ static J *file_write(App *a,J *args,const std::string *edit_diff=nullptr,size_t 
     put(result,"backup",*backup?str(backup):NULL);
     put(result,"verified",json_object_new_boolean(1));
     if(!rel_written.empty())run_post_edit_hook(*a,rel_written.c_str(),result);
+    lsp_attach_diagnostics(*a,full,result);
     return result;
 }
 static std::string to_crlf(std::string_view input){
@@ -904,20 +905,22 @@ static J *builtin_tools(){
         literal(R"({"type":"function","function":{"name":"submit_plan","description":"Plan mode is on: files cannot be changed, MCP tools are unavailable and only read-only shell commands run. Investigate with the read-only tools, then call submit_plan once with the complete implementation plan in Markdown (goal, files to change, steps, how it will be verified). The user reviews it; implementation starts only after approval.","parameters":{"type":"object","properties":{"plan":{"type":"string","description":"The complete plan in Markdown."}},"required":["plan"],"additionalProperties":false}}})");
         literal(R"({"type":"function","function":{"name":"shell_output","description":"Read new output and the status (running, or exit_code once finished) of a background command started by run_shell with background=true.","parameters":{"type":"object","properties":{"shell_id":{"type":"string","description":"The shell_id returned when the command was started."}},"required":["shell_id"],"additionalProperties":false}}})");
         literal(R"({"type":"function","function":{"name":"shell_kill","description":"Stop a background command and its child processes.","parameters":{"type":"object","properties":{"shell_id":{"type":"string","description":"The shell_id returned when the command was started."}},"required":["shell_id"],"additionalProperties":false}}})");
+        literal(R"({"type":"function","function":{"name":"lsp","description":"Ask the project's language server (compiler-grade analysis). diagnostics: current errors and warnings of a file; definition / references / hover: for the symbol at line and column; symbols: outline of a file. Edits already return diagnostics automatically when a server is available.","parameters":{"type":"object","properties":{"action":{"type":"string","description":"diagnostics, definition, references, hover or symbols."},"path":{"type":"string","description":"Workspace-relative file path."},"line":{"type":"integer","description":"1-based line of the symbol (definition, references, hover)."},"column":{"type":"integer","description":"1-based character column of the symbol (default 1)."}},"required":["action","path"],"additionalProperties":false}}})");
         return tools;
     }());
     return catalog.get();
 }
 bool plan_safe_tool(const char *name){
     for(const char *safe:{"list_files","search_text","read_file","code_outline","delegate_research","web_fetch",
-                          "web_search","desktop_snapshot","desktop_screenshot","todo_write","submit_plan","shell_output"})
+                          "web_search","desktop_snapshot","desktop_screenshot","todo_write","submit_plan","shell_output","lsp","skill"})
         if(!strcmp(name,safe))return true;
     return false;
 }
 static bool tool_enabled(const App &app,const char *name){
+    if(!strcmp(name,"lsp")&&!lsp_available(app))return false;
     if(app.subagent){
         return !strcmp(name,"list_files")||!strcmp(name,"search_text")
-            ||!strcmp(name,"read_file")||!strcmp(name,"code_outline");
+            ||!strcmp(name,"read_file")||!strcmp(name,"code_outline")||!strcmp(name,"lsp");
     }
     if(!strcmp(name,"submit_plan"))return app.plan_mode;
     // Plan mode keeps run_shell for read-only commands; tool_call refuses the rest.
@@ -934,6 +937,9 @@ J *schemas(App *a){
         J *item=at(catalog,i);
         if(tool_enabled(*a,sget(get(item,"function"),"name")))add(tools.get(),copy(item));
     }
+    // Skills are listed in their tool's description, so it exists only when
+    // there is at least one.
+    if(!a->subagent)if(J *skill=skill_tool_definition(*a))add(tools.get(),skill);
     // An MCP tool can change anything, so plan mode leaves them out.
     if(!a->plan_mode)mcp_append_tools(*a,tools.get());
     return tools.release();
@@ -942,6 +948,10 @@ J *tool_call(App *a,const char *name,J *args){
     if(!strncmp(name,"mcp_",4)){
         if(a->plan_mode)return err(tr("计划模式下不能调用 MCP 工具；请写入计划，批准后再执行。"));
         return mcp_call(*a,name,args);
+    }
+    if(!strcmp(name,"skill")){
+        if(a->subagent||!json_object_is_type(args,json_type_object))return err(tr("未知或未启用的工具，或参数不是对象。"));
+        return tool_skill(a,args);
     }
     J *defs=builtin_tools(),*spec=NULL;
     for(size_t i=0;i<alen(defs);i++){
@@ -1011,6 +1021,7 @@ J *tool_call(App *a,const char *name,J *args){
     }
     if(!strcmp(name,"shell_output"))return tool_shell_output(a,args);
     if(!strcmp(name,"shell_kill"))return tool_shell_kill(a,args);
+    if(!strcmp(name,"lsp"))return tool_lsp(a,args);
     std::unique_ptr<ResourceLock> lock;
     if(!strcmp(name,"write_file")||!strcmp(name,"edit_file")||!strcmp(name,"multi_edit")||!strcmp(name,"run_shell")){
         lock=std::make_unique<ResourceLock>(*a,false);

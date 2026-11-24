@@ -619,6 +619,7 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
     // validation runs for both paths.
     stream.delta=[a](const std::string &part){
         if(a->stream_text)a->stream_text(part);
+        if(a->stream_observer){a->streamed_chunks++;a->stream_observer(part);}
     };
     put(body,"stream",json_object_new_boolean(1));
     // OpenAI only reports usage on a stream when asked. An endpoint and model
@@ -645,6 +646,7 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
         stream.native=native;
         stream.delta=[a](const std::string &part){
             if(a->stream_text)a->stream_text(part);
+            if(a->stream_observer){a->streamed_chunks++;a->stream_observer(part);}
         };
         a->error[0]=0;
         data=api_request(a,c,native?"/messages":"/chat/completions",body,&stream);

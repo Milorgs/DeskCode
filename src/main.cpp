@@ -1191,7 +1191,7 @@ static void show_inline_status(const App &app){
 }
 static void show_inline_help(){
     const int width=terminal_columns()>0?std::min(std::max(terminal_columns()-6,36),88):76;
-    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令\n  Shift+Tab 或 /plan 计划模式 · /go 批准计划 · /rewind 回退 · /cost 用量 · /price 价格 · Ctrl+B 命令转后台\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
+    std::string box=ui_box(tr("对话快捷键与指令"),tr("  / 命令面板 · F2 模型 · F3 思考强度 · /undo 撤回 · /compact 压缩 · /sandbox 沙箱 · /commands 指令 · /skills 技能 · /plugins 插件\n  Shift+Tab 或 /plan 计划模式 · /go 批准计划 · /rewind 回退 · /cost 用量 · /price 价格 · Ctrl+B 命令转后台\n  @词+Tab 补全工作区文件 · @文件[:行段] 附带内容 · /paste 贴图 · Alt+Enter 换行\n  鼠标滚轮 / ↑↓ 滚动对话 · PgUp/PgDn 翻页 · Ctrl+Home/End 首尾\n  Ctrl+P/Ctrl+N 或 Alt+↑/↓ 调出之前发送的需求 · Shift+拖动 选择文字\n  Ctrl+C 停止当前任务 · Ctrl+D 返回对话列表（任务在后台继续）"),width);
     std::string out="\n";
     for(size_t start=0;start<box.size();){
         auto end=box.find('\n',start);
@@ -1537,6 +1537,29 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
         if(trimmed=="/help"){local_action(6);continue;}
         if(trimmed=="/clear"){local_action(4);continue;}
         if(trimmed=="/commands"){show_custom_commands(*a);continue;}
+        if(trimmed=="/skills"){
+            auto skills=list_skills(*a);
+            std::string body;
+            for(const auto &skill:skills){
+                if(!body.empty())body+='\n';
+                body+="/"+skill.name+" ("+skill.scope+")";
+                if(!skill.description.empty())body+=" — "+ui_clip(skill.description,90);
+            }
+            if(body.empty())body=tr("暂无技能。把 <名称>/SKILL.md 放进 .deskcode/skills/、.claude/skills/ 或用户配置目录的 skills/，或安装插件。");
+            inline_box(tr("技能"),body);
+            continue;
+        }
+        if(trimmed=="/plugins"){
+            std::string body;
+            for(const auto &plugin:list_plugins(*a)){
+                if(!body.empty())body+='\n';
+                body+=std::string(plugin.enabled?"● ":"○ ")+plugin.name+(plugin.version.empty()?"":" "+plugin.version);
+                if(!plugin.description.empty())body+=" — "+ui_clip(plugin.description,80);
+            }
+            if(body.empty())body=tr("尚未安装插件。使用 desk plugin install <目录 | Git 地址 | owner/repo> 安装。");
+            inline_box(tr("插件"),body);
+            continue;
+        }
         if(trimmed=="/sandbox"){
             if(!sandbox_supported()){
                 a->sandbox=false;
@@ -1808,7 +1831,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
         std::string custom_label;
         if(trimmed.size()>1&&trimmed.front()=='/'){
             std::string expanded_cmd;
-            if(expand_custom_command(*a,trimmed,expanded_cmd,custom_label)){
+            if(expand_custom_command(*a,trimmed,expanded_cmd,custom_label)||expand_skill_command(*a,trimmed,expanded_cmd,custom_label)){
                 task=std::move(expanded_cmd);
             }
         }
@@ -2069,7 +2092,7 @@ static int menu(App *a,int start_mode=0){
     }
 }
 static void help(void){
-    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  --plan                  计划模式：只调研并给出计划，不修改文件\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --no-sandbox  --allow-desktop  --record  --verbose  --version  --help"));
+    menu_text(tr("用法：desk [选项] [命令 | 需求]\n\n常用\n  desk                    打开主菜单（首次使用会引导添加模型）\n  desk chat               新建一个对话\n  desk -c, --continue     继续本目录最近的对话\n  desk \"需求\"             执行一次请求后退出（同 -p \"需求\"）\n  echo 需求 | desk -p -   从标准输入读取需求\n\n自动化与脚本\n  --json                  只在标准输出打印一个 JSON 结果（status/reply/tokens/tools）\n  --approval 模式         ask（默认）| edit 自动批准文件编辑 | full 自动批准全部\n  --yes                   等同 --approval full\n  --max-steps N           0..100，0 为不限（默认）\n  --plan                  计划模式：只调研并给出计划，不修改文件\n  标准输出不是终端时只输出最终回复，进度与提示写到标准错误。\n  退出码：0 完成 · 1 未完成 · 2 参数错误 · 130 已中断\n\n其他命令\n  desk acp                启动 Agent Client Protocol（Zed / JetBrains 等 IDE 接入）\n  desk plugin <子命令>    管理插件包（list / install / update / enable / disable / remove / validate）\n  desk doctor [--json]    环境检查\n  desk config             编辑当前模型配置\n  desk inspect --app 名称 读取桌面控件（需桌面支持）\n\n选项\n  --workspace 目录  --provider 配置名  --lang zh|en\n  --no-shell  --no-sandbox  --allow-desktop  --record  --verbose  --version  --help"));
 }
 #ifdef _WIN32
 #define desk_dup _dup
@@ -2254,6 +2277,13 @@ static int run_cli(int argc,char **argv){
         char *end=nullptr;long long fd=strtoll(argv[2],&end,10);
         return *end||fd<3?2:task_worker(static_cast<std::intptr_t>(fd));
     }
+    if(argc>=2&&!strcmp(argv[1],"plugin")){
+        App store{};
+        auto cleanup_store=[](App *app){app_cleanup(app);};
+        std::unique_ptr<App,decltype(cleanup_store)> owned(&store,cleanup_store);
+        if(!canonical_directory(".",store.root)||store_load(&store)){fprintf(stderr,"%s\n",store.error);return 1;}
+        return plugin_cli(store,argc,argv,2);
+    }
     App a={
         .yes=false,.shell=true,.desktop=false,.record=false,.max_steps=0,.state="等待任务",.stream_text={}
     };
@@ -2369,6 +2399,10 @@ static int run_cli(int argc,char **argv){
     }
     if(task&&!strcmp(task,"doctor")){
         rc=doctor(a,json_output);
+        goto cleanup;
+    }
+    if(task&&!strcmp(task,"acp")){
+        rc=acp_main(a);
         goto cleanup;
     }
     if(task&&!strcmp(task,"config")){

@@ -518,7 +518,8 @@ static void show_call(const char *name,J *args){
         !strcmp(name,"run_shell")?tr("执行命令"):!strcmp(name,"desktop_snapshot")?tr("读取桌面"):
         !strcmp(name,"desktop_screenshot")?tr("截取桌面"):!strcmp(name,"todo_write")?tr("更新任务清单"):
         !strcmp(name,"submit_plan")?tr("提交计划"):!strcmp(name,"shell_output")?tr("查看后台命令"):
-        !strcmp(name,"shell_kill")?tr("停止后台命令"):!strncmp(name,"mcp_",4)?tr("调用 MCP 工具"):tr("操作桌面");
+        !strcmp(name,"shell_kill")?tr("停止后台命令"):!strcmp(name,"lsp")?tr("语言服务分析"):
+        !strcmp(name,"skill")?tr("加载技能"):!strncmp(name,"mcp_",4)?tr("调用 MCP 工具"):tr("操作桌面");
     const char *target=*sget(args,"path")?sget(args,"path"):!strcmp(name,"run_shell")?sget(args,"command"):
         !strcmp(name,"delegate_research")?sget(args,"question"):!strcmp(name,"web_fetch")?sget(args,"url"):
         !strcmp(name,"web_search")?sget(args,"query"):*sget(args,"shell_id")?sget(args,"shell_id"):sget(args,"app");
@@ -602,6 +603,8 @@ static const char *activity(const char *name){
     if(!strcmp(name,"todo_write"))return tr("正在更新任务清单…");
     if(!strcmp(name,"submit_plan"))return tr("正在整理计划…");
     if(!strcmp(name,"shell_output")||!strcmp(name,"shell_kill"))return tr("正在查看后台命令…");
+    if(!strcmp(name,"lsp"))return tr("正在分析代码结构…");
+    if(!strcmp(name,"skill"))return tr("正在加载技能…");
     return tr("正在操作桌面…");
 }
 #ifndef _WIN32
@@ -714,9 +717,12 @@ int run_task(App *a,const char *task){
                 fputs(markdown->feed(part).c_str(),stdout);
                 fflush(stdout);
             };
+            const size_t chunks_before=a->streamed_chunks;
             reply=api_complete(a,a->config,history,tools);
             a->stream_text=nullptr;
             if(markdown){fputs(markdown->finish().c_str(),stdout);fflush(stdout);}
+            if(reply&&a->on_assistant_text&&*sget(reply,"content"))
+                a->on_assistant_text(sget(reply,"content"),a->streamed_chunks!=chunks_before);
         }
         json_object_put(history);
         if(!reply)break;
@@ -769,9 +775,11 @@ int run_task(App *a,const char *task){
                 last_activity=label;
             }
             double tool_started=monotime();
+            if(a->on_tool_start)a->on_tool_start(sget(call,"id"),name,args);
             J *result=repeated_result(seen,name,args);
             const bool cached=result!=nullptr;
             if(!cached)result=tool_call(a,name,args);
+            if(a->on_tool_end)a->on_tool_end(sget(call,"id"),name,args,result);
             a->progress_line=false;
             bool denied=bget(result,"denied");
             bool failed=tool_failed(result);
