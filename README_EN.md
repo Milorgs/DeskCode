@@ -36,7 +36,7 @@
 
 ## Quick Install
 
-Latest version: **1.18.4** (five pre-built platform archives + VS Code `.vsix`: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
+Latest version: **1.18.5** (five pre-built platform archives + VS Code `.vsix`: [GitHub Releases](https://github.com/Milorgs/DeskCode/releases))
 
 ### Linux (`x86_64` & `arm64`)
 
@@ -223,7 +223,7 @@ desk plugin validate ./my-plugin           # Validate manifest and bundle layout
 ```
 
 ### 6. IDE Integration & `desk serve` Shared-Session Daemon
-- **VS Code Extension ([`editors/vscode/`](editors/vscode/README.md))**: Download `deskcode-vscode-1.18.4.vsix` from [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) and run `code --install-extension deskcode-vscode-1.18.4.vsix` for a native sidebar chat with 4 modes, native side-by-side diffs, inline permission approvals, and editor context actions (*Ask DeskCode About Selection* / *Fix Diagnostics in File*).
+- **VS Code Extension ([`editors/vscode/`](editors/vscode/README.md))**: Download `deskcode-vscode-1.18.5.vsix` from [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) and run `code --install-extension deskcode-vscode-1.18.5.vsix` for a native sidebar chat with 4 modes, native side-by-side diffs, inline permission approvals, and editor context actions (*Ask DeskCode About Selection* / *Fix Diagnostics in File*).
 - **Shared-Session Daemon (`desk serve` + `desk attach`)**: Run `desk serve --port 7890 --notify` to open the built-in Web Console (`http://127.0.0.1:7890`) and attach from any terminal (`desk attach -p "..."`), browser, or Python `DeskServeClient` with live remote approvals.
 - **Zed / JetBrains ACP**: Run `desk acp` to expose DeskCode over ACP v1 (`stdio` newline-delimited JSON-RPC 2.0) in **Zed**, **JetBrains IDEs**, and other ACP-capable editors. Example Zed `settings.json`:
 

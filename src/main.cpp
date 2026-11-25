@@ -943,7 +943,8 @@ public:
         const std::string plan=app.plan_mode?std::string(tr("计划模式"))+" · ":"";
         const int plan_cells=ui_width(plan);
         auto text=ui_clip(status,columns-4-plan_cells-(context.empty()?0:context_cells));
-        const std::string composer_key=plan+text+context;
+        const std::string settings_hint=ui_clip(tr("输入 / 进入设置"),columns-2);
+        const std::string composer_key=plan+text+context+settings_hint;
         const int rule_width=std::min(columns-4,100);
         std::string rule="  ";
         for(int i=0;i<rule_width;i++)rule+="─";
@@ -969,7 +970,7 @@ public:
         printf("\033[%d;1H\033[2K",rows-3);
         fputs(top_rule.c_str(),stdout);
         printf("\033[%d;1H\033[2K",rows-1);
-        fputs(ui_paint(Tone::Rule,rule).c_str(),stdout);
+        fputs(("  "+ui_paint(Tone::Dim,settings_hint)).c_str(),stdout);
         printf("\033[%d;1H\033[2K",rows);
         std::string_view footer(text);
         const bool contrast=env_value("DESK_CONTRAST_NUMBERS");
@@ -1462,6 +1463,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
                 char hint[768],summary[512];
                 snprintf(hint,sizeof hint,tr("  当前模型：%s · F2 模型 · F3 推理\n"),model.c_str());
                 fputs(ui_paint(Tone::Dim,hint).c_str(),stdout);
+                puts(("  "+ui_paint(Tone::Dim,tr("输入 / 进入设置"))).c_str());
                 if(a->plan_mode)fputs(ui_paint(Tone::Warning,std::string("  ")+tr("计划模式：只调研并提交计划 · /go 批准执行 · Shift+Tab 或 /plan 退出")+"\n").c_str(),stdout);
                 snprintf(summary,sizeof summary,tr("推理模式：%s · 批准模式：%s\n"),reasoning_name(sget(a->config,"reasoning_effort")),permission_name(*a));
                 const bool contrast=env_value("DESK_CONTRAST_NUMBERS");

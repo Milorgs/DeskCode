@@ -34,6 +34,7 @@ constexpr Translation catalog[]={
     {"  累计词元（接口报告）：%s\n","  Lifetime tokens (reported by API): %s\n"},
     {"  已导入的模型","  Imported models"},
     {" · 当前"," · Current"},
+    {"输入 / 进入设置","Type / for settings"},
     {"本对话已选择模型：%s","Selected model: %s (this conversation)."},
     {"已选择模型：%s（下次启动默认使用）。","Selected model: %s (default for the next launch)."},
     {"后续及排队需求使用新模型；正在执行的任务继续使用原模型。","New and queued requests use the selected model; running tasks keep their original model."},
