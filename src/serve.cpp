@@ -136,20 +136,24 @@ void notify_user_event(const App &app,const char *title,const char *body){
 #else
     pid_t pid=fork();
     if(pid==0){
-        int nullfd=open("/dev/null",O_RDWR);
-        if(nullfd>=0){dup2(nullfd,0);dup2(nullfd,1);dup2(nullfd,2);if(nullfd>2)close(nullfd);}
+        pid_t grand=fork();
+        if(grand==0){
+            int nullfd=open("/dev/null",O_RDWR|O_CLOEXEC);
+            if(nullfd>=0){dup2(nullfd,0);dup2(nullfd,1);dup2(nullfd,2);if(nullfd>2)close(nullfd);}
 #ifdef __APPLE__
-        execlp("osascript","osascript",
-               "-e","on run argv",
-               "-e","display notification (item 2 of argv) with title (item 1 of argv)",
-               "-e","end run",
-               "--",safe_title.c_str(),safe_body.c_str(),static_cast<char *>(nullptr));
+            execlp("osascript","osascript",
+                   "-e","on run argv",
+                   "-e","display notification (item 2 of argv) with title (item 1 of argv)",
+                   "-e","end run",
+                   "--",safe_title.c_str(),safe_body.c_str(),static_cast<char *>(nullptr));
 #else
-        execlp("notify-send","notify-send","--app-name=DeskCode",safe_title.c_str(),safe_body.c_str(),static_cast<char *>(nullptr));
+            execlp("notify-send","notify-send","--app-name=DeskCode",safe_title.c_str(),safe_body.c_str(),static_cast<char *>(nullptr));
 #endif
+            _exit(0);
+        }
         _exit(0);
     }
-    if(pid>0){int st=0;waitpid(pid,&st,WNOHANG);}
+    if(pid>0){int st=0;while(waitpid(pid,&st,0)<0&&errno==EINTR){}}
 #endif
 }
 
@@ -307,6 +311,7 @@ struct SharedSession {
     std::deque<std::string> prompt_queue;
     std::mutex mutex;
     std::condition_variable cv;
+    std::atomic<bool> turn_cancelled{false};
     bool stop_worker=false;
     std::thread worker;
 };
@@ -393,6 +398,8 @@ struct ServeState {
         s->app->notify=base.notify;
         s->app->max_steps=base.max_steps;
         s->app->json_output=true;
+        s->app->quiet_human=true;
+        s->app->cancel_requested=&s->turn_cancelled;
         s->app->state="等待任务";
         apply_mode_str(*s->app,s->mode);
 
@@ -457,7 +464,7 @@ struct ServeState {
             put(ev.get(),"description",str(sp->pending_desc.c_str()));
             broadcast_sse(*sp,"permission_request",ev.get());
             notify_user_event(*sp->app,tr("DeskCode 等待批准"),sp->pending_title.c_str());
-            while(!sp->stop_worker&&!interrupted&&sp->pending_decision<0){
+            while(!sp->stop_worker&&!app_cancelled(sp->app.get())&&sp->pending_decision<0){
                 sp->cv.wait_for(lock,std::chrono::milliseconds(100));
             }
             int decision=sp->pending_decision==1?1:0;
@@ -480,14 +487,15 @@ struct ServeState {
                     prompt=std::move(s->prompt_queue.front());
                     s->prompt_queue.pop_front();
                     s->running=true;
+                    s->turn_cancelled.store(false,std::memory_order_relaxed);
                     apply_mode_str(*s->app,s->mode);
                 }
-                interrupted=0;
                 int rc=run_task(s->app.get(),prompt.c_str());
                 {
                     std::lock_guard lock(s->mutex);
                     s->running=false;
-                    const char *status=s->app->plan_submitted?"plan_ready":(rc==0?"completed":"failed");
+                    const bool was_cancelled=s->turn_cancelled.load(std::memory_order_relaxed)||!strcmp(s->app->state,"已取消");
+                    const char *status=s->app->plan_submitted?"plan_ready":(rc==0?"completed":(was_cancelled?"cancelled":"failed"));
                     JsonPtr done_ev(obj());
                     put(done_ev.get(),"session_id",str(s->id.c_str()));
                     put(done_ev.get(),"status",str(status));
@@ -511,8 +519,8 @@ struct ServeState {
             for(auto &[id,s]:sessions)all.push_back(s);
             sessions.clear();
         }
-        interrupted=SIGTERM;
         for(auto &s:all){
+            s->turn_cancelled.store(true,std::memory_order_relaxed);
             {
                 std::lock_guard lock(s->mutex);
                 s->stop_worker=true;
@@ -592,9 +600,14 @@ bool read_http_request(SockFd fd,HttpReq &req){
     req.body.assign(buf.data()+hdr_end+4,buf.size()-(hdr_end+4));
     while(req.body.size()<clen&&monotime()<deadline){
 #ifdef _WIN32
+        fd_set rfds;FD_ZERO(&rfds);FD_SET(fd,&rfds);
+        timeval tv{0,200000};
+        if(select(0,&rfds,nullptr,nullptr,&tv)<=0)continue;
         char chunk[4096];
         int n=recv(fd,chunk,static_cast<int>((std::min)(sizeof chunk,clen-req.body.size())),0);
 #else
+        pollfd pfd{fd,POLLIN,0};
+        if(poll(&pfd,1,200)<=0)continue;
         char chunk[4096];
         ssize_t n=recv(fd,chunk,std::min(sizeof chunk,clen-req.body.size()),0);
 #endif
@@ -783,7 +796,7 @@ void handle_serve_client(ServeState &st,SockFd cfd){
             return;
         }
         if(action=="cancel"&&req.method=="POST"){
-            interrupted=SIGINT;
+            sess->turn_cancelled.store(true,std::memory_order_relaxed);
             {
                 std::lock_guard slock(sess->mutex);
                 if(sess->pending_flag){sess->pending_decision=0;sess->cv.notify_all();}
@@ -857,8 +870,10 @@ int serve_main(App &app,int argc,char **argv,int first){
     if(lfd==BAD_SOCK){fprintf(stderr,"%s\n",tr("无法创建监听套接字。"));return 1;}
     int reuse=1;
 #ifdef _WIN32
+    SetHandleInformation(reinterpret_cast<HANDLE>(lfd),HANDLE_FLAG_INHERIT,0);
     setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,reinterpret_cast<const char *>(&reuse),sizeof reuse);
 #else
+    fcntl(lfd,F_SETFD,FD_CLOEXEC);
     setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof reuse);
 #endif
     sockaddr_in addr{};
@@ -897,7 +912,10 @@ int serve_main(App &app,int argc,char **argv,int first){
             token.empty()?"":("?token="+token).c_str());
     fflush(stderr);
 
-    std::vector<std::thread> clients;
+    constexpr size_t MAX_SERVE_CLIENTS=64;
+    std::mutex client_mutex;
+    std::condition_variable client_cv;
+    size_t active_clients=0;
     while(!interrupted){
 #ifdef _WIN32
         fd_set rfds;FD_ZERO(&rfds);FD_SET(lfd,&rfds);
@@ -905,17 +923,43 @@ int serve_main(App &app,int argc,char **argv,int first){
         if(select(0,&rfds,nullptr,nullptr,&tv)<=0)continue;
         SockFd cfd=accept(lfd,nullptr,nullptr);
         if(cfd==BAD_SOCK)continue;
+        SetHandleInformation(reinterpret_cast<HANDLE>(cfd),HANDLE_FLAG_INHERIT,0);
+        DWORD snd_tmo=15000;
+        setsockopt(cfd,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char *>(&snd_tmo),sizeof snd_tmo);
 #else
         pollfd pfd{lfd,POLLIN,0};
         if(poll(&pfd,1,150)<=0)continue;
         SockFd cfd=accept(lfd,nullptr,nullptr);
         if(cfd<0){if(errno==EINTR)continue;break;}
+        fcntl(cfd,F_SETFD,FD_CLOEXEC);
+        timeval snd_tmo{15,0};
+        setsockopt(cfd,SOL_SOCKET,SO_SNDTIMEO,&snd_tmo,sizeof snd_tmo);
 #endif
-        clients.emplace_back([&state,cfd]{handle_serve_client(state,cfd);});
+        {
+            std::lock_guard lock(client_mutex);
+            if(active_clients>=MAX_SERVE_CLIENTS){close_socket(cfd);continue;}
+            ++active_clients;
+        }
+        std::thread([&state,&client_mutex,&client_cv,&active_clients,cfd]{
+            struct ClientSlotGuard {
+                std::mutex &m;
+                std::condition_variable &cv;
+                size_t &cnt;
+                ~ClientSlotGuard(){
+                    std::lock_guard lock(m);
+                    --cnt;
+                    cv.notify_all();
+                }
+            } slot{client_mutex,client_cv,active_clients};
+            handle_serve_client(state,cfd);
+        }).detach();
     }
     close_socket(lfd);
     state.shutdown_all();
-    for(auto &t:clients)if(t.joinable())t.join();
+    {
+        std::unique_lock lock(client_mutex);
+        client_cv.wait_for(lock,std::chrono::seconds(5),[&]{return active_clients==0;});
+    }
     return 0;
 }
 
@@ -930,9 +974,10 @@ std::string attach_http(const char *method,const std::string &url,const std::str
     if(!token.empty())hdrs.append("Authorization: Bearer "+token);
     auto writer=+[](char *ptr,size_t sz,size_t cnt,void *ud)->size_t{
         auto *out=static_cast<std::string *>(ud);
+        if(sz&&cnt>SIZE_MAX/sz)return 0;
         size_t n=sz*cnt;
-        if(out->size()+n>4194304)return 0;
-        out->append(ptr,n);
+        if(n>4194304-out->size())return 0;
+        try{out->append(ptr,n);}catch(...){return 0;}
         return n;
     };
     CurlRequest req(h.get());
@@ -1006,7 +1051,8 @@ int attach_main(App &,int argc,char **argv,int first){
     struct StreamCtx {
         std::string buffer,event_name,data_lines,reply,final_status;
         int64_t tokens=0;
-        bool done=false,printed_chunks=false,json_mode=false;
+        std::atomic<bool> done{false};
+        bool printed_chunks=false,json_mode=false;
     } ctx{};
     ctx.json_mode=json_out;
 
@@ -1020,65 +1066,74 @@ int attach_main(App &,int argc,char **argv,int first){
 
     auto sse_writer=+[](char *ptr,size_t sz,size_t cnt,void *ud)->size_t{
         auto *c=static_cast<StreamCtx *>(ud);
-        size_t n=sz*cnt;
-        c->buffer.append(ptr,n);
-        for(;;){
-            auto nl=c->buffer.find('\n');
-            if(nl==std::string::npos)break;
-            std::string line=c->buffer.substr(0,nl);
-            c->buffer.erase(0,nl+1);
-            if(!line.empty()&&line.back()=='\r')line.pop_back();
-            if(line.empty()){
-                if(!c->event_name.empty()&&!c->data_lines.empty()){
-                    JsonPtr payload(json_tokener_parse(c->data_lines.c_str()));
-                    if(c->event_name=="chunk"){
-                        const char *t=sget(payload.get(),"text");
-                        c->reply+=t;
-                        c->printed_chunks=true;
-                        if(!c->json_mode){fputs(t,stdout);fflush(stdout);}
-                    }else if(c->event_name=="assistant_text"){
-                        const char *t=sget(payload.get(),"text");
-                        if(!bget(payload.get(),"streamed")){
+        try{
+            if(sz&&cnt>SIZE_MAX/sz)return 0;
+            size_t n=sz*cnt;
+            if(n>RESPONSE_LIMIT-c->buffer.size())return 0;
+            c->buffer.append(ptr,n);
+            std::string_view rem(c->buffer);
+            for(;;){
+                auto nl=rem.find('\n');
+                if(nl==std::string_view::npos)break;
+                std::string_view line=rem.substr(0,nl);
+                rem.remove_prefix(nl+1);
+                if(!line.empty()&&line.back()=='\r')line.remove_suffix(1);
+                if(line.empty()){
+                    if(!c->event_name.empty()&&!c->data_lines.empty()){
+                        JsonPtr payload(json_tokener_parse(c->data_lines.c_str()));
+                        if(c->event_name=="chunk"){
+                            const char *t=sget(payload.get(),"text");
                             c->reply+=t;
-                            if(!c->json_mode){fputs(t,stdout);fputc('\n',stdout);fflush(stdout);}
-                        }else if(!c->json_mode){
-                            fputc('\n',stdout);fflush(stdout);
+                            c->printed_chunks=true;
+                            if(!c->json_mode){fputs(t,stdout);fflush(stdout);}
+                        }else if(c->event_name=="assistant_text"){
+                            const char *t=sget(payload.get(),"text");
+                            if(!bget(payload.get(),"streamed")){
+                                c->reply+=t;
+                                if(!c->json_mode){fputs(t,stdout);fputc('\n',stdout);fflush(stdout);}
+                            }else if(!c->json_mode){
+                                fputc('\n',stdout);fflush(stdout);
+                            }
+                        }else if(c->event_name=="turn_done"){
+                            c->final_status=sget(payload.get(),"status");
+                            c->tokens=json_object_get_int64(get(payload.get(),"tokens"));
+                            c->done.store(true,std::memory_order_relaxed);
+                            c->event_name.clear();c->data_lines.clear();
+                            return 0; // End SSE transfer cleanly once turn completes.
                         }
-                    }else if(c->event_name=="turn_done"){
-                        c->final_status=sget(payload.get(),"status");
-                        c->tokens=json_object_get_int64(get(payload.get(),"tokens"));
-                        c->done=true;
-                        c->event_name.clear();c->data_lines.clear();
-                        return 0; // End SSE transfer cleanly once turn completes.
                     }
+                    c->event_name.clear();
+                    c->data_lines.clear();
+                }else if(line.starts_with("event:")){
+                    std::string_view ev=line.substr(6);
+                    while(!ev.empty()&&ev.front()==' ')ev.remove_prefix(1);
+                    c->event_name.assign(ev);
+                }else if(line.starts_with("data:")){
+                    std::string_view d=line.substr(5);
+                    if(!d.empty()&&d.front()==' ')d.remove_prefix(1);
+                    if(!c->data_lines.empty())c->data_lines+='\n';
+                    c->data_lines.append(d);
                 }
-                c->event_name.clear();
-                c->data_lines.clear();
-            }else if(line.starts_with("event:")){
-                c->event_name=line.substr(6);
-                while(!c->event_name.empty()&&c->event_name.front()==' ')c->event_name.erase(0,1);
-            }else if(line.starts_with("data:")){
-                std::string d=line.substr(5);
-                if(!d.empty()&&d.front()==' ')d.erase(0,1);
-                if(!c->data_lines.empty())c->data_lines+='\n';
-                c->data_lines+=d;
             }
-        }
-        return n;
+            const size_t consumed=c->buffer.size()-rem.size();
+            if(consumed)c->buffer.erase(0,consumed);
+            return n;
+        }catch(...){return 0;}
     };
     auto sse_hdr_cb=+[](char *ptr,size_t sz,size_t cnt,void *ud)->size_t{
+        if(sz&&cnt>SIZE_MAX/sz)return 0;
         size_t n=sz*cnt;
         std::string_view sv(ptr,n);
-        if(sv.find("200")!=std::string_view::npos)*static_cast<std::atomic<bool> *>(ud)=true;
+        if(sv.find("200")!=std::string_view::npos)static_cast<std::atomic<bool> *>(ud)->store(true,std::memory_order_relaxed);
         return n;
     };
     auto sse_prog=+[](void *ud,curl_off_t,curl_off_t,curl_off_t,curl_off_t)->int{
         auto *c=static_cast<StreamCtx *>(ud);
-        return (interrupted||c->done)?1:0;
+        return (interrupted||c->done.load(std::memory_order_relaxed))?1:0;
     };
 
     std::thread poster([&]{
-        for(int i=0;i<100&&!sse_connected&&!interrupted;i++){
+        for(int i=0;i<100&&!sse_connected.load(std::memory_order_relaxed)&&!interrupted;i++){
 #ifdef _WIN32
             Sleep(15);
 #else
@@ -1089,7 +1144,7 @@ int attach_main(App &,int argc,char **argv,int first){
         put(pbody.get(),"prompt",str(prompt.c_str()));
         long pst=0;
         attach_http("POST",base_url+"/api/sessions/"+session_id+"/prompt",token,json_str(pbody.get()),pst);
-        if(pst<200||pst>=300)ctx.done=true;
+        if(pst<200||pst>=300)ctx.done.store(true,std::memory_order_relaxed);
     });
 
     CurlRequest sreq(sse.get());

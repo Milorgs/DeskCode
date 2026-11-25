@@ -23,8 +23,9 @@ JsonPtr read(const std::string &file,size_t limit=32000000){
 bool save(const App &app,const std::string &file,J *document){
     auto directory=std::string(app.config_dir)+"/history";
     if(mkdirs(directory.c_str(),0700))return false;
-    const char *data=json_object_to_json_string_ext(document,JSON_C_TO_STRING_PLAIN);
-    return !atomic_file(file.c_str(),data,strlen(data),0600);
+    size_t len=0;
+    const char *data=json_object_to_json_string_length(document,JSON_C_TO_STRING_PLAIN,&len);
+    return !atomic_file(file.c_str(),data,len,0600);
 }
 bool matching(const App &app,J *record){
     return !strcmp(sget(record,"profile"),sget(app.config,"profile"))

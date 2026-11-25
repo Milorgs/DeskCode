@@ -218,49 +218,21 @@ extern char **environ;
 static bool private_variable(const char *entry){
     const char *equals=strchr(entry,'=');
     if(!equals)return true;
-    size_t n=(size_t)(equals-entry);
-    char *name=strndup(entry,n);
-    if(!name)return true;
-    for(char *p=name;*p;p++)*p=(char)toupper((unsigned char)*p);
-    bool secret=strstr(name,"KEY")||strstr(name,"TOKEN")||strstr(name,"SECRET")||strstr(name,"PASSWORD");
-    free(name);
-    return secret;
-}
-static std::string latest_output_line(std::string_view chunk){
-    while(!chunk.empty()&&(chunk.back()=='\n'||chunk.back()=='\r'||chunk.back()==' '))chunk.remove_suffix(1);
-    if(chunk.empty())return {};
-    auto pos=chunk.find_last_of("\r\n");
-    std::string_view raw=pos==std::string_view::npos?chunk:chunk.substr(pos+1);
-    std::string clean;
-    clean.reserve(raw.size());
-    bool sp=false;
-    for(size_t i=0;i<raw.size();){
-        auto c=static_cast<unsigned char>(raw[i]);
-        if(c==0x1b&&i+1<raw.size()&&raw[i+1]=='['){
-            i+=2;
-            while(i<raw.size()&&!(raw[i]>='@'&&raw[i]<='~'))i++;
-            if(i<raw.size())i++;
-            continue;
+    std::string_view key(entry,static_cast<size_t>(equals-entry));
+    auto contains_ci=[](std::string_view hay,std::string_view needle){
+        if(hay.size()<needle.size())return false;
+        for(size_t i=0;i<=hay.size()-needle.size();i++){
+            bool ok=true;
+            for(size_t k=0;k<needle.size();k++){
+                unsigned char c=static_cast<unsigned char>(hay[i+k]);
+                if(c>='a'&&c<='z')c=static_cast<unsigned char>(c-32);
+                if(c!=static_cast<unsigned char>(needle[k])){ok=false;break;}
+            }
+            if(ok)return true;
         }
-        if(c<32||c==127){
-            if(c=='\t'&&!clean.empty())sp=true;
-            i++;
-            continue;
-        }
-        if(c==' '){if(!clean.empty())sp=true;i++;continue;}
-        if(sp){clean+=' ';sp=false;}
-        clean+=static_cast<char>(c);
-        i++;
-    }
-    size_t used=0;
-    clean=display_utf8(clean,used,true);
-    if(clean.size()>72){
-        size_t cut=72;
-        while(cut>0&&(static_cast<unsigned char>(clean[cut])&0xc0)==0x80)--cut;
-        clean.resize(cut);
-        clean+="…";
-    }
-    return clean;
+        return false;
+    };
+    return contains_ci(key,"KEY")||contains_ci(key,"TOKEN")||contains_ci(key,"SECRET")||contains_ci(key,"PASSWORD");
 }
 namespace {
 // Start bash for `command` in its own process group with stdout and stderr in
@@ -268,11 +240,22 @@ namespace {
 pid_t spawn_command(App *a,const char *command,FILE *output,const char *&error){
     int count=0;
     while(environ[count])count++;
+    std::vector<std::string> extra_storage;
+    extra_storage.reserve(a->extra_env.size());
+    for(const auto &[k,v]:a->extra_env)extra_storage.push_back(k+"="+v);
     std::vector<char *> env;
-    env.reserve(static_cast<size_t>(count)+1);
-    for(int i=0;i<count;i++)if(!private_variable(environ[i]))env.push_back(environ[i]);
+    env.reserve(static_cast<size_t>(count)+extra_storage.size()+1);
+    for(int i=0;i<count;i++){
+        if(private_variable(environ[i]))continue;
+        const char *eq=strchr(environ[i],'=');
+        std::string_view k(environ[i],eq?static_cast<size_t>(eq-environ[i]):0);
+        bool overridden=false;
+        for(const auto &[ek,ev]:a->extra_env){(void)ev;if(k==ek){overridden=true;break;}}
+        if(!overridden)env.push_back(environ[i]);
+    }
+    for(auto &entry:extra_storage)env.push_back(entry.data());
     env.push_back(nullptr);
-    int nullfd=open("/dev/null",O_RDONLY);
+    int nullfd=open("/dev/null",O_RDONLY|O_CLOEXEC);
     if(nullfd<0){error=tr("无法创建命令输出文件。");return -1;}
     const bool force_off=env_truthy("DESK_NO_SANDBOX");
     const bool use_sandbox=!force_off&&a->sandbox&&sandbox_supported();
@@ -329,24 +312,6 @@ pid_t spawn_command(App *a,const char *command,FILE *output,const char *&error){
         return -1;
     }
     return child;
-}
-// Invalid UTF-8 becomes U+FFFD so the text always fits in a JSON string.
-std::string utf8_text(std::string data){
-    if(valid_utf8(data))return data;
-    std::string safe;
-    const size_t len=data.size();
-    safe.reserve(len);
-    for(size_t i=0;i<len;){
-        unsigned char c=(unsigned char)data[i];
-        size_t width=c<0x80?1:(c>=0xc2&&c<=0xdf)?2:(c>=0xe0&&c<=0xef)?3:(c>=0xf0&&c<=0xf4)?4:0;
-        bool valid=width&&i+width<=len;
-        for(size_t k=1;valid&&k<width;k++)if(((unsigned char)data[i+k]&0xc0)!=0x80)valid=false;
-        if(valid&&width==3&&((c==0xe0&&(unsigned char)data[i+1]<0xa0)||(c==0xed&&(unsigned char)data[i+1]>=0xa0)))valid=false;
-        if(valid&&width==4&&((c==0xf0&&(unsigned char)data[i+1]<0x90)||(c==0xf4&&(unsigned char)data[i+1]>=0x90)))valid=false;
-        if(valid){safe.append(data.data()+i,width);i+=width;}
-        else{safe+="\xef\xbf\xbd";i++;}
-    }
-    return safe;
 }
 struct BackgroundShell {
     std::string id,command;
@@ -414,7 +379,7 @@ J *shell_state(BackgroundShell &shell){
     }
     data.resize(keep);
     shell.shown=from+static_cast<off_t>(keep);
-    const std::string text=utf8_text(std::move(data));
+    const std::string text=sanitize_utf8(data);
     put(r,"output",json_object_new_string_len(text.data(),static_cast<int>(text.size())));
     return r;
 }
@@ -444,6 +409,8 @@ J *start_background_command(App *a,const char *command){
     if(running_shells(all)>=MAX_BACKGROUND_SHELLS)return err(tr("后台命令已达 8 个上限，请先用 shell_kill 停止不需要的命令。"));
     FILE *output=tmpfile();
     if(!output)return err(tr("无法创建命令输出文件。"));
+    fcntl(fileno(output),F_SETFD,FD_CLOEXEC);
+    fcntl(fileno(output),F_SETFD,FD_CLOEXEC);
     const char *error=nullptr;
     const double started=monotime();
     pid_t child=spawn_command(a,command,output,error);
@@ -451,7 +418,7 @@ J *start_background_command(App *a,const char *command){
     // A command that fails at once (typo, missing program) reports like a
     // normal one instead of leaving a dead background entry.
     int status=0;
-    for(int i=0;i<40&&!interrupted;i++){
+    for(int i=0;i<40&&!app_cancelled(a);i++){
         if(waitpid(child,&status,WNOHANG)==child){
             BackgroundShell done;
             done.id="";done.command=command;done.pid=child;done.output=output;done.started=started;
@@ -514,6 +481,7 @@ J *run_command(App *a,const char *command,int timeout_ms){
     if(timeout_ms<1||timeout_ms>300000)return err(tr("命令超时设置无效。"));
     FILE *output=tmpfile();
     if(!output)return err(tr("无法创建命令输出文件。"));
+    fcntl(fileno(output),F_SETFD,FD_CLOEXEC);
     double start=monotime();
     const char *spawn_error=nullptr;
     background_requested=false;
@@ -529,10 +497,10 @@ J *run_command(App *a,const char *command,int timeout_ms){
     long pause_ns=1000000;
     double last_tail_at=start;
     std::string last_tail;
-    while(!interrupted){
+    while(!app_cancelled(a)){
         check_exit(*a);
         progress_tick(a);
-        if(interrupted)break;
+        if(app_cancelled(a))break;
         if(background_requested.exchange(false)){
             // Ctrl+B: the command keeps running and the turn continues.
             if(!last_tail.empty()&&a->task_events>=0)task_detail(*a,"");
@@ -566,7 +534,7 @@ J *run_command(App *a,const char *command,int timeout_ms){
                 char tail_buf[512];
                 const ssize_t got=pread(fileno(output),tail_buf,sizeof tail_buf,off);
                 if(got>0){
-                    std::string line=latest_output_line(std::string_view(tail_buf,static_cast<size_t>(got)));
+                    std::string line=latest_command_line(std::string_view(tail_buf,static_cast<size_t>(got)));
                     if(!line.empty()&&line!=last_tail){
                         last_tail=line;
                         if(a->task_events>=0)task_detail(*a,line);
@@ -595,7 +563,7 @@ J *run_command(App *a,const char *command,int timeout_ms){
         while(result<0&&errno==EINTR);
         if(result!=child)failed=true;
     }
-    if(interrupted){
+    if(app_cancelled(a)){
         fclose(output);
         return err(tr("命令已取消。"));
     }
@@ -633,34 +601,12 @@ J *run_command(App *a,const char *command,int timeout_ms){
             if(expected>tail+1)data.resize(data.size()-1-tail);
         }
     }
-    std::string safe;
-    const std::string *encoded_out=&data;
-    if(!valid_utf8(data)){
-        const size_t len=data.size();
-        safe.reserve(len);
-        for(size_t i=0;i<len;){
-            unsigned char c=(unsigned char)data[i];
-            size_t width=c<0x80?1:(c>=0xc2&&c<=0xdf)?2:(c>=0xe0&&c<=0xef)?3:(c>=0xf0&&c<=0xf4)?4:0;
-            bool valid=width&&i+width<=len;
-            for(size_t k=1;valid&&k<width;k++)if(((unsigned char)data[i+k]&0xc0)!=0x80)valid=false;
-            if(valid&&width==3&&((c==0xe0&&(unsigned char)data[i+1]<0xa0)||(c==0xed&&(unsigned char)data[i+1]>=0xa0)))valid=false;
-            if(valid&&width==4&&((c==0xf0&&(unsigned char)data[i+1]<0x90)||(c==0xf4&&(unsigned char)data[i+1]>=0x90)))valid=false;
-            if(valid){
-                safe.append(data.data()+i,width);
-                i+=width;
-            }
-            else{
-                safe+="\xef\xbf\xbd";
-                i++;
-            }
-        }
-        encoded_out=&safe;
-    }
-    if(encoded_out->size()>INT_MAX)return err(tr("命令输出无法转换为 JSON。"));
+    const std::string safe=sanitize_utf8(data);
+    if(safe.size()>INT_MAX)return err(tr("命令输出无法转换为 JSON。"));
     J *r=obj();
     put(r,"exit_code",json_object_new_int(WIFEXITED(status)?WEXITSTATUS(status):-WTERMSIG(status)));
     put(r,"timed_out",json_object_new_boolean(timed));
     put(r,"truncated",json_object_new_boolean(truncated));
-    put(r,"output",json_object_new_string_len(encoded_out->data(),static_cast<int>(encoded_out->size())));
+    put(r,"output",json_object_new_string_len(safe.data(),static_cast<int>(safe.size())));
     return r;
 }

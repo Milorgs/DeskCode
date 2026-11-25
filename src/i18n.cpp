@@ -5,7 +5,7 @@
 #include <string_view>
 #include <unordered_map>
 namespace {
-bool english=false;
+std::atomic<bool> english{false};
 struct Translation {const char *zh,*en;};
 constexpr Translation catalog[]={
     {"\nMCP 服务","\nMCP servers"},
@@ -735,7 +735,7 @@ std::string preference_path(){
 }
 }
 const char *tr(const char *text){
-    if(!english||!text)return text;
+    if(!english.load(std::memory_order_relaxed)||!text)return text;
     static const auto index=[]{
         std::unordered_map<std::string_view,const char *> map;
         map.reserve(sizeof(catalog)/sizeof(catalog[0])*2);
@@ -745,15 +745,15 @@ const char *tr(const char *text){
     auto found=index.find(text);
     return found!=index.end()?found->second:text;
 }
-const char *language_code(){return english?"en":"zh";}
+const char *language_code(){return english.load(std::memory_order_relaxed)?"en":"zh";}
 bool set_language(const char *code){
-    if(!strcmp(code,"en"))english=true;
-    else if(!strcmp(code,"zh"))english=false;
+    if(!strcmp(code,"en"))english.store(true,std::memory_order_relaxed);
+    else if(!strcmp(code,"zh"))english.store(false,std::memory_order_relaxed);
     else return false;
     return true;
 }
 bool language_init(int argc,char **argv){
-    english=false;
+    english.store(false,std::memory_order_relaxed);
     std::string path=preference_path();
     char *text=read_bytes(path.c_str(),4096,nullptr);
     if(text){JsonPtr pref(json_tokener_parse(text));free(text);set_language(sget(pref.get(),"language"));}

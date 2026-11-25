@@ -25,6 +25,8 @@ struct WinHandle {
 struct PrivateAccess {
     PSECURITY_DESCRIPTOR descriptor=nullptr;
     SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES),nullptr,FALSE};
+    PrivateAccess(const PrivateAccess &)=delete;
+    PrivateAccess &operator=(const PrivateAccess &)=delete;
     PrivateAccess(){
         HANDLE raw=nullptr;if(!OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&raw))return;WinHandle token(raw);
         DWORD bytes=0;GetTokenInformation(token.get(),TokenUser,nullptr,0,&bytes);std::vector<unsigned char> data(bytes);
@@ -62,8 +64,8 @@ inline WinHandle kill_job(bool sandboxed=false){
     }
     return job;
 }
-std::vector<wchar_t> command_environment(bool no_net=false);
-bool win_spawn(const std::wstring &executable,std::wstring command,const std::wstring &directory,HANDLE input,HANDLE output,const std::vector<HANDLE> &inherit,HANDLE job,WinHandle &process,bool sandboxed=false,bool no_net=false);
+std::vector<wchar_t> command_environment(bool no_net=false,const std::vector<std::pair<std::string,std::string>> *extra=nullptr);
+bool win_spawn(const std::wstring &executable,std::wstring command,const std::wstring &directory,HANDLE input,HANDLE output,const std::vector<HANDLE> &inherit,HANDLE job,WinHandle &process,bool sandboxed=false,bool no_net=false,const std::vector<std::pair<std::string,std::string>> *extra=nullptr);
 inline std::wstring quote_arg(std::wstring_view arg){
     std::wstring result=L"\"";size_t slashes=0;
     for(wchar_t c:arg){if(c==L'\\'){slashes++;continue;}if(c==L'\"')result.append(slashes*2+1,L'\\');else result.append(slashes,L'\\');slashes=0;result+=c;}

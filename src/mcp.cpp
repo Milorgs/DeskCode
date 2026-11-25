@@ -66,7 +66,9 @@ bool visible(std::string_view value){
     return std::none_of(value.begin(),value.end(),[](unsigned char c){return c<32||c==127;});
 }
 bool valid_http_endpoint(const char *raw_url){
-    CURLU *url=curl_url();char *scheme=nullptr,*host=nullptr,*part=nullptr;
+    CURLU *url=curl_url();
+    if(!url)return false;
+    char *scheme=nullptr,*host=nullptr,*part=nullptr;
     bool ok=curl_url_set(url,CURLUPART_URL,raw_url,0)==CURLUE_OK;
     curl_url_get(url,CURLUPART_SCHEME,&scheme,0);curl_url_get(url,CURLUPART_HOST,&host,0);
     ok=ok&&scheme&&host&&(!strcmp(scheme,"https")||(!strcmp(scheme,"http")&&(!strcmp(host,"localhost")||!strcmp(host,"127.0.0.1")||!strcmp(host,"[::1]"))));
@@ -175,9 +177,10 @@ std::string oauth_http_call(const char *method,const std::string &url,const std:
     if(content_type&&*content_type)headers.append(std::string("Content-Type: ")+content_type);
     auto writer=+[](char *ptr,size_t sz,size_t cnt,void *ud)->size_t{
         auto *out=static_cast<std::string *>(ud);
+        if(sz&&cnt>SIZE_MAX/sz)return 0;
         size_t n=sz*cnt;
-        if(out->size()+n>1048576)return 0;
-        out->append(ptr,n);
+        if(n>1048576-out->size())return 0;
+        try{out->append(ptr,n);}catch(...){return 0;}
         return n;
     };
     CurlRequest req(handle.get());
@@ -328,7 +331,7 @@ struct Client {
     void check(double until){
         check_exit(app);
         progress_tick(&app);
-        if(interrupted)throw Failure("MCP operation cancelled.");
+        if(app_cancelled(app))throw Failure("MCP operation cancelled.");
         if(monotime()>until)throw Failure("MCP operation timed out. The operation was not automatically repeated.");
     }
 #ifdef _WIN32
@@ -395,9 +398,9 @@ struct Client {
         InitializeProcThreadAttributeList(nullptr,1,0,&attr_bytes);
         std::vector<unsigned char> storage(attr_bytes);
         auto *attr_list=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-        if(!InitializeProcThreadAttributeList(attr_list,1,0,&attr_bytes)
-           ||!UpdateProcThreadAttribute(attr_list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherit.data(),inherit.size()*sizeof(HANDLE),nullptr,nullptr)){
-            if(attr_list)DeleteProcThreadAttributeList(attr_list);
+        const bool attr_init=InitializeProcThreadAttributeList(attr_list,1,0,&attr_bytes)!=FALSE;
+        if(!attr_init||!UpdateProcThreadAttribute(attr_list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherit.data(),inherit.size()*sizeof(HANDLE),nullptr,nullptr)){
+            if(attr_init)DeleteProcThreadAttributeList(attr_list);
             input_pipe.reset();output_pipe.reset();
             throw Failure("Could not configure MCP stdio handles.");
         }
@@ -575,24 +578,34 @@ struct Client {
             if(length>RESPONSE_LIMIT-transfer.received)throw Failure("MCP response exceeds the size limit.");
             transfer.received+=length;transfer.bytes.append(data,length);
             if(transfer.sse){
+                std::string_view rem(transfer.bytes);
                 for(;;){
-                    auto end=transfer.bytes.find('\n');if(end==std::string::npos)break;
-                    auto line=transfer.bytes.substr(0,end);transfer.bytes.erase(0,end+1);if(!line.empty()&&line.back()=='\r')line.pop_back();
+                    auto end=rem.find('\n');if(end==std::string_view::npos)break;
+                    std::string_view line=rem.substr(0,end);
+                    rem.remove_prefix(end+1);
+                    if(!line.empty()&&line.back()=='\r')line.remove_suffix(1);
                     if(line.empty()){
                         if(!transfer.event.empty()){transfer.accept(transfer.event);transfer.event.clear();}
-                        if(transfer.response)return 0;
+                        if(transfer.response){
+                            const size_t done_bytes=transfer.bytes.size()-rem.size();
+                            if(done_bytes)transfer.bytes.erase(0,done_bytes);
+                            return 0;
+                        }
                     }else if(line.starts_with("data:")){
-                        auto value=line.substr(5);if(!value.empty()&&value.front()==' ')value.erase(0,1);
+                        std::string_view value=line.substr(5);
+                        if(!value.empty()&&value.front()==' ')value.remove_prefix(1);
                         if(!transfer.event.empty())transfer.event+='\n';
-                        transfer.event+=value;
+                        transfer.event.append(value);
                     }
                 }
+                const size_t consumed=transfer.bytes.size()-rem.size();
+                if(consumed)transfer.bytes.erase(0,consumed);
             }
             return length;
         }catch(const std::exception &error){transfer.error=error.what();return 0;}catch(...){transfer.error="Could not read MCP response.";return 0;}
     }
     static int http_progress(void *pointer,curl_off_t,curl_off_t,curl_off_t,curl_off_t){
-        auto &app=*static_cast<App *>(pointer);check_exit(app);progress_tick(&app);return interrupted?1:0;
+        auto &app=*static_cast<App *>(pointer);check_exit(app);progress_tick(&app);return app_cancelled(app)?1:0;
     }
     JsonPtr http(J *message,long id,bool notification){
         // Borrow the client's persistent handle for connection reuse; if an SSE
@@ -622,7 +635,7 @@ struct Client {
         curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,http_body);curl_easy_setopt(curl,CURLOPT_WRITEDATA,&transfer);
         curl_easy_setopt(curl,CURLOPT_XFERINFOFUNCTION,http_progress);curl_easy_setopt(curl,CURLOPT_XFERINFODATA,&app);curl_easy_setopt(curl,CURLOPT_NOPROGRESS,0L);
         CURLcode code=curl_easy_perform(curl);long status=0;curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&status);
-        if(interrupted)throw Failure("MCP request cancelled. A remote operation may still be running.");
+        if(app_cancelled(app))throw Failure("MCP request cancelled. A remote operation may still be running.");
         if(!transfer.error.empty())throw Failure(transfer.error);
         if(code!=CURLE_OK&&!(code==CURLE_WRITE_ERROR&&transfer.response))throw Failure("MCP connection failed or timed out. The request was not automatically repeated.");
         if(status<200||status>=300){if(status==404)session.clear();throw Failure("MCP HTTP "+std::to_string(status)+". Check the address, authentication and server availability.");}
@@ -1062,6 +1075,7 @@ std::vector<McpServerSummary> mcp_summaries(App &app){
 namespace {
 std::string url_origin(const char *raw_url){
     CURLU *u=curl_url();
+    if(!u)return {};
     if(curl_url_set(u,CURLUPART_URL,raw_url,0)!=CURLUE_OK){curl_url_cleanup(u);return {};}
     char *scheme=nullptr,*host=nullptr,*port=nullptr;
     curl_url_get(u,CURLUPART_SCHEME,&scheme,0);
@@ -1088,16 +1102,20 @@ void open_browser_best_effort(const std::string &url){
 #else
     pid_t pid=fork();
     if(pid==0){
-        int nullfd=open("/dev/null",O_RDWR);
-        if(nullfd>=0){dup2(nullfd,0);dup2(nullfd,1);dup2(nullfd,2);if(nullfd>2)close(nullfd);}
+        pid_t grand=fork();
+        if(grand==0){
+            int nullfd=open("/dev/null",O_RDWR|O_CLOEXEC);
+            if(nullfd>=0){dup2(nullfd,0);dup2(nullfd,1);dup2(nullfd,2);if(nullfd>2)close(nullfd);}
 #ifdef __APPLE__
-        execlp("open","open",url.c_str(),static_cast<char *>(nullptr));
+            execlp("open","open",url.c_str(),static_cast<char *>(nullptr));
 #else
-        execlp("xdg-open","xdg-open",url.c_str(),static_cast<char *>(nullptr));
+            execlp("xdg-open","xdg-open",url.c_str(),static_cast<char *>(nullptr));
 #endif
+            _exit(0);
+        }
         _exit(0);
     }
-    if(pid>0){int st=0;waitpid(pid,&st,WNOHANG);}
+    if(pid>0){int st=0;while(waitpid(pid,&st,0)<0&&errno==EINTR){}}
 #endif
 }
 std::string query_param(std::string_view query,std::string_view key){
@@ -1192,9 +1210,11 @@ int mcp_cli(App &app,int argc,char **argv,int first){
 #ifdef _WIN32
         SOCKET lfd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
         if(lfd==INVALID_SOCKET){fprintf(stderr,"%s\n",tr("无法绑定本地 OAuth 回调端口。"));return 1;}
+        SetHandleInformation(reinterpret_cast<HANDLE>(lfd),HANDLE_FLAG_INHERIT,0);
 #else
         int lfd=socket(AF_INET,SOCK_STREAM,0);
         if(lfd<0){fprintf(stderr,"%s\n",tr("无法绑定本地 OAuth 回调端口。"));return 1;}
+        fcntl(lfd,F_SETFD,FD_CLOEXEC);
         int yes_opt=1;setsockopt(lfd,SOL_SOCKET,SO_REUSEADDR,&yes_opt,sizeof yes_opt);
 #endif
         sockaddr_in addr{};
@@ -1262,15 +1282,19 @@ int mcp_cli(App &app,int argc,char **argv,int first){
             if(select(0,&rfds,nullptr,nullptr,&tv)<=0)continue;
             SOCKET cfd=accept(lfd,nullptr,nullptr);
             if(cfd==INVALID_SOCKET)continue;
+            fd_set crfds;FD_ZERO(&crfds);FD_SET(cfd,&crfds);
+            timeval ctv{2,0};
             char req_buf[4096]{};
-            int n=recv(cfd,req_buf,sizeof(req_buf)-1,0);
+            int n=select(0,&crfds,nullptr,nullptr,&ctv)>0?recv(cfd,req_buf,sizeof(req_buf)-1,0):0;
 #else
             pollfd pfd{lfd,POLLIN,0};
             if(poll(&pfd,1,100)<=0)continue;
             int cfd=accept(lfd,nullptr,nullptr);
             if(cfd<0)continue;
+            fcntl(cfd,F_SETFD,FD_CLOEXEC);
+            pollfd cpfd{cfd,POLLIN,0};
             char req_buf[4096]{};
-            ssize_t n=read(cfd,req_buf,sizeof(req_buf)-1);
+            ssize_t n=poll(&cpfd,1,2000)>0?read(cfd,req_buf,sizeof(req_buf)-1):0;
 #endif
             if(n>0){
                 std::string_view req_sv(req_buf,static_cast<size_t>(n));

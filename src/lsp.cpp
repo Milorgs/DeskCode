@@ -356,19 +356,45 @@ private:
         std::string chunk=read_some(std::max(0.0,seconds));
         pending+=chunk;
         if(pending.size()>MAX_MESSAGE*2)throw Failure("language server output too large");
+        std::string_view rem(pending);
         for(;;){
-            auto header_end=pending.find("\r\n\r\n");
-            if(header_end==std::string::npos)return;
-            size_t length=std::string::npos;
-            std::string headers=lower(pending.substr(0,header_end));
-            auto key=headers.find("content-length:");
-            if(key!=std::string::npos)length=strtoul(headers.c_str()+key+15,nullptr,10);
-            if(length==std::string::npos||length>MAX_MESSAGE)throw Failure("invalid language server message");
-            if(pending.size()<header_end+4+length)return;
-            JsonPtr message(json_tokener_parse(pending.substr(header_end+4,length).c_str()));
-            pending.erase(0,header_end+4+length);
+            auto header_end=rem.find("\r\n\r\n");
+            if(header_end==std::string_view::npos)break;
+            size_t length=std::string_view::npos;
+            std::string_view hdr=rem.substr(0,header_end);
+            while(!hdr.empty()){
+                auto nl=hdr.find("\r\n");
+                std::string_view ln=nl==std::string_view::npos?hdr:hdr.substr(0,nl);
+                if(ln.size()>=15){
+                    bool match=true;
+                    constexpr std::string_view prefix="content-length:";
+                    for(size_t i=0;i<prefix.size();i++){
+                        unsigned char c=static_cast<unsigned char>(ln[i]);
+                        if(c>='A'&&c<='Z')c=static_cast<unsigned char>(c+32);
+                        if(c!=static_cast<unsigned char>(prefix[i])){match=false;break;}
+                    }
+                    if(match){
+                        std::string num_str(ln.substr(prefix.size()));
+                        char *end_ptr=nullptr;
+                        unsigned long parsed_len=strtoul(num_str.c_str(),&end_ptr,10);
+                        if(end_ptr!=num_str.c_str())length=static_cast<size_t>(parsed_len);
+                        break;
+                    }
+                }
+                if(nl==std::string_view::npos)break;
+                hdr.remove_prefix(nl+2);
+            }
+            if(length==std::string_view::npos||length>MAX_MESSAGE)throw Failure("invalid language server message");
+            if(rem.size()<header_end+4+length)break;
+            json_tokener *tok=json_tokener_new();
+            J *raw_msg=tok?json_tokener_parse_ex(tok,rem.data()+header_end+4,static_cast<int>(length)):nullptr;
+            if(tok)json_tokener_free(tok);
+            JsonPtr message(raw_msg);
+            rem.remove_prefix(header_end+4+length);
             if(message)dispatch(message.get());
         }
+        const size_t consumed=pending.size()-rem.size();
+        if(consumed)pending.erase(0,consumed);
     }
     void dispatch(J *message){
         const char *method=sget(message,"method");
@@ -436,9 +462,11 @@ private:
         std::vector<unsigned char> storage(bytes);
         auto *list=reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
         std::vector<HANDLE> inherit{child_in.get(),child_out.get(),sink.get()};
-        if(!InitializeProcThreadAttributeList(list,1,0,&bytes)||
-           !UpdateProcThreadAttribute(list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherit.data(),inherit.size()*sizeof(HANDLE),nullptr,nullptr))
+        const bool list_init=InitializeProcThreadAttributeList(list,1,0,&bytes)!=FALSE;
+        if(!list_init||!UpdateProcThreadAttribute(list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherit.data(),inherit.size()*sizeof(HANDLE),nullptr,nullptr)){
+            if(list_init)DeleteProcThreadAttributeList(list);
             throw Failure("could not configure language server handles");
+        }
         STARTUPINFOEXW start{};start.StartupInfo.cb=sizeof start;start.StartupInfo.dwFlags=STARTF_USESTDHANDLES;
         start.StartupInfo.hStdInput=child_in.get();start.StartupInfo.hStdOutput=child_out.get();start.StartupInfo.hStdError=sink.get();
         start.lpAttributeList=list;
@@ -516,7 +544,7 @@ private:
                ||prctl(PR_SET_PDEATHSIG,SIGTERM)||getppid()!=parent
 #endif
                ||chdir(root.c_str()))_exit(126);
-            int sink=open("/dev/null",O_WRONLY);
+            int sink=open("/dev/null",O_WRONLY|O_CLOEXEC);
             if(sink<0||dup2(to_child[0],0)<0||dup2(from_child[1],1)<0||dup2(sink,2)<0)_exit(126);
             execve(argv[0],argv.data(),envp.data());
             _exit(127);
@@ -695,6 +723,10 @@ J *summarize(const App &app,const std::string &path,J *list,const std::string &t
 }
 J *locations(const App &app,J *result,size_t limit){
     J *out=arr();
+    std::map<std::string,std::string> text_cache;
+    App check{};
+    snprintf(check.root,sizeof check.root,"%s",app.root);
+    snprintf(check.config_dir,sizeof check.config_dir,"%s",app.config_dir);
     auto one=[&](J *item){
         if(alen(out)>=limit)return;
         const char *uri=*sget(item,"targetUri")?sget(item,"targetUri"):sget(item,"uri");
@@ -706,12 +738,18 @@ J *locations(const App &app,J *result,size_t limit){
         put(entry,"path",str(display_path(app,path).c_str()));
         put(entry,"line",json_object_new_int(line+1));
         std::string preview;
-        try{
-            const std::string text=read_text(path);
-            preview=line_of(text,line);
-            put(entry,"column",json_object_new_int(character_column(preview,iget(get(range,"start"),"character",0))+1));
-        }catch(...){}
-        while(!preview.empty()&&(preview.front()==' '||preview.front()=='\t'))preview.erase(0,1);
+        char safe_full[PATH_MAX];
+        if(resolve_file(&check,path.c_str(),safe_full)==0){
+            try{
+                auto it=text_cache.find(safe_full);
+                if(it==text_cache.end())it=text_cache.emplace(safe_full,read_text(safe_full)).first;
+                preview=line_of(it->second,line);
+                put(entry,"column",json_object_new_int(character_column(preview,iget(get(range,"start"),"character",0))+1));
+            }catch(...){}
+        }
+        size_t trim_pos=0;
+        while(trim_pos<preview.size()&&(preview[trim_pos]==' '||preview[trim_pos]=='\t'))trim_pos++;
+        if(trim_pos)preview.erase(0,trim_pos);
         if(preview.size()>200)preview.resize(200);
         size_t used=0;
         preview=display_utf8(preview,used,true);

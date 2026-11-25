@@ -784,7 +784,7 @@ static bool safe_http_get(App *app,std::string &current_url,std::string &resolve
         auto *a=static_cast<App *>(ud);
         check_exit(*a);
         progress_tick(a);
-        return interrupted?1:0;
+        return app_cancelled(a)?1:0;
     };
 
     FetchBuf fetched;
@@ -813,7 +813,7 @@ static bool safe_http_get(App *app,std::string &current_url,std::string &resolve
         curl_easy_setopt(curl.get(),CURLOPT_NOPROGRESS,0L);
 
         CURLcode code=curl_easy_perform(curl.get());
-        if(interrupted){err_out=tr("请求已取消。");return false;}
+        if(app_cancelled(app)){err_out=tr("请求已取消。");return false;}
         if(fetched.oversized){err_out=tr("网页响应超过 2 MB 上限。");return false;}
         if(code!=CURLE_OK){err_out=tr("网页请求失败或连接超时。");return false;}
         curl_easy_getinfo(curl.get(),CURLINFO_RESPONSE_CODE,&status_out);
@@ -1202,15 +1202,6 @@ bool compact_conversation(App &app,std::string &summary){
 }
 
 namespace {
-void set_temp_env(const char *key,const char *val){
-#ifdef _WIN32
-    SetEnvironmentVariableW(wide(key).c_str(),val?wide(val).c_str():nullptr);
-#else
-    if(val)setenv(key,val,1);
-    else unsetenv(key);
-#endif
-}
-
 struct HookCommand {
     std::string command;
     // Claude Code format: JSON on stdin, and only exit code 2 blocks.
@@ -1323,18 +1314,17 @@ bool valid_command_slug(std::string_view name){
 }
 } // namespace
 
-static std::mutex hook_env_mutex;
-
 bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason){
     auto hooks=collect_hook_commands(app,"pre_shell",command);
     if(hooks.empty())return true;
-    std::lock_guard env_guard(hook_env_mutex);
     App probe{};
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
     probe.sandbox_no_net=app.sandbox_no_net;
-    set_temp_env("DESK_HOOK_CMD",command);
-    set_temp_env("DESK_HOOK_JSON",hook_event_json(app,"PreToolUse","Bash","command",command).c_str());
+    probe.quiet_human=app.quiet_human;
+    probe.cancel_requested=app.cancel_requested;
+    probe.extra_env.emplace_back("DESK_HOOK_CMD",command);
+    probe.extra_env.emplace_back("DESK_HOOK_JSON",hook_event_json(app,"PreToolUse","Bash","command",command));
     for(const auto &hook:hooks){
         JsonPtr res(run_command(&probe,hook_shell(hook).c_str(),15000));
         const int code=res?iget(res.get(),"exit_code",-1):-1;
@@ -1342,13 +1332,9 @@ bool run_pre_shell_hook(App &app,const char *command,std::string &blocked_reason
             std::string out=res?sget(res.get(),"output"):"";
             while(!out.empty()&&(out.back()=='\n'||out.back()=='\r'))out.pop_back();
             blocked_reason=out.empty()?std::string(tr("pre_shell 钩子拦截了此次命令。")):out;
-            set_temp_env("DESK_HOOK_CMD",nullptr);
-            set_temp_env("DESK_HOOK_JSON",nullptr);
             return false;
         }
     }
-    set_temp_env("DESK_HOOK_CMD",nullptr);
-    set_temp_env("DESK_HOOK_JSON",nullptr);
     return true;
 }
 
@@ -1356,14 +1342,15 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
     if(!result||!rel_path||!*rel_path)return;
     auto hooks=collect_hook_commands(app,"post_edit",rel_path);
     if(hooks.empty())return;
-    std::lock_guard env_guard(hook_env_mutex);
     App probe{};
     snprintf(probe.root,sizeof probe.root,"%s",app.root);
     probe.sandbox=app.sandbox;
     probe.sandbox_no_net=app.sandbox_no_net;
-    set_temp_env("DESK_HOOK_FILE",rel_path);
+    probe.quiet_human=app.quiet_human;
+    probe.cancel_requested=app.cancel_requested;
     const std::string absolute=path_text(fs_path(app.root)/fs_path(rel_path));
-    set_temp_env("DESK_HOOK_JSON",hook_event_json(app,"PostToolUse","Edit","file_path",absolute.c_str()).c_str());
+    probe.extra_env.emplace_back("DESK_HOOK_FILE",rel_path);
+    probe.extra_env.emplace_back("DESK_HOOK_JSON",hook_event_json(app,"PostToolUse","Edit","file_path",absolute.c_str()));
     int final_code=0;
     std::string combined;
     for(const auto &hook:hooks){
@@ -1378,8 +1365,6 @@ void run_post_edit_hook(App &app,const char *rel_path,J *result){
             combined.append(out.substr(0,take));
         }
     }
-    set_temp_env("DESK_HOOK_FILE",nullptr);
-    set_temp_env("DESK_HOOK_JSON",nullptr);
     put(result,"hook_exit_code",json_object_new_int(final_code));
     if(!combined.empty())put(result,"hook_output",str(combined.c_str()));
 }

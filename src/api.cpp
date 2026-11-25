@@ -1,4 +1,5 @@
 #include "desk.hpp"
+#include <mutex>
 #include <set>
 #include "tasks.hpp"
 #include <curl/curl.h>
@@ -93,24 +94,25 @@ static void stream_event(StreamState *st,const char *json){
 }
 static void stream_feed(StreamState *st,const char *bytes,size_t n){
     st->pending.append(bytes,n);
-    size_t start=0;
+    std::string_view rem(st->pending);
     for(;;){
-        auto end=st->pending.find('\n',start);
-        if(end==std::string::npos)break;
-        std::string line=st->pending.substr(start,end-start);
-        start=end+1;
-        if(!line.empty()&&line.back()=='\r')line.pop_back();
+        auto end=rem.find('\n');
+        if(end==std::string_view::npos)break;
+        std::string_view line=rem.substr(0,end);
+        rem.remove_prefix(end+1);
+        if(!line.empty()&&line.back()=='\r')line.remove_suffix(1);
         if(line.empty()&&!st->event_data.empty()){
             stream_event(st,st->event_data.c_str());
             st->event_data.clear();
         }
         if(!line.starts_with("data:"))continue;
-        auto payload=line.substr(5);
-        if(!payload.empty()&&payload.front()==' ')payload.erase(0,1);
+        std::string_view payload=line.substr(5);
+        if(!payload.empty()&&payload.front()==' ')payload.remove_prefix(1);
         if(!st->event_data.empty())st->event_data+='\n';
-        st->event_data+=payload;
+        st->event_data.append(payload);
     }
-    st->pending.erase(0,start);
+    const size_t consumed=st->pending.size()-rem.size();
+    if(consumed)st->pending.erase(0,consumed);
 }
 static size_t receive(char *p,size_t size,size_t count,void *user){
     auto *b=static_cast<Buffer *>(user);
@@ -143,8 +145,8 @@ static size_t stream_chunk(char *p,size_t size,size_t count,void *user){
     return n;
 }
 static int transfer_progress(void *u,curl_off_t d,curl_off_t n,curl_off_t t,curl_off_t v){
-    if(u){
-        auto *app=static_cast<App *>(u);
+    auto *app=static_cast<App *>(u);
+    if(app){
         check_exit(*app);
         progress_tick(app);
     }
@@ -152,7 +154,7 @@ static int transfer_progress(void *u,curl_off_t d,curl_off_t n,curl_off_t t,curl
     (void)n;
     (void)t;
     (void)v;
-    return interrupted?1:0;
+    return app_cancelled(app)?1:0;
 }
 J *api_request(App *a,J *c,const char *endpoint,J *payload,void *stream_void) try {
     auto *stream=static_cast<StreamState *>(stream_void);
@@ -203,8 +205,8 @@ J *api_request(App *a,J *c,const char *endpoint,J *payload,void *stream_void) tr
         CURLcode rc=curl_easy_perform(h);
         long status=0;
         curl_easy_getinfo(h,CURLINFO_RESPONSE_CODE,&status);
-        if(rc!=CURLE_OK||interrupted){
-            seterr(a,interrupted?tr("请求已取消。"):(stream?stream->oversized:b.oversized)?tr("API 响应超过大小限制。"):tr("API 连接失败或超时；未自动重发请求。"));
+        if(rc!=CURLE_OK||app_cancelled(a)){
+            seterr(a,app_cancelled(a)?tr("请求已取消。"):(stream?stream->oversized:b.oversized)?tr("API 响应超过大小限制。"):tr("API 连接失败或超时；未自动重发请求。"));
             return NULL;
         }
         if(status>=200&&status<300){
@@ -229,14 +231,14 @@ J *api_request(App *a,J *c,const char *endpoint,J *payload,void *stream_void) tr
             return data;
         }
         bool retry=status==429||status==500||status==502||status==503||status==504||status==529;
-        if(retry&&attempt<2&&!interrupted){
+        if(retry&&attempt<2&&!app_cancelled(a)){
             char message[160];
             snprintf(message,sizeof message,tr("API HTTP %ld，正在重试（%d/2）…"),status,attempt+1);
             if(a->progress_visible)progress(a,message);
-            else fprintf(stderr,"%s\n",message);
+            else if(!a->quiet_human)fprintf(stderr,"%s\n",message);
             auto until=monotime()+(1<<attempt);
-            while(monotime()<until&&!interrupted){check_exit(*a);progress_tick(a);std::this_thread::sleep_for(std::chrono::milliseconds(50));}
-            if(interrupted){
+            while(monotime()<until&&!app_cancelled(a)){check_exit(*a);progress_tick(a);std::this_thread::sleep_for(std::chrono::milliseconds(50));}
+            if(app_cancelled(a)){
                 seterr(a,tr("请求已取消。"));
                 return NULL;
             }
@@ -553,10 +555,16 @@ std::string usage_cost_label(J *config,double cost){
 }
 J *api_complete(App *a,J *c,J *messages,J *tools){
     bool native=!strcmp(sget(c,"protocol"),"anthropic");
+    static std::mutex rejected_mutex;
     static std::set<std::string> usage_option_rejected;
     static std::set<std::string> cache_control_rejected;
     const std::string usage_key=std::string(sget(c,"profile"))+'\n'+sget(c,"base_url")+'\n'+sget(c,"model");
-    const bool ask_cache=native&&!cache_control_rejected.contains(usage_key);
+    bool ask_cache=false,ask_usage=false;
+    {
+        std::lock_guard lock(rejected_mutex);
+        ask_cache=native&&!cache_control_rejected.contains(usage_key);
+        ask_usage=!native&&!usage_option_rejected.contains(usage_key);
+    }
     J *body;
     if(native)body=native_payload(c,messages,tools,ask_cache);
     else{
@@ -625,14 +633,13 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
     // OpenAI only reports usage on a stream when asked. An endpoint and model
     // that reject the option get one plain retry and are not asked again in
     // this process; other providers and models keep requesting usage.
-    const bool ask_usage=!native&&!usage_option_rejected.contains(usage_key);
     if(ask_usage){
         J *options=obj();
         put(options,"include_usage",json_object_new_boolean(1));
         put(body,"stream_options",options);
     }
     J *data=api_request(a,c,native?"/messages":"/chat/completions",body,&stream);
-    if(!data&&!interrupted&&!strncmp(a->error,"API HTTP 400",12)&&!stream.events&&(ask_usage||ask_cache)){
+    if(!data&&!app_cancelled(a)&&!strncmp(a->error,"API HTTP 400",12)&&!stream.events&&(ask_usage||ask_cache)){
         // Retry once without the optional extension; only a success proves the
         // option was the problem. Otherwise the first, more specific error stands.
         const std::string first_error=a->error;
@@ -651,10 +658,11 @@ J *api_complete(App *a,J *c,J *messages,J *tools){
         a->error[0]=0;
         data=api_request(a,c,native?"/messages":"/chat/completions",body,&stream);
         if(data){
+            std::lock_guard lock(rejected_mutex);
             if(ask_usage)usage_option_rejected.insert(usage_key);
             if(ask_cache)cache_control_rejected.insert(usage_key);
         }
-        else if(!interrupted)snprintf(a->error,sizeof a->error,"%s",first_error.c_str());
+        else if(!app_cancelled(a))snprintf(a->error,sizeof a->error,"%s",first_error.c_str());
     }
     json_object_put(body);
     if(!data)return NULL;

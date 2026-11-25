@@ -294,6 +294,9 @@ void scan_file_symbols(std::string_view rel_path,std::string_view content,Lang l
     int brace_depth=0;
     size_t pos=0,line_no=0;
     std::string pending_header;
+    std::string clean;
+    std::string combined;
+    clean.reserve(256);
     size_t pending_line=0;
 
     while(pos<content.size()){
@@ -305,8 +308,8 @@ void scan_file_symbols(std::string_view rel_path,std::string_view content,Lang l
 
         if(out.size()>=limit){truncated=true;continue;}
 
-        std::string clean;
-        clean.reserve(raw_line.size());
+        clean.clear();
+        if(clean.capacity()<raw_line.size())clean.reserve(raw_line.size());
         for(size_t i=0;i<raw_line.size();){
             char c=raw_line[i];
             if(block_comment){
@@ -476,11 +479,14 @@ void scan_file_symbols(std::string_view rel_path,std::string_view content,Lang l
         if(trimmed.front()=='#'){pending_header.clear();continue;}
         if(line_depth>2){pending_header.clear();continue;}
 
-        std::string combined;
         std::string_view candidate=trimmed;
         size_t candidate_line=line_no;
         if(!pending_header.empty()){
-            combined=pending_header+" "+std::string(trimmed);
+            combined.clear();
+            combined.reserve(pending_header.size()+1+trimmed.size());
+            combined.append(pending_header);
+            combined+=' ';
+            combined.append(trimmed);
             candidate=combined;
             candidate_line=pending_line;
             pending_header.clear();
@@ -1010,19 +1016,20 @@ J *tool_code_outline(App *app,J *args){
     gitignore.load(app->root);
     std::error_code cfg_ec;
     const fs::path cfg=fs::weakly_canonical(fs_path(app->config_dir),cfg_ec);
+    const bool check_cfg=!cfg_ec&&path_inside(root,cfg);
     std::vector<fs::path> source_files;
     const double deadline=monotime()+5.0;
 
     auto collect=[&](auto &self,const fs::path &dir,int depth)->void{
-        if(depth>20||source_files.size()>=2000||monotime()>deadline||interrupted)return;
+        if(depth>20||source_files.size()>=2000||monotime()>deadline||app_cancelled(app))return;
         std::error_code dir_ec;
         fs::directory_iterator it(dir,dir_ec);
         if(dir_ec)return;
         for(fs::directory_iterator end;it!=end;it.increment(dir_ec)){
-            if(dir_ec||source_files.size()>=2000||monotime()>deadline||interrupted)break;
+            if(dir_ec||source_files.size()>=2000||monotime()>deadline||app_cancelled(app))break;
             const fs::path entry=it->path();
             if(path_link(entry))continue;
-            if(!cfg_ec&&path_inside(cfg,entry))continue;
+            if(check_cfg&&path_inside(cfg,entry))continue;
             std::string name=path_text(entry.filename());
             if(skip_entry(name))continue;
             std::error_code item_ec;
@@ -1042,7 +1049,7 @@ J *tool_code_outline(App *app,J *args){
     bool truncated=false;
     size_t files_scanned=0;
     for(const auto &file:source_files){
-        if(monotime()>deadline||interrupted){truncated=true;break;}
+        if(monotime()>deadline||app_cancelled(app)){truncated=true;break;}
         if(found.size()>=static_cast<size_t>(max_results)){truncated=true;break;}
         size_t len=0;
         std::string file_str=path_text(file);
@@ -1095,6 +1102,8 @@ J *tool_delegate_research(App *app,J *args){
     sub.shell=false;
     sub.desktop=false;
     sub.subagent=true;
+    sub.quiet_human=true;
+    sub.cancel_requested=app->cancel_requested;
     sub.max_steps=8;
     sub.task_events=-1;
     auto cleanup=[](App *value){app_cleanup(value);};
@@ -1134,7 +1143,7 @@ J *tool_delegate_research(App *app,J *args){
 
     std::string findings;
     int steps_used=0;
-    for(int step=1;step<=8&&!interrupted;++step){
+    for(int step=1;step<=8&&!app_cancelled(&sub);++step){
         steps_used=step;
         JsonPtr history(context(&sub,sub_tools.get()));
         if(!history)return err(sub.error[0]?sub.error:tr("子任务上下文超出预算。"));
@@ -1158,7 +1167,7 @@ J *tool_delegate_research(App *app,J *args){
             parsed_args.push_back(std::move(ca));
         }
         add(sub.messages,reply.release());
-        for(size_t i=0;i<alen(calls)&&!interrupted;i++){
+        for(size_t i=0;i<alen(calls)&&!app_cancelled(&sub);i++){
             J *call=at(calls,i),*fn=get(call,"function");
             const char *cname=sget(fn,"name");
             record_path(sget(parsed_args[i].get(),"path"));
@@ -1171,7 +1180,7 @@ J *tool_delegate_research(App *app,J *args){
         }
     }
 
-    if(interrupted)return err(tr("任务已停止。"));
+    if(app_cancelled(&sub))return err(tr("任务已停止。"));
     if(findings.empty()){
         J *ask=obj();
         put(ask,"role",str("user"));

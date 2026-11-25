@@ -18,10 +18,12 @@
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#include "windows/win.hpp"
 #define acp_dup _dup
 #define acp_dup2 _dup2
 #define acp_fdopen _fdopen
 #else
+#include <fcntl.h>
 #include <unistd.h>
 #define acp_dup dup
 #define acp_dup2 dup2
@@ -356,12 +358,15 @@ void run_prompt(Session &session,J *request_id,J *prompt){
         put(update,"status",str("in_progress"));
         put(update,"rawInput",args?copy(args):obj());
         if(*sget(args,"path")){
+            char resolved[PATH_MAX];
+            const bool valid_path=resolve_file(&app,sget(args,"path"),resolved)==0;
+            const std::string shown_path=valid_path?std::string(resolved):absolute(app,sget(args,"path"));
             J *locations=arr(),*location=obj();
-            put(location,"path",str(absolute(app,sget(args,"path")).c_str()));
+            put(location,"path",str(shown_path.c_str()));
             if(iget(args,"line",0)>0)put(location,"line",json_object_new_int(iget(args,"line",0)));
             add(locations,location);
             put(update,"locations",locations);
-            if(!strcmp(tool_kind(name),"edit"))before[id]=file_text(absolute(app,sget(args,"path")));
+            if(valid_path&&!strcmp(tool_kind(name),"edit"))before[id]=file_text(resolved);
         }
         session_update(sid,update);
     };
@@ -374,13 +379,14 @@ void run_prompt(Session &session,J *request_id,J *prompt){
         const std::string_view tool=name;
         if(failed)add(content,text_content(*sget(result,"error")?sget(result,"error"):"The operation failed."));
         else if(!strcmp(tool_kind(name),"edit")){
-            const std::string path=absolute(app,sget(args,"path"));
+            char resolved[PATH_MAX];
+            const std::string path=resolve_file(&app,sget(args,"path"),resolved)==0?std::string(resolved):std::string();
             J *diff=obj();
             put(diff,"type",str("diff"));
-            put(diff,"path",str(path.c_str()));
+            put(diff,"path",str(path.empty()?absolute(app,sget(args,"path")).c_str():path.c_str()));
             auto old=before.find(id);
             put(diff,"oldText",old==before.end()||old->second.empty()?nullptr:str(old->second.c_str()));
-            put(diff,"newText",str(file_text(path).c_str()));
+            put(diff,"newText",str(path.empty()?"":file_text(path).c_str()));
             add(content,diff);
             if(*sget(result,"diagnostics_summary"))add(content,text_content(sget(result,"diagnostics_summary")));
         }else if(tool=="run_shell"||tool=="shell_output"||tool=="shell_kill"){
@@ -408,7 +414,6 @@ void run_prompt(Session &session,J *request_id,J *prompt){
         if(mode==FULL||(mode==EDIT&&operation==static_cast<int>(Operation::FileEdit)))return 1;
         return request_permission(session,current_tool,current_tool_kind,current_tool_args.get(),title,description,operation);
     };
-    interrupted=0;
     background_requested=false;
     const int rc=run_task(&app,task.c_str());
     const char *stop="end_turn";
@@ -420,7 +425,6 @@ void run_prompt(Session &session,J *request_id,J *prompt){
     app.on_tool_start=nullptr;
     app.on_tool_end=nullptr;
     app.approval_hook=nullptr;
-    interrupted=0;
     J *result=obj();
     put(result,"stopReason",str(stop));
     respond(request_id,result);
@@ -493,6 +497,8 @@ void handle_request(App &base,J *message){
         app->notify=base.notify;
         app->max_steps=base.max_steps;
         app->json_output=true;
+        app->quiet_human=true;
+        app->cancel_requested=&session->cancelled;
         app->state="等待任务";
         J *servers=mcp_from_acp(get(params,"mcpServers"));
         if(json_object_object_length(servers))app->extra_mcp=servers;
@@ -539,7 +545,6 @@ void handle_notification(J *message){
     auto found=sessions.find(sid);
     if(found==sessions.end())return;
     found->second->cancelled=true;
-    if(running_session==sid)interrupted=SIGINT;
     state_changed.notify_all();
 }
 }
@@ -554,6 +559,9 @@ int acp_main(App &app){
     if(protocol_fd<0||acp_dup2(2,1)<0)return 1;
 #ifdef _WIN32
     _setmode(protocol_fd,_O_BINARY);
+    SetHandleInformation(reinterpret_cast<HANDLE>(_get_osfhandle(protocol_fd)),HANDLE_FLAG_INHERIT,0);
+#else
+    fcntl(protocol_fd,F_SETFD,FD_CLOEXEC);
 #endif
     protocol_out=acp_fdopen(protocol_fd,"w");
     if(!protocol_out)return 1;

@@ -4870,6 +4870,172 @@ static void test_v1_18_features(){
         app_cleanup(&a);
     }
 }
+static void test_cpp_optimizations(){
+    // 1. SWAR valid_utf8, sanitize_utf8, display_utf8, ui_width, sha256, and exact-size read_bytes boundaries.
+    {
+        char *h0=sha256("",0);
+        CHECK(h0&&!strcmp(h0,"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+        free(h0);
+        char *h1=sha256("abc",3);
+        CHECK(h1&&!strcmp(h1,"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        free(h1);
+
+        for(size_t pad=0;pad<=16;pad++){
+            std::string ascii(pad,'a');
+            CHECK(valid_utf8(ascii));
+            CHECK(ui_width(ascii)==static_cast<int>(pad));
+            std::string cjk=ascii+"你好"+std::string(9,'z');
+            CHECK(valid_utf8(cjk));
+            CHECK(ui_width(cjk)==static_cast<int>(pad)+4+9);
+            std::string emoji=ascii+"🚀"+std::string(8,'x');
+            CHECK(valid_utf8(emoji));
+            CHECK(ui_width(emoji)==static_cast<int>(pad)+2+8);
+            std::string bad_overlong=ascii+std::string("\xc0\x80",2)+"tail";
+            CHECK(!valid_utf8(bad_overlong));
+            std::string bad_surrogate=ascii+std::string("\xed\xa0\x80",3)+"tail";
+            CHECK(!valid_utf8(bad_surrogate));
+            CHECK(valid_utf8(sanitize_utf8(bad_overlong)));
+            CHECK(valid_utf8(sanitize_utf8(bad_surrogate)));
+        }
+
+        App a=fresh();
+        const std::string empty_f=std::string(a.root)+"/empty.txt";
+        const std::string exact_f=std::string(a.root)+"/exact17.txt";
+        CHECK(!atomic_file(empty_f.c_str(),"",0,0600));
+        CHECK(!atomic_file(exact_f.c_str(),"0123456789abcdef\n",17,0600));
+        size_t len=99;
+        char *eb=read_bytes(empty_f.c_str(),0,&len);
+        CHECK(eb&&len==0&&eb[0]==0);free(eb);
+        char *xb=read_bytes(exact_f.c_str(),17,&len);
+        CHECK(xb&&len==17&&!strcmp(xb,"0123456789abcdef\n"));free(xb);
+        errno=0;
+        char *ob=read_bytes(exact_f.c_str(),16,&len);
+        CHECK(!ob&&errno==EFBIG);
+
+        // 2. Thread-safe extra_env hooks do not mutate parent process environ.
+        CHECK(!mkdirs((std::string(a.root)+"/.desk-agent").c_str(),0700));
+        const char *hooks_cfg=R"({"pre_shell":"printf '%s' \"$DESK_HOOK_CMD\" > hook_env_check.txt"})";
+        CHECK(!atomic_file((std::string(a.root)+"/.desk-agent/hooks.json").c_str(),hooks_cfg,strlen(hooks_cfg),0600));
+        a.yes=true;
+        unsetenv("DESK_HOOK_CMD");
+        std::string blocked;
+        CHECK(run_pre_shell_hook(a,"echo ISOLATED_HOOK_OK",blocked));
+        CHECK(getenv("DESK_HOOK_CMD")==nullptr);
+        char *hb=read_bytes((std::string(a.root)+"/hook_env_check.txt").c_str(),128,nullptr);
+        CHECK(hb&&!strcmp(hb,"echo ISOLATED_HOOK_OK"));free(hb);
+        app_cleanup(&a);
+    }
+
+    // 3. Per-session cancellation in `desk serve`: cancelling sess-1 must NOT kill the daemon or sibling sessions.
+    {
+        App a=fresh();
+        json_object_put(a.config);a.config=config("serve-cancel","openai");
+        int lm=socket(AF_INET,SOCK_STREAM,0);CHECK(lm>=0);
+        sockaddr_in lma{};lma.sin_family=AF_INET;lma.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+        CHECK(!bind(lm,reinterpret_cast<sockaddr *>(&lma),sizeof lma));
+        socklen_t lml=sizeof lma;CHECK(!getsockname(lm,reinterpret_cast<sockaddr *>(&lma),&lml));
+        CHECK(!listen(lm,8));
+        put(a.config,"base_url",str(("http://127.0.0.1:"+std::to_string(ntohs(lma.sin_port))+"/v1").c_str()));
+        CHECK(!save_config(&a,a.config));
+
+        std::atomic<bool> stop_lm{false};
+        std::thread lm_thr([lm,&stop_lm]{
+            while(!stop_lm){
+                pollfd pfd{lm,POLLIN,0};
+                if(poll(&pfd,1,40)<=0)continue;
+                int c=accept(lm,nullptr,nullptr);if(c<0)continue;
+                FILE *fp=fdopen(c,"r+");if(!fp){close(c);continue;}
+                char *line=nullptr;size_t cap=0;long clen=0;
+                if(getline(&line,&cap,fp)>0){
+                    while(getline(&line,&cap,fp)>0&&strcmp(line,"\r\n")&&strcmp(line,"\n"))
+                        if(!strncasecmp(line,"Content-Length:",15))clen=strtol(line+15,nullptr,10);
+                }
+                free(line);
+                std::string body(clen>0&&clen<262144?static_cast<size_t>(clen):0,'\0');
+                if(!body.empty()&&fread(body.data(),1,body.size(),fp)!=body.size()){fclose(fp);continue;}
+                const bool want_approval=body.find("WAIT_APPROVAL")!=std::string::npos&&body.find("\"role\":\"tool\"")==std::string::npos;
+                std::string resp=want_approval
+                    ?R"({"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"never.txt\",\"content\":\"x\\n\",\"expected_sha256\":null}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})"
+                    :R"({"choices":[{"index":0,"message":{"role":"assistant","content":"SESS2_ALIVE"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})";
+                fprintf(fp,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n%s",resp.size(),resp.c_str());
+                fflush(fp);fclose(fp);
+            }
+        });
+
+        const std::string port_file=std::string(a.root)+"/serve_cancel.port";
+        pid_t spid=fork();CHECK(spid>=0);
+        if(spid==0){
+            execl("./build/desk","desk","--workspace",a.root,"serve","--port","0","--token","tok-opt","--port-file",port_file.c_str(),static_cast<char *>(nullptr));
+            _exit(127);
+        }
+        int sport=0;
+        for(int i=0;i<100&&sport<=0;i++){
+            char *p=read_bytes(port_file.c_str(),32,nullptr);
+            if(p){sport=atoi(p);free(p);}
+            if(sport<=0)usleep(25000);
+        }
+        CHECK(sport>0);
+        const std::string surl="http://127.0.0.1:"+std::to_string(sport);
+
+        auto http_req=[&](const char *method,const std::string &path,const std::string &payload,long &code_out)->std::string{
+            CurlHandle h(curl_easy_init());std::string out;
+            HttpHeaders hdrs;
+            hdrs.append("Authorization: Bearer tok-opt");
+            hdrs.append("Content-Type: application/json");
+            auto wr=+[](char *ptr,size_t sz,size_t n,void *ud)->size_t{static_cast<std::string *>(ud)->append(ptr,sz*n);return sz*n;};
+            curl_easy_setopt(h.get(),CURLOPT_URL,(surl+path).c_str());
+            curl_easy_setopt(h.get(),CURLOPT_HTTPHEADER,hdrs.get());
+            curl_easy_setopt(h.get(),CURLOPT_WRITEFUNCTION,wr);
+            curl_easy_setopt(h.get(),CURLOPT_WRITEDATA,&out);
+            if(!strcmp(method,"POST")){
+                curl_easy_setopt(h.get(),CURLOPT_POST,1L);
+                curl_easy_setopt(h.get(),CURLOPT_POSTFIELDS,payload.c_str());
+                curl_easy_setopt(h.get(),CURLOPT_POSTFIELDSIZE,static_cast<long>(payload.size()));
+            }
+            CHECK(curl_easy_perform(h.get())==CURLE_OK);
+            curl_easy_getinfo(h.get(),CURLINFO_RESPONSE_CODE,&code_out);
+            return out;
+        };
+
+        std::thread canceller([&]{
+            for(int i=0;i<150;i++){
+                long sc=0;
+                std::string snap=http_req("GET","/api/sessions/sess-1","",sc);
+                if(sc==200&&snap.find("\"pending_approval\"")!=std::string::npos){
+                    long cc=0;
+                    std::string cr=http_req("POST","/api/sessions/sess-1/cancel","{}",cc);
+                    CHECK(cc==200&&cr.find("\"cancelled\":true")!=std::string::npos);
+                    return;
+                }
+                usleep(25000);
+            }
+        });
+
+        auto c1=run_desk({"attach",surl,"--session","sess-1","--token","tok-opt","--json","-p","WAIT_APPROVAL"},{},"");
+        if(canceller.joinable())canceller.join();
+        CHECK(c1.status!=0);
+        JsonPtr j1(json_tokener_parse(c1.out.c_str()));
+        CHECK(j1&&!strcmp(sget(j1.get(),"status"),"cancelled"));
+
+        // Daemon must still be alive and able to create + run sess-2!
+        long hc=0;
+        std::string health=http_req("GET","/api/health","",hc);
+        CHECK(hc==200&&health.find("\"ok\":true")!=std::string::npos);
+
+        long sc2=0;
+        std::string created=http_req("POST","/api/sessions","{\"mode\":\"full\"}",sc2);
+        CHECK(sc2==201&&created.find("sess-2")!=std::string::npos);
+
+        auto c2=run_desk({"attach",surl,"--session","sess-2","--token","tok-opt","--json","-p","QUICK_OK"},{},"");
+        CHECK(c2.status==0);
+        JsonPtr j2(json_tokener_parse(c2.out.c_str()));
+        CHECK(j2&&!strcmp(sget(j2.get(),"status"),"completed")&&strstr(sget(j2.get(),"reply"),"SESS2_ALIVE")!=nullptr);
+
+        kill(spid,SIGTERM);int sst=0;waitpid(spid,&sst,0);
+        stop_lm=true;if(lm_thr.joinable())lm_thr.join();close(lm);
+        app_cleanup(&a);
+    }
+}
 int main(int argc,char **argv){
     if(argc==2&&!strcmp(argv[1],"--mcp-fixture"))return mcp_fixture();
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -4915,6 +5081,7 @@ int main(int argc,char **argv){
     RUN_STEP(test_v1_16_features());
     RUN_STEP(test_v1_17_features());
     RUN_STEP(test_v1_18_features());
+    RUN_STEP(test_cpp_optimizations());
     RUN_STEP(test_plan_rewind_session());
     RUN_STEP(test_chat_actions_layout());
     RUN_STEP(test_menu_navigation_and_resize());

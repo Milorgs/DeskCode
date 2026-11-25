@@ -123,6 +123,9 @@ struct App {
     // reply_out (or the JSON result) and is not echoed to the human stream.
     FILE *reply_out=nullptr;
     bool json_output=false;
+    bool quiet_human=false;
+    std::atomic<bool> *cancel_requested=nullptr;
+    std::vector<std::pair<std::string,std::string>> extra_env{};
     // When non-null, run_task appends one {name,target,ok} entry per tool call.
     J *trace=nullptr;
     // Set when an approval was needed but no interactive terminal could answer.
@@ -141,6 +144,23 @@ struct App {
 };
 extern std::atomic<int> interrupted;
 extern std::atomic<bool> input_closed;
+inline bool app_cancelled(const App &app) noexcept {
+    return interrupted.load(std::memory_order_relaxed)!=0||
+           (app.cancel_requested&&app.cancel_requested->load(std::memory_order_relaxed));
+}
+inline bool app_cancelled(const App *app) noexcept {
+    return app?app_cancelled(*app):(interrupted.load(std::memory_order_relaxed)!=0);
+}
+inline void hex_encode_lower(const unsigned char *bytes,size_t len,char *out) noexcept {
+    static constexpr char hex[]="0123456789abcdef";
+    for(size_t i=0;i<len;i++){
+        out[i*2]=hex[bytes[i]>>4];
+        out[i*2+1]=hex[bytes[i]&0x0f];
+    }
+    out[len*2]='\0';
+}
+std::string sanitize_utf8(std::string_view data);
+std::string latest_command_line(std::string_view chunk);
 void progress(App *app,const char *text);
 void check_exit(const App &app);
 void progress_clear(App *app);
@@ -295,7 +315,7 @@ void desktop_destroy(App *a);
 bool desktop_compiled(void);
 void reset_session(App *a);
 int run_task(App *a,const char *task);
-J *context(App *a,J *tools,bool *compacted=nullptr);
+J *context(App *a,J *tools,bool *compacted=nullptr,size_t *used_bytes=nullptr);
 void save_record(App *a);
 void app_cleanup(App *a);
 // Token accounting and optional per-profile prices (price_input,

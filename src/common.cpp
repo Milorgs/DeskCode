@@ -46,6 +46,7 @@ static void draw_progress(App *app){
     }
 }
 void progress_clear(App *app){
+    if(!app||app->quiet_human)return;
     if(app->progress_visible){
 #ifdef _WIN32
         fputs(app->progress_animated?"\r\033[2K":"\r                              \r",stdout);
@@ -56,6 +57,7 @@ void progress_clear(App *app){
     }
 }
 void progress(App *app,const char *text){
+    if(!app||app->quiet_human)return;
     progress_clear(app);
     // The controller renders the live timer without touching the input line.
     if(app->thinking&&app->conversation_worker&&app->task_events>=0)return;
@@ -75,7 +77,7 @@ void progress(App *app,const char *text){
     fflush(stdout);
 }
 void progress_tick(App *app){
-    if(!app->progress_visible||!app->progress_animated||interrupted)return;
+    if(!app||app->quiet_human||!app->progress_visible||!app->progress_animated||app_cancelled(app))return;
     const double now=monotime();
     if(now-app->progress_updated<0.2)return;
     app->progress_updated=now;
@@ -112,13 +114,23 @@ bool tool_failed(J *r){
     return get(r,"error")||bget(r,"denied")||bget(r,"timed_out")||iget(r,"exit_code",0)!=0||(accepted&&!json_object_get_boolean(accepted));
 }
 bool valid_utf8(std::string_view text) noexcept {
-    for(size_t i=0;i<text.size();){
-        auto c=static_cast<unsigned char>(text[i]);
-        size_t width=c<0x80?1:(c>=0xc2&&c<=0xdf)?2:(c>=0xe0&&c<=0xef)?3:(c>=0xf0&&c<=0xf4)?4:0;
-        if(!width||width>text.size()-i)return false;
-        for(size_t k=1;k<width;k++)if((static_cast<unsigned char>(text[i+k])&0xc0)!=0x80)return false;
+    const auto *p=reinterpret_cast<const unsigned char *>(text.data());
+    const size_t len=text.size();
+    for(size_t i=0;i<len;){
+        while(i+8<=len){
+            std::uint64_t word=0;
+            memcpy(&word,p+i,sizeof word);
+            if(word&0x8080808080808080ULL)break;
+            i+=8;
+        }
+        if(i>=len)break;
+        const unsigned char c=p[i];
+        if(c<0x80){i++;continue;}
+        const size_t width=(c>=0xc2&&c<=0xdf)?2:(c>=0xe0&&c<=0xef)?3:(c>=0xf0&&c<=0xf4)?4:0;
+        if(!width||width>len-i)return false;
+        for(size_t k=1;k<width;k++)if((p[i+k]&0xc0)!=0x80)return false;
         if(width>=3){
-            auto next=static_cast<unsigned char>(text[i+1]);
+            const unsigned char next=p[i+1];
             if((c==0xe0&&next<0xa0)||(c==0xed&&next>=0xa0)||(c==0xf0&&next<0x90)||(c==0xf4&&next>=0x90))return false;
         }
         i+=width;
@@ -145,7 +157,7 @@ void seterr(App *a,const char *m){
     snprintf(a->error,sizeof a->error,"%s",m);
 }
 double monotime(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
-void id_string(char out[33]){unsigned char bytes[16];if(RAND_bytes(bytes,16)!=1)throw std::runtime_error("Random generation failed");for(size_t i=0;i<16;i++)snprintf(out+i*2,3,"%02x",bytes[i]);}
+void id_string(char out[33]){unsigned char bytes[16];if(RAND_bytes(bytes,16)!=1)throw std::runtime_error("Random generation failed");hex_encode_lower(bytes,16,out);}
 void app_cleanup(App *a){
     subagents_destroy(a);
     shells_destroy(a);
@@ -203,7 +215,7 @@ std::vector<std::string> approval_choices(bool preview,bool allow_session_rule){
     return items;
 }
 int approve(App *a,const char *description,Operation operation,const char *title){
-    if(interrupted)return 0;
+    if(app_cancelled(a))return 0;
     if(!approval_required(*a,operation)){if(a->verbose)printf("\n%s\n",description);return 1;}
     if(a->approval_hook)return a->approval_hook(title?title:"",description,static_cast<int>(operation));
     progress_clear(a);
@@ -336,20 +348,84 @@ bool record_tokens(App &app,J *config,std::uint64_t amount){
     if(!json_object_is_type(models,json_type_object))return false;
     auto total=add_tokens(model_tokens(usage.get(),config),amount);
     put(models,sget(config,"model"),json_object_new_uint64(total));
-    const char *text=json_object_to_json_string_ext(usage.get(),JSON_C_TO_STRING_PLAIN);
-    return strlen(text)<=1048576&&atomic_file(path,text,strlen(text),0600)==0;
+    size_t text_len=0;
+    const char *text=json_object_to_json_string_length(usage.get(),JSON_C_TO_STRING_PLAIN,&text_len);
+    return text_len<=1048576&&atomic_file(path,text,text_len,0600)==0;
+}
+
+std::string sanitize_utf8(std::string_view data){
+    if(valid_utf8(data))return std::string(data);
+    std::string safe;
+    const size_t len=data.size();
+    safe.reserve(len);
+    for(size_t i=0;i<len;){
+        const auto c=static_cast<unsigned char>(data[i]);
+        if(c<0x80){safe+=static_cast<char>(c);i++;continue;}
+        const size_t width=(c>=0xc2&&c<=0xdf)?2:(c>=0xe0&&c<=0xef)?3:(c>=0xf0&&c<=0xf4)?4:0;
+        bool valid=width&&i+width<=len;
+        for(size_t k=1;valid&&k<width;k++)if((static_cast<unsigned char>(data[i+k])&0xc0)!=0x80)valid=false;
+        if(valid&&width==3&&((c==0xe0&&static_cast<unsigned char>(data[i+1])<0xa0)||(c==0xed&&static_cast<unsigned char>(data[i+1])>=0xa0)))valid=false;
+        if(valid&&width==4&&((c==0xf0&&static_cast<unsigned char>(data[i+1])<0x90)||(c==0xf4&&static_cast<unsigned char>(data[i+1])>=0x90)))valid=false;
+        if(valid){safe.append(data.data()+i,width);i+=width;}
+        else{safe+="\xef\xbf\xbd";i++;}
+    }
+    return safe;
+}
+
+std::string latest_command_line(std::string_view chunk){
+    while(!chunk.empty()&&(chunk.back()=='\n'||chunk.back()=='\r'||chunk.back()==' '))chunk.remove_suffix(1);
+    if(chunk.empty())return {};
+    auto pos=chunk.find_last_of("\r\n");
+    std::string_view raw=pos==std::string_view::npos?chunk:chunk.substr(pos+1);
+    std::string clean;
+    clean.reserve(raw.size());
+    bool sp=false;
+    for(size_t i=0;i<raw.size();){
+        auto c=static_cast<unsigned char>(raw[i]);
+        if(c==0x1b&&i+1<raw.size()&&raw[i+1]=='['){
+            i+=2;
+            while(i<raw.size()&&!(raw[i]>='@'&&raw[i]<='~'))i++;
+            if(i<raw.size())i++;
+            continue;
+        }
+        if(c<32||c==127){
+            if(c=='\t'&&!clean.empty())sp=true;
+            i++;
+            continue;
+        }
+        if(c==' '){if(!clean.empty())sp=true;i++;continue;}
+        if(sp){clean+=' ';sp=false;}
+        clean+=static_cast<char>(c);
+        i++;
+    }
+    size_t used=0;
+    clean=display_utf8(clean,used,true);
+    if(clean.size()>72){
+        size_t cut=72;
+        while(cut>0&&(static_cast<unsigned char>(clean[cut])&0xc0)==0x80)--cut;
+        clean.resize(cut);
+        clean+="…";
+    }
+    return clean;
 }
 
 // Worker output is shown as it arrives. Invalid bytes become U+FFFD instead of
 // stalling the transcript; a sequence cut at the end waits for the rest unless
 // the worker has stopped producing output (final), when it becomes U+FFFD too.
 std::string display_utf8(std::string_view text,size_t &used,bool final){
+    if(final&&valid_utf8(text)){used=text.size();return std::string(text);}
     std::string shown;
     shown.reserve(text.size());
     size_t i=0;
     while(i<text.size()){
         const auto c=static_cast<unsigned char>(text[i]);
-        if(c<0x80){shown+=static_cast<char>(c);i++;continue;}
+        if(c<0x80){
+            size_t run=i+1;
+            while(run<text.size()&&static_cast<unsigned char>(text[run])<0x80)run++;
+            shown.append(text.data()+i,run-i);
+            i=run;
+            continue;
+        }
         const size_t width=c>=0xc2&&c<=0xdf?2:c>=0xe0&&c<=0xef?3:c>=0xf0&&c<=0xf4?4:0;
         if(!width){shown+="\xEF\xBF\xBD";i++;continue;}
         size_t have=1;

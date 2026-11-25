@@ -64,7 +64,9 @@ static size_t message_bytes(J *message){
     JsonPtr parsed;
     if(!json_object_is_type(blocks,json_type_array)){
         if(strcmp(sget(message,"role"),"tool"))return bytes;
-        parsed.reset(json_tokener_parse(sget(message,"content")));
+        const char *raw_content=sget(message,"content");
+        if(!strstr(raw_content,"\"image"))return bytes;
+        parsed.reset(json_tokener_parse(raw_content));
         blocks=get(parsed.get(),"content");
         if(!json_object_is_type(blocks,json_type_array))return bytes;
     }
@@ -77,8 +79,8 @@ static size_t message_bytes(J *message){
     return bytes;
 }
 
-static size_t context_bytes(J *messages,J *tools){
-    size_t total=json_bytes(tools);
+static size_t messages_sum_bytes(J *messages){
+    size_t total=0;
     for(size_t i=0;i<alen(messages);++i)total+=message_bytes(at(messages,i));
     return total;
 }
@@ -196,21 +198,26 @@ static void append_messages(J *dest,J *source,size_t start=0){
 
 // A trimmed request keeps a recap in front of it, unless that recap itself
 // pushes the request back over the budget.
-static J *with_recap(App *a,J *body,size_t first,J *tools){
+static J *with_recap(App *a,J *body,size_t first,size_t tools_bytes,size_t &body_bytes){
     if(!first)return body;
+    const std::string notes=recap(a->messages,0,first);
+    if(notes.empty())return body;
     JsonPtr original(body);
-    JsonPtr wrapped(arr());
-    append_recap(wrapped.get(),recap(a->messages,0,first));
-    append_messages(wrapped.get(),body);
-    if(context_bytes(wrapped.get(),tools)>context_limit())return original.release();
-    return wrapped.release();
+    JsonPtr recap_only(arr());
+    append_recap(recap_only.get(),notes);
+    const size_t recap_bytes=messages_sum_bytes(recap_only.get());
+    if(tools_bytes+body_bytes+recap_bytes>context_limit())return original.release();
+    body_bytes+=recap_bytes;
+    append_messages(recap_only.get(),original.get());
+    return recap_only.release();
 }
 
 // An older screenshot costs tokens on every later request while the newest views
 // answer the question being asked. Older ones become a note the model can act
 // on instead of megabytes of base64 it cannot read.
-static void strip_stale_images(J *messages){
+static bool strip_stale_images(J *messages){
     size_t kept=0;
+    bool modified=false;
     for(size_t i=alen(messages);i>0;--i){
         J *message=at(messages,i-1);
         const char *role=sget(message,"role");
@@ -228,11 +235,14 @@ static void strip_stale_images(J *messages){
                 json_object_object_del(block,"image_url");
                 put(block,"type",str("text"));
                 put(block,"text",str("[Image omitted from an earlier step.]"));
+                modified=true;
             }
             continue;
         }
         if(strcmp(role,"tool"))continue;
-        JsonPtr parsed(json_tokener_parse(sget(message,"content")));
+        const char *raw_content=sget(message,"content");
+        if(!strstr(raw_content,"\"image"))continue;
+        JsonPtr parsed(json_tokener_parse(raw_content));
         J *blocks=get(parsed.get(),"content");
         if(!json_object_is_type(blocks,json_type_array))continue;
         bool images=false;
@@ -246,12 +256,14 @@ static void strip_stale_images(J *messages){
             json_object_object_del(block,"image_url");
             put(block,"type",str("text"));
             put(block,"text",str("[Image omitted from an earlier step. Take a fresh screenshot if that view is still needed.]"));
+            modified=true;
         }
         put(message,"content",str(json_object_to_json_string_ext(parsed.get(),JSON_C_TO_STRING_PLAIN)));
     }
+    return modified;
 }
 
-static J *compact_context(App *a,J *tools,size_t first){
+static J *compact_context(App *a,size_t tools_bytes,size_t first,size_t &out_body_bytes){
     const size_t end=alen(a->messages);
     const size_t limit=context_limit();
     // The newest results keep their detail for as long as the budget allows.
@@ -269,26 +281,33 @@ static J *compact_context(App *a,J *tools,size_t first){
     };
 
     JsonPtr kept=build(true);
-    if(context_bytes(kept.get(),tools)<=limit)return with_recap(a,kept.release(),first,tools);
+    size_t kept_bytes=messages_sum_bytes(kept.get());
+    if(tools_bytes+kept_bytes<=limit){
+        out_body_bytes=kept_bytes;
+        return with_recap(a,kept.release(),first,tools_bytes,out_body_bytes);
+    }
     // Still too big: summarise every result, newest ones included. Their images
     // become notes, so the model keeps the shape of what it saw.
     JsonPtr terse=build(false);
-    if(context_bytes(terse.get(),tools)<=limit)return with_recap(a,terse.release(),first,tools);
+    const size_t terse_count=alen(terse.get());
+    std::vector<size_t> terse_used(terse_count+1,0);
+    for(size_t i=0;i<terse_count;++i)terse_used[i+1]=terse_used[i]+message_bytes(at(terse.get(),i));
+    if(tools_bytes+terse_used[terse_count]<=limit){
+        out_body_bytes=terse_used[terse_count];
+        return with_recap(a,terse.release(),first,tools_bytes,out_body_bytes);
+    }
 
     // Drop complete groups of calls and results from the front of this turn.
     // The latest user request stays intact even if all tool groups must be dropped.
-    const size_t tools_bytes=json_bytes(tools),terse_count=alen(terse.get());
-    std::vector<size_t> terse_used(terse_count+1,0);
-    for(size_t i=0;i<terse_count;++i)terse_used[i+1]=terse_used[i]+message_bytes(at(terse.get(),i));
     for(size_t start=1;start<terse_count;){
         ++start;
         while(start<terse_count&&!strcmp(sget(at(terse.get(),start),"role"),"tool"))++start;
         JsonPtr candidate(arr());
         append_recap(candidate.get(),recap(terse.get(),1,start));
-        size_t recap_bytes=0;
-        for(size_t i=0;i<alen(candidate.get());++i)recap_bytes+=message_bytes(at(candidate.get(),i));
+        const size_t recap_bytes=messages_sum_bytes(candidate.get());
         const size_t remaining_bytes=terse_used[1]+(terse_used[terse_count]-terse_used[start]);
         if(tools_bytes+recap_bytes+remaining_bytes<=limit){
+            out_body_bytes=recap_bytes+remaining_bytes;
             add(candidate.get(),copy(at(terse.get(),0)));
             append_messages(candidate.get(),terse.get(),start);
             return candidate.release();
@@ -297,40 +316,49 @@ static J *compact_context(App *a,J *tools,size_t first){
     return nullptr;
 }
 
-J *context(App *a,J *tools,bool *compacted){
-    auto attach_guide=[&](J *selected)->J*{
-        if(!selected||a->subagent)return selected;
-        std::string guide=load_project_guide(*a);
-        if(guide.empty())return selected;
-        JsonPtr sys(obj());
-        put(sys.get(),"role",str("system"));
-        put(sys.get(),"content",str(guide.c_str()));
-        if(message_bytes(sys.get())+context_bytes(selected,tools)>context_limit())return selected;
-        JsonPtr with_guide(arr());
-        add(with_guide.get(),sys.release());
-        append_messages(with_guide.get(),selected);
-        json_object_put(selected);
-        return with_guide.release();
+J *context(App *a,J *tools,bool *compacted,size_t *used_bytes){
+    const size_t tools_bytes=json_bytes(tools),limit=context_limit();
+    auto attach_guide=[&](J *selected,size_t body_bytes)->J*{
+        if(!selected){if(used_bytes)*used_bytes=0;return nullptr;}
+        if(!a->subagent){
+            std::string guide=load_project_guide(*a);
+            if(!guide.empty()){
+                JsonPtr sys(obj());
+                put(sys.get(),"role",str("system"));
+                put(sys.get(),"content",str(guide.c_str()));
+                const size_t sys_bytes=message_bytes(sys.get());
+                if(sys_bytes+body_bytes+tools_bytes<=limit){
+                    body_bytes+=sys_bytes;
+                    JsonPtr with_guide(arr());
+                    add(with_guide.get(),sys.release());
+                    append_messages(with_guide.get(),selected);
+                    json_object_put(selected);
+                    selected=with_guide.release();
+                }
+            }
+        }
+        if(used_bytes)*used_bytes=body_bytes+tools_bytes;
+        return selected;
     };
     if(compacted)*compacted=false;
     const size_t n=alen(a->messages);
     size_t first=n;
     for(size_t i=0;i<n;i++)if(!strcmp(sget(at(a->messages,i),"role"),"user"))first=i;
-    if(first==n)return attach_guide(copy(a->messages));
+    if(first==n)return attach_guide(copy(a->messages),messages_sum_bytes(a->messages));
 
     // Bill every message once, then walk back through whole turns while the
     // request still fits: the budget decides what is sent, not a turn count.
-    const size_t tools_bytes=json_bytes(tools),limit=context_limit();
     std::vector<size_t> used(n+1,0);
     for(size_t i=0;i<n;++i)used[i+1]=used[i]+message_bytes(at(a->messages,i));
     auto fits=[&](size_t start){return used[n]-used[start]+tools_bytes<=limit;};
 
     if(!fits(first)){
-        J *selected=compact_context(a,tools,first);
+        size_t compact_body=0;
+        J *selected=compact_context(a,tools_bytes,first,compact_body);
         if(selected){
             if(compacted)*compacted=true;
         }else seterr(a,tr("本轮超过上下文预算，请拆分任务或选择新建对话。"));
-        return attach_guide(selected);
+        return attach_guide(selected,compact_body);
     }
 
     // Try shortening bulky tool output before dropping an earlier turn.
@@ -358,8 +386,10 @@ J *context(App *a,J *tools,bool *compacted){
         if(i<first&&shortened[i])add(history.get(),shortened[i].release());
         else add(history.get(),copy(at(a->messages,i)));
     }
-    strip_stale_images(history.get());
-    return attach_guide(with_recap(a,history.release(),start,tools));
+    size_t body_bytes=total-tools_bytes;
+    if(strip_stale_images(history.get()))body_bytes=messages_sum_bytes(history.get());
+    J *wrapped=with_recap(a,history.release(),start,tools_bytes,body_bytes);
+    return attach_guide(wrapped,body_bytes);
 }
 J *parse_tool_arguments(const char *text){
     size_t length=strlen(text);
@@ -643,7 +673,7 @@ int run_task(App *a,const char *task){
     std::unique_ptr<ResourceLock> desktop_lock;
     if(a->desktop){
         desktop_lock=std::make_unique<ResourceLock>(*a,true);
-        if(!desktop_lock->acquired()){seterr(a,tr("桌面资源等待已取消、被占用或无法加锁；请返回对应对话处理已有操作。"));a->state=interrupted?"已取消":"失败";return -1;}
+        if(!desktop_lock->acquired()){seterr(a,tr("桌面资源等待已取消、被占用或无法加锁；请返回对应对话处理已有操作。"));a->state=app_cancelled(a)?"已取消":"失败";return -1;}
     }
     if(!a->messages)reset_session(a);
     if(!a->subagent){
@@ -680,20 +710,21 @@ int run_task(App *a,const char *task){
     // Chat replies hang under the "● " marker; one-shot output stays flush.
     const int reply_indent=*reply_marker?2:0;
     // Headless runs keep the reply off the human stream entirely.
-    const bool quiet_reply=a->reply_out||a->json_output;
-    for(std::uint64_t step=1;!interrupted;++step){
+    const bool quiet_reply=a->reply_out||a->json_output||a->quiet_human;
+    for(std::uint64_t step=1;!app_cancelled(a);++step){
         if(a->max_steps>0&&step>static_cast<std::uint64_t>(a->max_steps))break;
         bool compacted=false;
-        J *history=context(a,tools,&compacted);
+        size_t used=0;
+        J *history=context(a,tools,&compacted,&used);
         if(!history)break;
         {
             // Rounded up so any content shows at least 1%.
-            const size_t limit=context_limit(),used=context_bytes(history,tools);
+            const size_t limit=context_limit();
             task_context(*a,static_cast<int>(std::min<size_t>(100,(used*100+limit-1)/limit)));
         }
         if(compacted&&!announced_compaction){
             progress_clear(a);
-            puts(tr("已压缩上下文，继续当前任务。"));
+            if(!a->quiet_human)puts(tr("已压缩上下文，继续当前任务。"));
             announced_compaction=true;
         }
         J *reply=nullptr;
@@ -766,7 +797,7 @@ int run_task(App *a,const char *task){
         else if(a->verbose&&*sget(reply,"content"))printf("%s%s\n",reply_marker,ui_markdown(sget(reply,"content"),reply_indent).c_str());
         for(size_t i=0;i<alen(calls);i++){
             J *call=at(calls,i),*fn=get(call,"function");
-            if(interrupted){
+            if(app_cancelled(a)){
                 pending(a,calls,i);
                 goto done;
             }
@@ -797,7 +828,7 @@ int run_task(App *a,const char *task){
                 else if(!strcmp(name,"desktop_screenshot")||*sget(args,"app"))desktop_unverified=false;
             }
             if(a->verbose)show_result(name,result,monotime()-tool_started);
-            else if(failed){
+            else if(failed&&!a->quiet_human){
                 progress_clear(a);
                 if(*sget(result,"error"))fprintf(stderr,"%s\n",sget(result,"error"));
                 else fprintf(stderr,tr("操作失败（退出码 %d）。\n"),iget(result,"exit_code",-1));
@@ -845,7 +876,7 @@ int run_task(App *a,const char *task){
                 rc=0;
                 goto done;
             }
-            if(denied||interrupted){
+            if(denied||app_cancelled(a)){
                 pending(a,calls,i+1);
                 if(denied)a->state="已取消";
                 seterr(a,denied?tr("操作已取消。"):tr("任务已停止。"));
@@ -855,14 +886,15 @@ int run_task(App *a,const char *task){
     }
     done:
     progress_clear(a);
-    if(!a->error[0]&&rc)seterr(a,interrupted?tr("任务已停止。"):tr("达到步骤上限，任务未确认完成。"));
-    if(interrupted)a->state="已取消";
+    const bool cancelled=app_cancelled(a);
+    if(!a->error[0]&&rc)seterr(a,cancelled?tr("任务已停止。"):tr("达到步骤上限，任务未确认完成。"));
+    if(cancelled)a->state="已取消";
     else if(rc&&strcmp(a->state,"已取消"))a->state="失败";
-    if(rc&&!interrupted&&a->approval_unavailable)
+    if(rc&&!cancelled&&a->approval_unavailable)
         seterr(a,tr("需要批准，但当前没有可交互的终端；请使用 --approval edit 或 --approval full 重新运行。"));
-    {
+    if(!a->quiet_human){
         // One closing line per turn: how long it worked, tokens used, outcome.
-        const char *outcome=rc==0?tr("完成"):interrupted||!strcmp(a->state,"已取消")?tr("已停止"):tr("未完成");
+        const char *outcome=rc==0?tr("完成"):cancelled||!strcmp(a->state,"已取消")?tr("已停止"):tr("未完成");
         std::string line="  "+std::string(tr("用时"))+" "+elapsed_label(monotime()-task_started);
         if(a->task_tokens){
             char tokens[64];

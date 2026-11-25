@@ -205,9 +205,19 @@ int run_git(const std::string &cwd,const std::vector<std::string> &args,std::str
     GetExitCodeProcess(process.get(),&exit_code);
     return static_cast<int>(exit_code);
 #else
+    auto cloexec_pipe=[](int fds[2])->int{
+#ifdef __linux__
+        return pipe2(fds,O_CLOEXEC);
+#else
+        if(pipe(fds)!=0)return -1;
+        fcntl(fds[0],F_SETFD,FD_CLOEXEC);
+        fcntl(fds[1],F_SETFD,FD_CLOEXEC);
+        return 0;
+#endif
+    };
     int in_pipe[2],out_pipe[2];
-    if(pipe(in_pipe))return -1;
-    if(pipe(out_pipe)){close(in_pipe[0]);close(in_pipe[1]);return -1;}
+    if(cloexec_pipe(in_pipe))return -1;
+    if(cloexec_pipe(out_pipe)){close(in_pipe[0]);close(in_pipe[1]);return -1;}
     pid_t child=fork();
     if(child<0){
         close(in_pipe[0]);close(in_pipe[1]);close(out_pipe[0]);close(out_pipe[1]);
@@ -228,23 +238,34 @@ int run_git(const std::string &cwd,const std::vector<std::string> &args,std::str
         _exit(127);
     }
     close(in_pipe[0]);close(out_pipe[1]);
-    if(!stdin_data.empty()){
-        size_t off=0;
-        while(off<stdin_data.size()){
-            ssize_t w=write(in_pipe[1],stdin_data.data()+off,stdin_data.size()-off);
-            if(w<=0){if(w<0&&errno==EINTR)continue;break;}
-            off+=static_cast<size_t>(w);
+    fcntl(in_pipe[1],F_SETFL,O_NONBLOCK);
+    fcntl(out_pipe[0],F_SETFL,O_NONBLOCK);
+    size_t in_off=0;
+    if(stdin_data.empty()){close(in_pipe[1]);in_pipe[1]=-1;}
+    bool out_open=true;
+    const double deadline=monotime()+15.0;
+    char buf[4096];
+    while((in_pipe[1]>=0||out_open)&&monotime()<deadline){
+        pollfd pfds[2]{};
+        nfds_t nfds=0;
+        int in_idx=-1,out_idx=-1;
+        if(in_pipe[1]>=0){in_idx=static_cast<int>(nfds);pfds[nfds++]={in_pipe[1],POLLOUT,0};}
+        if(out_open){out_idx=static_cast<int>(nfds);pfds[nfds++]={out_pipe[0],POLLIN,0};}
+        if(poll(pfds,nfds,100)<=0)continue;
+        if(in_idx>=0&&(pfds[in_idx].revents&(POLLOUT|POLLERR|POLLHUP))){
+            ssize_t w=write(in_pipe[1],stdin_data.data()+in_off,stdin_data.size()-in_off);
+            if(w>0)in_off+=static_cast<size_t>(w);
+            if(in_off>=stdin_data.size()||(w<0&&errno!=EAGAIN&&errno!=EINTR)){close(in_pipe[1]);in_pipe[1]=-1;}
+        }
+        if(out_idx>=0&&(pfds[out_idx].revents&(POLLIN|POLLERR|POLLHUP))){
+            ssize_t n=read(out_pipe[0],buf,sizeof buf);
+            if(n>0){if(output.size()<262144)output.append(buf,static_cast<size_t>(n));}
+            else if(n==0||(n<0&&errno!=EAGAIN&&errno!=EINTR))out_open=false;
         }
     }
-    close(in_pipe[1]);
-    char buf[4096];
-    for(;;){
-        ssize_t n=read(out_pipe[0],buf,sizeof buf);
-        if(n<0&&errno==EINTR)continue;
-        if(n<=0)break;
-        if(output.size()<262144)output.append(buf,static_cast<size_t>(n));
-    }
+    if(in_pipe[1]>=0)close(in_pipe[1]);
     close(out_pipe[0]);
+    if(out_open)kill(child,SIGKILL);
     int status=0;
     while(waitpid(child,&status,0)<0)if(errno!=EINTR)return -1;
     return WIFEXITED(status)?WEXITSTATUS(status):-1;
@@ -431,6 +452,8 @@ JsonPtr run_subagent_loop(SubagentRunSpec &spec,std::atomic<bool> &cancel_flag,s
     sub.max_steps=spec.agent.max_steps;
     sub.task_events=-1;
     sub.json_output=true;
+    sub.quiet_human=true;
+    sub.cancel_requested=&cancel_flag;
     auto cleanup=[](App *v){app_cleanup(v);};
     std::unique_ptr<App,decltype(cleanup)> guard(&sub,cleanup);
 
@@ -457,7 +480,7 @@ JsonPtr run_subagent_loop(SubagentRunSpec &spec,std::atomic<bool> &cancel_flag,s
     std::string reply_text,fail_error;
     int steps_used=0;
     const int max_steps=std::max(1,spec.agent.max_steps);
-    for(int step=1;step<=max_steps&&!interrupted&&!cancel_flag;++step){
+    for(int step=1;step<=max_steps&&!app_cancelled(&sub);++step){
         steps_used=step;
         JsonPtr history(context(&sub,sub_tools.get()));
         if(!history){fail_error=sub.error[0]?sub.error:tr("子任务上下文超出预算。");break;}
@@ -480,7 +503,7 @@ JsonPtr run_subagent_loop(SubagentRunSpec &spec,std::atomic<bool> &cancel_flag,s
         }
         if(!fail_error.empty())break;
         add(sub.messages,reply.release());
-        for(size_t i=0;i<alen(calls)&&!interrupted&&!cancel_flag;i++){
+        for(size_t i=0;i<alen(calls)&&!app_cancelled(&sub);i++){
             J *call=at(calls,i),*fn=get(call,"function");
             const char *cname=sget(fn,"name");
             note_path(sget(parsed_args[i].get(),"path"));
@@ -493,7 +516,7 @@ JsonPtr run_subagent_loop(SubagentRunSpec &spec,std::atomic<bool> &cancel_flag,s
         }
     }
 
-    const bool cancelled=interrupted||cancel_flag;
+    const bool cancelled=app_cancelled(&sub);
     if(!cancelled&&fail_error.empty()&&reply_text.empty()){
         J *ask=obj();
         put(ask,"role",str("user"));
@@ -680,10 +703,11 @@ J *tool_delegate_task(App *app,J *args){
     }
 
     if(!background){
-        std::atomic<bool> cancel_flag{false};
+        std::atomic<bool> local_cancel{false};
+        std::atomic<bool> &effective_cancel=app->cancel_requested?*app->cancel_requested:local_cancel;
         std::uint64_t tokens=0;
         TokenUsage usage{};
-        JsonPtr result=run_subagent_loop(*spec,cancel_flag,tokens,usage);
+        JsonPtr result=run_subagent_loop(*spec,effective_cancel,tokens,usage);
         if(tokens){
             app->task_tokens=add_tokens(app->task_tokens,tokens);
             task_tokens(*app);
@@ -734,11 +758,11 @@ J *tool_subagent_output(App *app,J *args){
         std::unique_lock lock(job.mutex);
         if(wait_done&&!job.finished){
             const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(120);
-            while(!job.finished&&!interrupted&&std::chrono::steady_clock::now()<deadline){
+            while(!job.finished&&!app_cancelled(app)&&std::chrono::steady_clock::now()<deadline){
                 job.cv.wait_for(lock,std::chrono::milliseconds(100));
             }
         }
-        if(interrupted&&!job.finished){
+        if(app_cancelled(app)&&!job.finished){
             job.cancel=true;
             return err(tr("任务已停止。"));
         }

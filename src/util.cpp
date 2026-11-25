@@ -16,7 +16,7 @@
 #include <algorithm>
 #include <readline/readline.h>
 char *read_bytes(const char *path,size_t limit,size_t *length){
-    int fd=open(path,O_RDONLY|O_NOFOLLOW);
+    int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
     if(fd<0)return NULL;
     struct stat st;
     if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<0||(size_t)st.st_size>limit){
@@ -24,14 +24,30 @@ char *read_bytes(const char *path,size_t limit,size_t *length){
         errno=EFBIG;
         return NULL;
     }
-    char *buffer=static_cast<char *>(malloc(limit+1));
+    size_t cap=st.st_size>0?static_cast<size_t>(st.st_size):std::min<size_t>(limit,4096);
+    char *buffer=static_cast<char *>(malloc(cap+1));
     if(!buffer){
         close(fd);
         return NULL;
     }
     size_t n=0;
-    while(n<limit){
-        ssize_t r=read(fd,buffer+n,limit-n);
+    for(;;){
+        if(n==cap){
+            char extra;
+            ssize_t extra_count;
+            do{extra_count=read(fd,&extra,1);}while(extra_count<0&&errno==EINTR);
+            if(extra_count<0){free(buffer);close(fd);return NULL;}
+            if(extra_count==0)break;
+            if(n==limit){free(buffer);close(fd);errno=EFBIG;return NULL;}
+            size_t next_cap=std::min<size_t>(limit,std::max<size_t>(cap*2,cap+4096));
+            char *grown=static_cast<char *>(realloc(buffer,next_cap+1));
+            if(!grown){free(buffer);close(fd);return NULL;}
+            buffer=grown;
+            cap=next_cap;
+            buffer[n++]=extra;
+            continue;
+        }
+        ssize_t r=read(fd,buffer+n,cap-n);
         if(r<0&&errno==EINTR)continue;
         if(r<0){
             free(buffer);
@@ -40,12 +56,6 @@ char *read_bytes(const char *path,size_t limit,size_t *length){
         }
         if(!r)break;
         n+=(size_t)r;
-    }
-    if(n==limit){
-        char extra;
-        ssize_t extra_count;
-        do{extra_count=read(fd,&extra,1);}while(extra_count<0&&errno==EINTR);
-        if(extra_count!=0){free(buffer);close(fd);errno=EFBIG;return NULL;}
     }
     close(fd);
     buffer[n]=0;
@@ -84,6 +94,7 @@ int atomic_file(const char *path,const void *data,size_t len,unsigned int mode){
     if(snprintf(tmp,sizeof tmp,"%s.tmp-XXXXXX",path)>=(int)sizeof tmp)return -1;
     int fd=mkstemp(tmp);
     if(fd<0)return -1;
+    fcntl(fd,F_SETFD,FD_CLOEXEC);
     int rc=fchmod(fd,mode);
     size_t n=0;
     while(!rc&&n<len){

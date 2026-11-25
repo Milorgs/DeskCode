@@ -46,7 +46,7 @@ size_t decode(std::string_view text,uint32_t &code){
 // Emoji with default emoji presentation (Unicode East Asian Width "W") are
 // listed too: terminals draw ✅ ❌ ✨ 🚀 ⭐ two cells wide.
 int cell_width(uint32_t code){
-    if(code<32||code==127)return 0;
+    if(code<0x0300)return (code>=32&&code!=127)?1:0;
     if((code>=0x0300&&code<=0x036f)||(code>=0x200b&&code<=0x200f)||(code>=0xfe00&&code<=0xfe0f))return 0;
     if((code>=0x1100&&code<=0x115f)||(code>=0x2e80&&code<=0xa4cf)||
        (code>=0xac00&&code<=0xd7a3)||(code>=0xf900&&code<=0xfaff)||
@@ -92,6 +92,18 @@ std::string ui_number(std::string_view text,Tone normal){
 int ui_width(std::string_view text){
     int cells=0;
     while(!text.empty()){
+        const auto first=static_cast<unsigned char>(text[0]);
+        if(first>=32&&first<127){
+            size_t run=1;
+            while(run<text.size()){
+                const auto b=static_cast<unsigned char>(text[run]);
+                if(b<32||b>=127)break;
+                run++;
+            }
+            cells+=static_cast<int>(run);
+            text.remove_prefix(run);
+            continue;
+        }
         if(size_t skip=escape_length(text)){text.remove_prefix(skip);continue;}
         uint32_t code=0;
         size_t size=decode(text,code);

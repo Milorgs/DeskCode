@@ -23,9 +23,24 @@ char *read_bytes(const char *path,size_t limit,size_t *length){
     if(!file){file_errno();return nullptr;}
     BY_HANDLE_FILE_INFORMATION info{};LARGE_INTEGER size{};
     if(!GetFileInformationByHandle(file.get(),&info)||!GetFileSizeEx(file.get(),&size)||GetFileType(file.get())!=FILE_TYPE_DISK||(info.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT))||size.QuadPart<0||static_cast<unsigned long long>(size.QuadPart)>limit){errno=EFBIG;return nullptr;}
-    char *data=static_cast<char *>(malloc(limit+1));if(!data)return nullptr;size_t used=0;
-    while(used<limit){DWORD count=0;if(!ReadFile(file.get(),data+used,static_cast<DWORD>((std::min)(limit-used,static_cast<size_t>(65536))),&count,nullptr)){free(data);file_errno();return nullptr;}if(!count)break;used+=count;}
-    if(used==limit){char byte;DWORD count=0;if(!ReadFile(file.get(),&byte,1,&count,nullptr)||count){free(data);errno=EFBIG;return nullptr;}}
+    size_t cap=size.QuadPart>0?static_cast<size_t>(size.QuadPart):(std::min)(limit,static_cast<size_t>(4096));
+    char *data=static_cast<char *>(malloc(cap+1));if(!data)return nullptr;size_t used=0;
+    for(;;){
+        if(used==cap){
+            char byte=0;DWORD count=0;
+            if(!ReadFile(file.get(),&byte,1,&count,nullptr)){free(data);file_errno();return nullptr;}
+            if(!count)break;
+            if(used==limit){free(data);errno=EFBIG;return nullptr;}
+            size_t next_cap=(std::min)(limit,(std::max)(cap*2,cap+static_cast<size_t>(4096)));
+            char *grown=static_cast<char *>(realloc(data,next_cap+1));
+            if(!grown){free(data);return nullptr;}
+            data=grown;cap=next_cap;data[used++]=byte;continue;
+        }
+        DWORD count=0;
+        if(!ReadFile(file.get(),data+used,static_cast<DWORD>((std::min)(cap-used,static_cast<size_t>(65536))),&count,nullptr)){free(data);file_errno();return nullptr;}
+        if(!count)break;
+        used+=count;
+    }
     data[used]=0;if(length)*length=used;return data;
 }
 int mkdirs(const char *path,unsigned int mode){

@@ -35,7 +35,7 @@ char *sha256(const void *data,size_t len){
     if(!EVP_Digest(data,len,hash,&n,EVP_sha256(),NULL))return NULL;
     char *out=static_cast<char *>(malloc(n*2+1));
     if(!out)return NULL;
-    for(unsigned int i=0;i<n;i++)snprintf(out+i*2,3,"%02x",hash[i]);
+    hex_encode_lower(hash,n,out);
     return out;
 }
 int resolve_file(App *a,const char *path,char out[PATH_MAX]){
@@ -190,6 +190,61 @@ static J *file_read_editable(App *a,const char *path){
     free(bytes);
     return result;
 }
+namespace {
+struct FastTreeGuard {
+    fs::path root;
+    fs::path config;
+    bool check_config=false;
+    explicit FastTreeGuard(const App *a):root(fs_path(a->root)){
+        if(*a->config_dir){
+            std::error_code ec;
+            config=fs::weakly_canonical(fs_path(a->config_dir),ec);
+            check_config=!ec&&path_inside(root,config);
+        }
+    }
+    static bool forbidden_leaf(std::string_view raw){
+        if(raw.empty()||raw=="."||raw=="..")return true;
+#ifdef _WIN32
+        if(raw.find(':')!=std::string_view::npos||raw.back()=='.'||raw.back()==' ')return true;
+        std::string name(raw);
+        for(char &c:name)c=static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        std::string_view sv=name;
+        std::string_view base=sv.substr(0,sv.find('.'));
+        if(base=="con"||base=="prn"||base=="aux"||base=="nul"||
+           (base.size()==4&&(base.starts_with("com")||base.starts_with("lpt"))&&base[3]>='0'&&base[3]<='9'))return true;
+#else
+        std::string_view sv=raw;
+#endif
+        return sv==".git"||sv==".desk-agent"||sv==".ssh"||sv==".gnupg"||
+               (sv.starts_with(".env")&&(sv.size()==4||sv[4]=='.')&&sv!=".env.example");
+    }
+    bool allow_nonlink_child(const fs::path &child,std::string_view leaf,size_t full_str_len) const {
+        if(full_str_len>=PATH_MAX||forbidden_leaf(leaf))return false;
+        if(check_config&&path_inside(config,child))return false;
+        return true;
+    }
+};
+inline unsigned char ascii_fold(unsigned char c) noexcept {
+    return (c>='A'&&c<='Z')?static_cast<unsigned char>(c+32):c;
+}
+size_t find_ci(std::string_view hay,std::string_view needle) noexcept {
+    if(needle.empty())return 0;
+    if(hay.size()<needle.size())return std::string_view::npos;
+    const unsigned char f0=ascii_fold(static_cast<unsigned char>(needle[0]));
+    const unsigned char u0=(f0>='a'&&f0<='z')?static_cast<unsigned char>(f0-32):f0;
+    const char *data=hay.data();
+    const size_t limit=hay.size()-needle.size(),nlen=needle.size();
+    for(size_t i=0;i<=limit;i++){
+        const auto c=static_cast<unsigned char>(data[i]);
+        if(c!=f0&&c!=u0)continue;
+        size_t k=1;
+        while(k<nlen&&ascii_fold(static_cast<unsigned char>(data[i+k]))==ascii_fold(static_cast<unsigned char>(needle[k])))k++;
+        if(k==nlen)return i;
+    }
+    return std::string_view::npos;
+}
+} // namespace
+
 static J *file_list(App *a,const char *path,J *args=nullptr){
     char full[PATH_MAX];
     if(resolve_file(a,path,full))return err(a->error);
@@ -202,11 +257,17 @@ static J *file_list(App *a,const char *path,J *args=nullptr){
     std::error_code ec;
     fs::path base=fs_path(full);
     if(!fs::is_directory(base,ec)||ec)return err(tr("无法读取文件夹。"));
+    const FastTreeGuard guard(a);
     struct ListedEntry {
         std::string name;
         bool directory=false,symlink=false;
         bool has_size=false;
         std::uint64_t size=0;
+    };
+    struct RawDirEntry {
+        fs::directory_entry item;
+        std::string leaf;
+        bool is_link=false,is_dir=false;
     };
     std::vector<ListedEntry> collected;
     bool truncated=false;
@@ -214,37 +275,38 @@ static J *file_list(App *a,const char *path,J *args=nullptr){
         std::error_code iter_ec;
         fs::directory_iterator directory(dir,iter_ec);
         if(iter_ec)return;
-        std::vector<fs::directory_entry> items;
+        std::vector<RawDirEntry> items;
         for(auto it=directory;it!=fs::directory_iterator{};it.increment(iter_ec)){
             if(iter_ec)break;
-            items.push_back(*it);
+            std::error_code st_ec;
+            const bool link=path_link(it->path());
+            const bool d=!link&&it->is_directory(st_ec);
+            items.push_back({*it,path_text(it->path().filename()),link,d});
         }
-        std::sort(items.begin(),items.end(),[](const fs::directory_entry &lhs,const fs::directory_entry &rhs){
-            std::error_code lec,rec;
-            const bool ldir=lhs.is_directory(lec)&&!path_link(lhs.path());
-            const bool rdir=rhs.is_directory(rec)&&!path_link(rhs.path());
-            if(ldir!=rdir)return ldir>rdir;
-            return path_text(lhs.path().filename())<path_text(rhs.path().filename());
+        std::sort(items.begin(),items.end(),[](const RawDirEntry &lhs,const RawDirEntry &rhs){
+            if(lhs.is_dir!=rhs.is_dir)return lhs.is_dir>rhs.is_dir;
+            return lhs.leaf<rhs.leaf;
         });
-        for(const auto &item:items){
+        for(const auto &raw:items){
             if(collected.size()>=200){truncated=true;return;}
-            std::string leaf=path_text(item.path().filename());
-            if(depth>1&&search_skip(leaf.c_str()))continue;
-            std::string child=path_text(item.path());
-            char resolved[PATH_MAX];
-            if(resolve_file(a,child.c_str(),resolved))continue;
+            if(depth>1&&search_skip(raw.leaf.c_str()))continue;
+            const std::string child=path_text(raw.item.path());
+            if(raw.is_link){
+                char resolved[PATH_MAX];
+                if(resolve_file(a,child.c_str(),resolved))continue;
+            }else if(!guard.allow_nonlink_child(raw.item.path(),raw.leaf,child.size())){
+                continue;
+            }
+            std::string rel=max_depth==1?raw.leaf:path_text(raw.item.path().lexically_relative(base));
+            ListedEntry entry{std::move(rel),raw.is_dir,raw.is_link,false,0};
             std::error_code item_ec;
-            const bool link=path_link(item.path());
-            const bool is_dir=!link&&item.is_directory(item_ec);
-            std::string rel=max_depth==1?leaf:path_text(item.path().lexically_relative(base));
-            ListedEntry entry{std::move(rel),is_dir,link,false,0};
-            if(!link&&!is_dir&&item.is_regular_file(item_ec)){
-                auto bytes=item.file_size(item_ec);
+            if(!raw.is_link&&!raw.is_dir&&raw.item.is_regular_file(item_ec)){
+                auto bytes=raw.item.file_size(item_ec);
                 if(!item_ec){entry.has_size=true;entry.size=bytes;}
             }
             collected.push_back(std::move(entry));
-            if(is_dir&&depth<max_depth){
-                self(self,item.path(),depth+1);
+            if(raw.is_dir&&depth<max_depth){
+                self(self,raw.item.path(),depth+1);
                 if(truncated)return;
             }
         }
@@ -265,6 +327,7 @@ static J *file_list(App *a,const char *path,J *args=nullptr){
 }
 struct Search {
     App *app;
+    FastTreeGuard guard;
     const char *query;
     bool case_insensitive=false;
     bool use_regex=false;
@@ -277,7 +340,7 @@ struct Search {
     bool truncated=false;
 };
 static bool search_limit(Search *s){
-    if(interrupted||s->entries>=40000||s->files>=4000||s->bytes>=32*1024*1024||alen(s->matches)>=120||monotime()>s->until)s->truncated=true;
+    if(app_cancelled(s->app)||s->entries>=40000||s->files>=4000||s->bytes>=32*1024*1024||alen(s->matches)>=120||monotime()>s->until)s->truncated=true;
     return s->truncated;
 }
 static bool search_skip(const char *name){
@@ -301,34 +364,41 @@ static void emit_search_match(Search *s,const char *relative,size_t line,char *l
     put(m,"line_truncated",json_object_new_boolean(start!=line_start||start+length<end));
     add(s->matches,m);
 }
-static void search_walk(Search *s,const char *path,int depth){
+static void search_walk(Search *s,const fs::path &source,const std::string &full_str,const std::string &rel_hint,int depth,bool prevalidated){
     if(search_limit(s))return;
     s->entries++;
-    std::error_code ec;fs::path source=fs_path(path);
     if(path_link(source)){s->skipped++;return;}
+    std::error_code ec;
     auto status=fs::symlink_status(source,ec);if(ec){s->skipped++;return;}
-    char full[PATH_MAX];if(resolve_file(s->app,path,full)){s->skipped++;return;}
-    const fs::path root_path=fs_path(s->app->root);
+    if(!prevalidated){
+        char full_buf[PATH_MAX];
+        if(resolve_file(s->app,full_str.c_str(),full_buf)){s->skipped++;return;}
+    }
     if(fs::is_directory(status)){
         if(depth>=24){s->truncated=true;return;}
-        fs::directory_iterator directory(fs_path(full),ec);if(ec){s->skipped++;return;}
+        fs::directory_iterator directory(source,ec);if(ec){s->skipped++;return;}
         for(auto it=directory;it!=fs::directory_iterator{}&&!search_limit(s);it.increment(ec)){
             if(ec){s->skipped++;break;}
-            std::string name=path_text(it->path().filename());if(search_skip(name.c_str())){s->skipped++;continue;}
+            const fs::path &cpath=it->path();
+            if(path_link(cpath)){s->entries++;s->skipped++;continue;}
+            std::string name=path_text(cpath.filename());
+            if(search_skip(name.c_str())){s->skipped++;continue;}
+            std::string child_str=path_text(cpath);
+            if(!s->guard.allow_nonlink_child(cpath,name,child_str.size())){s->entries++;s->skipped++;continue;}
             std::error_code child_ec;
-            const bool child_dir=!path_link(it->path())&&it->is_directory(child_ec);
-            std::string child_rel=path_text(it->path().lexically_relative(root_path));
+            const bool child_dir=it->is_directory(child_ec);
+            std::string child_rel=rel_hint.empty()?path_text(cpath.lexically_relative(s->guard.root)):(rel_hint+"/"+name);
             if(!child_rel.empty()&&s->gitignore.ignored(child_rel,child_dir)){s->skipped++;continue;}
-            std::string child=path_text(it->path());search_walk(s,child.c_str(),depth+1);
+            search_walk(s,cpath,child_str,child_rel,depth+1,true);
         }
         return;
     }
     if(!fs::is_regular_file(status)){s->skipped++;return;}
-    std::string rel=path_text(fs_path(full).lexically_relative(root_path));
+    std::string rel=rel_hint.empty()?path_text(source.lexically_relative(s->guard.root)):rel_hint;
     if(s->file_pattern&&*s->file_pattern&&!glob_match(s->file_pattern,rel,s->case_insensitive)){s->skipped++;return;}
     s->files++;
     size_t n=0;
-    char *data=read_bytes(full,FILE_LIMIT,&n);
+    char *data=read_bytes(full_str.c_str(),FILE_LIMIT,&n);
     if(!data){s->skipped++;return;}
     s->bytes+=n;
     if(!utf8_text(data,n)){s->skipped++;free(data);return;}
@@ -354,20 +424,12 @@ static void search_walk(Search *s,const char *path,int depth){
     const std::string_view query(s->query);
     size_t line=1;
     for(char *p=data;p<limit&&!search_limit(s);line++){
-        size_t at=std::string_view::npos;
-        const std::string_view window(p,(size_t)(limit-p));
-        if(!s->case_insensitive){
-            at=window.find(query);
-        }else{
-            auto it=std::search(window.begin(),window.end(),query.begin(),query.end(),[](unsigned char lhs,unsigned char rhs){
-                return std::tolower(lhs)==std::tolower(rhs);
-            });
-            if(it!=window.end())at=static_cast<size_t>(it-window.begin());
-        }
+        const std::string_view window(p,static_cast<size_t>(limit-p));
+        const size_t at=s->case_insensitive?find_ci(window,query):window.find(query);
         if(at==std::string_view::npos)break;
         char *found=p+at;
-        for(char *nl;(nl=static_cast<char *>(memchr(p,'\n',(size_t)(found-p))));p=nl+1)line++;
-        char *end=static_cast<char *>(memchr(found,'\n',(size_t)(limit-found)));
+        for(char *nl;(nl=static_cast<char *>(memchr(p,'\n',static_cast<size_t>(found-p))));p=nl+1)line++;
+        char *end=static_cast<char *>(memchr(found,'\n',static_cast<size_t>(limit-found)));
         if(!end)end=limit;
         emit_search_match(s,rel.c_str(),line,p,found,end);
         if(end==limit)break;
@@ -388,12 +450,15 @@ static J *file_search(App *a,J *args){
     }
     char full[PATH_MAX];
     if(resolve_file(a,sget(args,"path"),full))return err(a->error);
-    std::error_code ec;auto status=fs::status(fs_path(full),ec);
+    const fs::path start_path=fs_path(full);
+    std::error_code ec;auto status=fs::status(start_path,ec);
     if(ec||(!fs::is_directory(status)&&!fs::is_regular_file(status)))return err(tr("搜索路径须为存在的文件或目录。"));
-    Search s={.app=a,.query=query,.case_insensitive=ci,.use_regex=use_regex,.re=use_regex?&compiled:nullptr,.file_pattern=*file_pattern?file_pattern:nullptr,.matches=arr(),.until=monotime()+5};
+    Search s={.app=a,.guard=FastTreeGuard(a),.query=query,.case_insensitive=ci,.use_regex=use_regex,.re=use_regex?&compiled:nullptr,.file_pattern=*file_pattern?file_pattern:nullptr,.matches=arr(),.until=monotime()+5};
     s.gitignore.load(a->root);
-    search_walk(&s,full,0);
-    if(interrupted){json_object_put(s.matches);return err(tr("搜索已取消。"));}
+    std::string start_rel=path_text(start_path.lexically_relative(s.guard.root));
+    if(start_rel==".")start_rel.clear();
+    search_walk(&s,start_path,full,start_rel,0,false);
+    if(app_cancelled(a)){json_object_put(s.matches);return err(tr("搜索已取消。"));}
     J *r=obj();
     put(r,"matches",s.matches);
     put(r,"files_scanned",json_object_new_int64((int64_t)s.files));

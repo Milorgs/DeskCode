@@ -250,6 +250,10 @@ static J *legacy_store(App *a){
     return NULL;
 }
 int store_load(App *a){
+    json_object_put(a->store);
+    a->store=nullptr;
+    json_object_put(a->config);
+    a->config=nullptr;
     std::string base_path=config_base();
     const char *base=base_path.c_str();
     if(snprintf(a->config_dir,sizeof a->config_dir,"%s/desk-agent",base)>=(int)sizeof a->config_dir){
