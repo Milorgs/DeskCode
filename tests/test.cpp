@@ -2032,7 +2032,7 @@ static void test_chat_actions_layout(){
     }
     std::string output;
     CHECK(terminal_until(master,output,"❯ "));
-    CHECK(output.find("Type / for settings")!=std::string::npos);
+    CHECK(terminal_until(master,output,"Type / for settings"));
     output.clear();
     type_terminal(master,output,"/");
     CHECK(terminal_until(master,output,"0. Back to chat"));
