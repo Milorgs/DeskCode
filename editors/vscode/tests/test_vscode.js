@@ -58,7 +58,7 @@ async function runTests() {
       assert.strictEqual(pkg.name, "deskcode-vscode");
       assert.strictEqual(pkg.displayName, "DeskCode AI Coding Agent");
       assert.strictEqual(pkg.publisher, "milorgs");
-      assert.strictEqual(pkg.version, "1.18.2");
+      assert.strictEqual(pkg.version, "1.18.3");
       assert.strictEqual(pkg.engines.vscode, "^1.85.0");
       assert.strictEqual(pkg.main, "./src/extension.js");
 

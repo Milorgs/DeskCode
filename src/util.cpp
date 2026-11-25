@@ -293,14 +293,16 @@ struct EditorSession {
     std::vector<std::pair<const char *,rl_command_func_t *>> previous_scroll_bindings;
     bool mouse_reporting=false;
     bool bracketed_paste=false;
-    explicit EditorSession(const char *prompt){
+    explicit EditorSession(const char *prompt,bool fixed_row){
         editor=&state;
         rl_readline_name="desk";
         rl_catch_signals=0;rl_catch_sigwinch=0;
+        rl_initialize();
+        // The chat composer owns one row. Setup fields can wrap with Readline.
+        rl_variable_bind("horizontal-scroll-mode",fixed_row?"on":"off");
         rl_callback_handler_install(prompt,accepted_line);state.installed=true;
         // Keep editing predictable and never complete or save private input.
         rl_bind_key('\t',rl_insert);
-        rl_variable_bind("horizontal-scroll-mode","on");
     }
     // Bind a key for this session only; the destructor puts the previous
     // binding back. Sequences that are prefixes of longer ones stay untouched.
@@ -434,7 +436,7 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
     if(input_closed)return nullptr;
     if(!secret&&isatty(STDIN_FILENO)&&isatty(STDOUT_FILENO)){
         if(terminal_eof()){input_closed=true;putchar('\n');return nullptr;}
-        EditorSession session(prompt);
+        EditorSession session(prompt,draft!=nullptr);
         if(draft){
             draft->paused=false;
             draft->complete_file=false;

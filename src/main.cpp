@@ -360,7 +360,8 @@ static int add_model(App *a,Tasks &jobs,const char *preset_name){
     }
     clear_page();
     menu_text(tr(preset.label));
-    char *name=preset_name?strdup(preset_name):field(tr("模型配置名称（输入 0 返回）"),fallback,false);
+    if(!preset_name)menu_text(tr("输入 0 返回。"));
+    char *name=preset_name?strdup(preset_name):field(tr("模型配置名称"),fallback,false);
     if(!name)return 0;
     int rc=strcmp(name,"0")?configure(a,jobs,name,&preset,true):0;
     free(name);

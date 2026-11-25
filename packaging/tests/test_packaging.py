@@ -228,7 +228,7 @@ class PackagingManifestTests(unittest.TestCase):
 
     def test_committed_manifests_are_valid(self) -> None:
         zero_hashes = {k: "0" * 64 for k in SAMPLE_HASHES}
-        self._validate_all_manifests(PACKAGING_DIR, "1.18.2", zero_hashes)
+        self._validate_all_manifests(PACKAGING_DIR, "1.18.3", zero_hashes)
 
     def test_update_checksums_cli_and_determinism(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deskcode-pkg-test-") as tmp:
@@ -255,12 +255,12 @@ class PackagingManifestTests(unittest.TestCase):
                 sys.executable,
                 "-B",
                 str(copied / "update_checksums.py"),
-                "v1.18.2",
+                "v1.18.3",
                 str(sums_file),
             ]
             res1 = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
             self.assertEqual(res1.returncode, 0, res1.stderr)
-            self._validate_all_manifests(copied, "1.18.2", SAMPLE_HASHES)
+            self._validate_all_manifests(copied, "1.18.3", SAMPLE_HASHES)
 
             manifest_rel_paths = [
                 "homebrew/deskcode.rb",
