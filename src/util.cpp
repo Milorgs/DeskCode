@@ -522,20 +522,55 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
         if(resolved.empty()&&fallback)return strdup(fallback);
         return strdup(resolved.c_str());
     }
-    printf("%s",prompt);fflush(stdout);
     struct termios old{};bool changed=false;
-    if(secret&&isatty(STDIN_FILENO)&&!tcgetattr(STDIN_FILENO,&old)){
-        struct termios mode=old;mode.c_lflag&=~ECHO;
+    if(secret&&isatty(STDIN_FILENO)){
+        if(tcgetattr(STDIN_FILENO,&old))return nullptr;
+        struct termios mode=old;mode.c_lflag&=~(ECHO|ECHONL);
 #ifdef IUTF8
         mode.c_iflag|=IUTF8;
 #endif
-        changed=!tcsetattr(STDIN_FILENO,TCSANOW,&mode);
+        if(tcsetattr(STDIN_FILENO,TCSANOW,&mode))return nullptr;
+        changed=true;
     }
+    const bool bracketed=changed&&terminal_supports_ansi();
+    if(bracketed)fputs("\033[?2004h",stdout);
+    printf("%s",prompt);fflush(stdout);
     char *line=nullptr;size_t capacity=0;ssize_t n=getline(&line,&capacity,stdin);
+    std::string pasted;
+    if(bracketed){
+        bool inside=false,oversized=false;
+        while(n>0){
+            std::string_view chunk(line,static_cast<size_t>(n));
+            size_t pos=0;
+            while((pos=chunk.find(inside?"\033[201~":"\033[200~",pos))!=chunk.npos){
+                inside=!inside;
+                pos+=6;
+            }
+            if(pasted.empty()&&!inside&&!oversized)break;
+            if(pasted.size()+chunk.size()>65536)oversized=true;
+            if(!oversized)pasted.append(chunk);
+            if(!inside)break;
+            n=getline(&line,&capacity,stdin);
+        }
+        if(oversized)n=65537;
+        fputs("\033[?2004l",stdout);
+    }
     if(changed){tcsetattr(STDIN_FILENO,TCSANOW,&old);putchar('\n');}
     if(n<0){if(feof(stdin)&&!interrupted)input_closed=true;free(line);clearerr(stdin);return nullptr;}
     if(n>65536){free(line);return nullptr;}
+    if(!pasted.empty()){
+        free(line);
+        std::string cleaned=clean_secret_input(pasted);
+        if(cleaned.empty()&&fallback)return strdup(fallback);
+        return strdup(cleaned.c_str());
+    }
     while(n>0&&(line[n-1]=='\n'||line[n-1]=='\r'))line[--n]=0;
+    if(secret){
+        std::string cleaned=clean_secret_input(std::string_view(line,static_cast<size_t>(n)));
+        free(line);
+        if(cleaned.empty()&&fallback)return strdup(fallback);
+        return strdup(cleaned.c_str());
+    }
     if(!n&&fallback){free(line);return strdup(fallback);}
     return line;
 }

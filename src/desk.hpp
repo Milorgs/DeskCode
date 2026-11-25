@@ -32,7 +32,7 @@
 #include <functional>
 #include <optional>
 #include <map>
-#define VERSION "1.18.0"
+#define VERSION "1.18.1"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.
@@ -160,6 +160,7 @@ inline void hex_encode_lower(const unsigned char *bytes,size_t len,char *out) no
     out[len*2]='\0';
 }
 std::string sanitize_utf8(std::string_view data);
+std::string clean_secret_input(std::string_view raw);
 std::string latest_command_line(std::string_view chunk);
 void progress(App *app,const char *text);
 void check_exit(const App &app);
@@ -288,6 +289,7 @@ void id_string(char out[33]);
 double monotime(void);
 int store_load(App *a);
 bool valid_reasoning_effort(J *config,J *value);
+int normalize_base_url(App *a,J *config);
 int config_valid(App *a,J *config);
 J *config_default(const char *name);
 int save_config(App *a,J *config,bool clear_session=true);

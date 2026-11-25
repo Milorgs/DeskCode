@@ -353,6 +353,23 @@ bool record_tokens(App &app,J *config,std::uint64_t amount){
     return text_len<=1048576&&atomic_file(path,text,text_len,0600)==0;
 }
 
+std::string clean_secret_input(std::string_view raw){
+    std::string out;
+    out.reserve(raw.size());
+    static constexpr std::string_view bp_start="\033[200~",bp_end="\033[201~";
+    while(!raw.empty()){
+        if(raw.starts_with(bp_start)){raw.remove_prefix(bp_start.size());continue;}
+        if(raw.starts_with(bp_end)){raw.remove_prefix(bp_end.size());continue;}
+        char ch=raw.front();
+        raw.remove_prefix(1);
+        if(ch!='\r'&&ch!='\n')out+=ch;
+    }
+    auto first=out.find_first_not_of(" \t");
+    if(first==std::string_view::npos)return {};
+    auto last=out.find_last_not_of(" \t");
+    return out.substr(first,last-first+1);
+}
+
 std::string sanitize_utf8(std::string_view data){
     if(valid_utf8(data))return std::string(data);
     std::string safe;

@@ -1,6 +1,6 @@
 pkgbase = deskcode-bin
 	pkgdesc = Native C++20 terminal and desktop AI coding agent
-	pkgver = 1.18.0
+	pkgver = 1.18.1
 	pkgrel = 1
 	url = https://github.com/Milorgs/DeskCode
 	arch = x86_64
@@ -15,9 +15,9 @@ pkgbase = deskcode-bin
 	depends = at-spi2-core
 	provides = deskcode
 	conflicts = deskcode
-	source_x86_64 = deskcode-1.18.0-x86_64.tar.gz::https://github.com/Milorgs/DeskCode/releases/download/v1.18.0/desk-agent-linux-x64.tar.gz
+	source_x86_64 = deskcode-1.18.1-x86_64.tar.gz::https://github.com/Milorgs/DeskCode/releases/download/v1.18.1/desk-agent-linux-x64.tar.gz
 	sha256sums_x86_64 = 0000000000000000000000000000000000000000000000000000000000000000
-	source_aarch64 = deskcode-1.18.0-aarch64.tar.gz::https://github.com/Milorgs/DeskCode/releases/download/v1.18.0/desk-agent-linux-arm64.tar.gz
+	source_aarch64 = deskcode-1.18.1-aarch64.tar.gz::https://github.com/Milorgs/DeskCode/releases/download/v1.18.1/desk-agent-linux-arm64.tar.gz
 	sha256sums_aarch64 = 0000000000000000000000000000000000000000000000000000000000000000
 
 pkgname = deskcode-bin

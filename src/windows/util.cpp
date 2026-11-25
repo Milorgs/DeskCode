@@ -74,10 +74,11 @@ int atomic_file(const char *path,const void *data,size_t length,unsigned int mod
 }
 char *input(const char *prompt,const char *fallback,bool secret){
     if(input_closed)return nullptr;
-    fputs(prompt,stdout);fflush(stdout);HANDLE handle=GetStdHandle(STD_INPUT_HANDLE);DWORD mode=0;
+    HANDLE handle=GetStdHandle(STD_INPUT_HANDLE);DWORD mode=0;
     std::string line;bool console=GetConsoleMode(handle,&mode)!=FALSE,ok=true;
+    if(console&&secret&&!SetConsoleMode(handle,mode&~ENABLE_ECHO_INPUT))return nullptr;
+    fputs(prompt,stdout);fflush(stdout);
     if(console){
-        if(secret&&!SetConsoleMode(handle,mode&~ENABLE_ECHO_INPUT))return nullptr;
         std::wstring text;wchar_t buffer[1024];DWORD count=0;
         while(!interrupted){
             if(!ReadConsoleW(handle,buffer,1024,&count,nullptr)||!count){ok=false;break;}
@@ -96,6 +97,7 @@ char *input(const char *prompt,const char *fallback,bool secret){
     if(!ok&&!interrupted)input_closed=true;
     if(!ok||interrupted||line.size()>65536)return nullptr;
     while(!line.empty()&&(line.back()=='\r'||line.back()=='\n'))line.pop_back();
+    if(secret)line=clean_secret_input(line);
     return _strdup(line.empty()&&fallback?fallback:line.c_str());
 }
 

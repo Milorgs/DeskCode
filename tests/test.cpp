@@ -2902,7 +2902,7 @@ static void test_provider_presets(){
     pid_t server=fake_server(&a,responses,1);
     const std::string base=sget(a.config,"base_url");
     int master=-1;pid_t child=forkpty(&master,nullptr,nullptr,nullptr);CHECK(child>=0);
-    if(!child){execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
+    if(!child){setenv("TERM","xterm-256color",1);setenv("NO_COLOR","1",1);execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
     std::string output;
     CHECK(terminal_until(master,output,"First run: choose Add model"));
     CHECK(terminal_until(master,output,"Select a number:"));
@@ -2914,9 +2914,9 @@ static void test_provider_presets(){
     CHECK(terminal_until(master,output,"[model-1]"));
     output.clear();type_terminal(master,output,"\n");
     CHECK(terminal_until(master,output,"API URL ["));
-    output.clear();type_terminal(master,output,base+"\n");
+    output.clear();type_terminal(master,output,base+"/chat/completions/\n");
     CHECK(terminal_until(master,output,"API Key"));
-    output.clear();type_terminal(master,output,"fake-preset-key\n");
+    output.clear();type_terminal(master,output,"\033[200~  fake-preset-key \n\033[201~\n");
     CHECK(terminal_until(master,output,"[2] beta-model"));
     CHECK(terminal_until(master,output,"Select a number:"));
     output.clear();type_terminal(master,output,"2\n");
@@ -2928,6 +2928,8 @@ static void test_provider_presets(){
     type_terminal(master,output,"0\n");
     CHECK(reap_pty(master,child,&output)==0);
     server_done(server);
+    JsonPtr listing(capture(&a,0));
+    CHECK(!strcmp(sget(listing.get(),"path"),"/v1/models"));
     App saved{};CHECK(!store_load(&saved));
     J *profile=get(get(saved.store,"profiles"),"model-1");
     CHECK(profile);
@@ -5036,6 +5038,58 @@ static void test_cpp_optimizations(){
         app_cleanup(&a);
     }
 }
+static void test_add_model_ui_and_bracketed_paste(){
+    CHECK(clean_secret_input("\033[200~  sk-secret-abc \033[201~\r\n")=="sk-secret-abc");
+    App a=fresh();
+    std::string models_json="{\"data\":[{\"id\":\"alpha-model\"}";
+    for(int i=2;i<=25;i++)models_json+=",{\"id\":\"model-"+std::to_string(i)+"\"}";
+    models_json+="]}";
+    const char *responses[]={models_json.c_str()};
+    J *probe=config("probe","openai");json_object_put(a.config);a.config=probe;
+    pid_t server=fake_server(&a,responses,1);
+    const std::string base=sget(a.config,"base_url");
+    int master=-1;
+    winsize window{19,45,0,0};
+    pid_t child=forkpty(&master,nullptr,nullptr,&window);
+    CHECK(child>=0);
+    if(!child){
+        unsetenv("DESK_NO_ARROW");
+        setenv("TERM","xterm-256color",1);
+        setenv("NO_COLOR","1",1);
+        execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));
+        _exit(127);
+    }
+    std::string output;
+    CHECK(terminal_until(master,output,"First run: choose Add model"));
+    output.clear();type_terminal(master,output,"\r");
+    CHECK(terminal_until(master,output,"Add model"));
+    CHECK(terminal_until(master,output,"Qwen"));
+    output.clear();type_terminal(master,output,"5\r");
+    CHECK(terminal_until(master,output,"[qwen]"));
+    output.clear();type_terminal(master,output,"\r");
+    CHECK(terminal_until(master,output,"API URL [https://"));
+    CHECK(output.find("…]:")!=std::string::npos);
+    output.clear();type_terminal(master,output,base+"\r");
+    CHECK(terminal_until(master,output,"API Key:"));
+    output.clear();type_terminal(master,output,"\x1b[200~sk-pasted-456\x1b[201~\r");
+    CHECK(terminal_until(master,output,"Choose a model (25 available)"));
+    CHECK(terminal_until(master,output,"1. alpha-model"));
+    output.clear();type_terminal(master,output,"1\r");
+    CHECK(terminal_until(master,output,"Confirm model configuration"));
+    CHECK(terminal_until(master,output,"Save without testing"));
+    output.clear();type_terminal(master,output,"2\r");
+    CHECK(terminal_until(master,output,"Saved and selected this model."));
+    output.clear();type_terminal(master,output,"0\r");
+    CHECK(reap_pty(master,child,&output)==0);
+    server_done(server);
+    App saved{};CHECK(!store_load(&saved));
+    J *profile=get(get(saved.store,"profiles"),"qwen");
+    CHECK(profile);
+    CHECK(!strcmp(sget(profile,"model"),"alpha-model"));
+    CHECK(!strcmp(sget(profile,"api_key"),"sk-pasted-456"));
+    app_cleanup(&saved);
+    app_cleanup(&a);
+}
 int main(int argc,char **argv){
     if(argc==2&&!strcmp(argv[1],"--mcp-fixture"))return mcp_fixture();
     curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -5057,6 +5111,7 @@ int main(int argc,char **argv){
     RUN_STEP(test_diff_preview());
     RUN_STEP(test_headless());
     RUN_STEP(test_provider_presets());
+    RUN_STEP(test_add_model_ui_and_bracketed_paste());
     RUN_STEP(test_mcp());
     RUN_STEP(test_http_reuse());
     RUN_STEP(test_tool_configuration());

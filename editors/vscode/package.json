@@ -3,7 +3,7 @@
   "displayName": "DeskCode AI Coding Agent",
   "description": "Native VS Code integration for DeskCode (desk acp) — streaming sessions, live tool execution, side-by-side file diffs, and fine-grained permission controls.",
   "publisher": "milorgs",
-  "version": "1.18.0",
+  "version": "1.18.1",
   "license": "MIT",
   "homepage": "https://github.com/Milorgs/DeskCode",
   "repository": {

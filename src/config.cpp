@@ -52,7 +52,7 @@ int config_name_valid(const char *name){
     }
     return count<=40;
 }
-static int normalize(App *a,J *c){
+int normalize_base_url(App *a,J *c){
     const char *raw=sget(c,"base_url"),*protocol=sget(c,"protocol");
     char *url=strdup(raw);
     if(!url)return -1;
@@ -150,7 +150,7 @@ int config_valid(App *a,J *c){
         seterr(a,tr("API 版本格式无效。"));
         return -1;
     }
-    return normalize(a,c);
+    return normalize_base_url(a,c);
 }
 static J *legacy_store(App *a){
     char path[PATH_MAX];

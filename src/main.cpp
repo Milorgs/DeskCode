@@ -138,9 +138,19 @@ static void recover_interactive_eof(){
     input_closed=false;
 }
 static char *field(const char *name,const char *fallback,bool secret){
+    std::string shown=fallback?fallback:"";
+    const char *indent=interface_active?"  ":"";
+    if(interface_active&&!secret&&!shown.empty()){
+        const int cols=terminal_columns();
+        if(cols>0){
+            const int reserve=ui_width(indent)+ui_width(name)+16;
+            const int budget=std::max(10,cols-reserve);
+            if(ui_width(shown)>budget)shown=ui_clip(shown,budget);
+        }
+    }
     char prompt[8192];
-    if(secret)snprintf(prompt,sizeof prompt,tr("%s%s："),name,fallback&&*fallback?tr(" [回车保留]"):"");
-    else snprintf(prompt,sizeof prompt,tr("%s [%s]："),name,fallback?fallback:"");
+    if(secret)snprintf(prompt,sizeof prompt,tr("%s%s%s："),indent,name,fallback&&*fallback?tr(" [回车保留]"):"");
+    else snprintf(prompt,sizeof prompt,tr("%s%s [%s]："),indent,name,shown.c_str());
     char *value=input(prompt,fallback,secret);
     if(!value)recover_interactive_eof();
     return value;
@@ -181,7 +191,7 @@ static const ProviderPreset provider_presets[]={
     {"Ollama 本地模型","ollama","openai","http://127.0.0.1:11434/v1","","ollama"},
 };
 static int number(Tasks &jobs,int maximum,int initial=-1);
-static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial=-1,bool allow_escape=true,const std::function<void()> &on_resize={});
+static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial=-1,bool allow_escape=true,const std::function<void()> &on_resize={},int header_rows=0);
 // Offer the provider's live model list when it answers, otherwise fall back to
 // typing an ID. Listing models is a free GET and sends no conversation data.
 static bool choose_model_id(App *a,Tasks &jobs,J *candidate,const char *suggestion){
@@ -206,14 +216,19 @@ static bool choose_model_id(App *a,Tasks &jobs,J *candidate,const char *suggesti
         options.emplace_back(tr("返回"));
         char heading[128];
         snprintf(heading,sizeof heading,tr("\n选择模型（共 %zu 个）"),count);
-        menu_text(heading);
-        int choice=arrow_menu(jobs,options,initial);
+        auto draw_heading=[&]{
+            clear_page();
+            menu_text(ui_clip(heading,terminal_columns()>1?terminal_columns()-1:0).c_str());
+        };
+        draw_heading();
+        int choice=arrow_menu(jobs,options,initial,true,draw_heading,spaced_interface()?3:2);
         if(choice<=0)return false;
         if(static_cast<size_t>(choice)<=count){
             put(candidate,"model",str(options[static_cast<size_t>(choice-1)].c_str()));
             return true;
         }
     }else menu_text(tr("未获取到在线模型列表，请手动输入模型 ID。"));
+    if(count)clear_page();
     char *model=field(tr("模型名称"),current.c_str(),false);
     if(!model)return false;
     put(candidate,"model",str(model));
@@ -246,14 +261,27 @@ static int configure(App *a,Tasks &jobs,const char *name,const ProviderPreset *p
         use_reasoning(candidate,nullptr);
     if(preset&&fresh)put(candidate,"base_url",str(preset->base_url));
     else if(changed)put(candidate,"base_url",str(!strcmp(protocol,"anthropic")?"https://api.anthropic.com/v1":"https://api.openai.com/v1"));
-    menu_text(tr("\n密钥输入不显示，仅保存在本机私有配置文件。"));
+    clear_page();
+    {
+        std::string title=std::string(tr(fresh?"添加模型":"编辑模型配置"))+" · "+name+(preset?std::string(" (")+tr(preset->label)+")":"");
+        const int cols=terminal_columns();
+        const int width=cols>12?std::min(cols-4,96):96;
+        printf("\n  %s\n",ui_paint(Tone::Plain,ui_clip(title,width),true).c_str());
+        page_rule();
+        for(const auto &line:ui_wrap(tr("密钥输入不显示，仅保存在本机私有配置文件。"),width))
+            printf("  %s\n",ui_paint(Tone::Dim,line).c_str());
+        putchar('\n');
+    }
     char *base=field(tr("API 地址"),sget(candidate,"base_url"),false);
     if(!base)return 0;
+    put(candidate,"base_url",str(base));
+    free(base);
+    if(normalize_base_url(a,candidate))return -1;
     bool host_changed=changed;
     CURLU *old=curl_url(),*next=curl_url();
     char *h1=NULL,*h2=NULL,*s1=NULL,*s2=NULL,*p1=NULL,*p2=NULL;
     curl_url_set(old,CURLUPART_URL,sget(a->config,"base_url"),0);
-    curl_url_set(next,CURLUPART_URL,base,0);
+    curl_url_set(next,CURLUPART_URL,sget(candidate,"base_url"),0);
     curl_url_get(old,CURLUPART_HOST,&h1,0);
     curl_url_get(next,CURLUPART_HOST,&h2,0);
     curl_url_get(old,CURLUPART_SCHEME,&s1,0);
@@ -269,18 +297,26 @@ static int configure(App *a,Tasks &jobs,const char *name,const ProviderPreset *p
     curl_free(p2);
     curl_url_cleanup(old);
     curl_url_cleanup(next);
-    put(candidate,"base_url",str(base));
-    free(base);
     // A key never follows the configuration to a different host.
     if(host_changed)put(candidate,"api_key",str(""));
     if(fresh&&preset&&*preset->key)put(candidate,"api_key",str(preset->key));
     char *key=field("API Key",sget(candidate,"api_key"),true);
     if(!key)return 0;
-    put(candidate,"api_key",str(key));
+    put(candidate,"api_key",str(clean_secret_input(key).c_str()));
     free(key);
+    clear_page();
     if(!choose_model_id(a,jobs,candidate,preset?preset->model:nullptr))return 0;
     if(config_valid(a,candidate)){
         return -1;
+    }
+    clear_page();
+    {
+        const int cols=terminal_columns();
+        const int width=cols>12?std::min(cols-4,96):96;
+        printf("\n  %s\n",ui_paint(Tone::Plain,tr("确认保存模型配置"),true).c_str());
+        page_rule();
+        printf("  %s %s (%s)\n",ui_paint(Tone::Dim,tr("模型")).c_str(),ui_clip(sget(candidate,"model"),std::max(12,width-10)).c_str(),sget(candidate,"protocol"));
+        printf("  %s %s\n",ui_paint(Tone::Dim,tr("地址")).c_str(),ui_clip(sget(candidate,"base_url"),std::max(12,width-10)).c_str());
     }
     int action=menu_choices(jobs,tr("\n  [1] 测试连接并保存（少量 API 用量）\n  [2] 直接保存，稍后测试\n  [0] 取消"),nullptr,1);
     if(action<=0)return 0;
@@ -291,12 +327,15 @@ static int configure(App *a,Tasks &jobs,const char *name,const ProviderPreset *p
     return rc;
 }
 static int add_model(App *a,Tasks &jobs,const char *preset_name){
-    clear_page();
-    menu_text(tr("\n添加模型 · 选择服务商"));
+    auto draw_header=[&]{
+        clear_page();
+        menu_text(tr("\n添加模型 · 选择服务商"));
+    };
+    draw_header();
     std::vector<std::string> options;
     for(const auto &preset:provider_presets)options.emplace_back(tr(preset.label));
     options.emplace_back(tr("返回"));
-    int choice=arrow_menu(jobs,options,1);
+    int choice=arrow_menu(jobs,options,1,true,draw_header,spaced_interface()?3:2);
     if(choice<=0)return 0;
     const ProviderPreset &preset=provider_presets[static_cast<size_t>(choice-1)];
     char fallback[64];
@@ -310,6 +349,8 @@ static int add_model(App *a,Tasks &jobs,const char *preset_name){
         }
         while(get(get(a->store,"profiles"),fallback));
     }
+    clear_page();
+    menu_text(tr(preset.label));
     char *name=preset_name?strdup(preset_name):field(tr("模型配置名称（输入 0 返回）"),fallback,false);
     if(!name)return 0;
     int rc=strcmp(name,"0")?configure(a,jobs,name,&preset,true):0;
@@ -381,14 +422,14 @@ static std::string request_text(Tasks &jobs,const char *prompt){
     if(!text)recover_interactive_eof();
     return text?text.get():"";
 }
-static std::optional<int> arrow_choice(Tasks &jobs,const std::vector<std::string> &items,int initial=1,bool allow_escape=true,const std::function<void()> &on_resize={}){
-    return terminal_choice(items,initial,content_top,[&]{
+static std::optional<int> arrow_choice(Tasks &jobs,const std::vector<std::string> &items,int initial=1,bool allow_escape=true,const std::function<void()> &on_resize={},int header_rows=0){
+    return terminal_choice(items,initial,content_top+header_rows,[&]{
         jobs.refresh();
         if(jobs.on_idle)jobs.on_idle();
     },false,false,allow_escape,on_resize);
 }
-static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial,bool allow_escape,const std::function<void()> &on_resize){
-    if(auto choice=arrow_choice(jobs,items,initial<0?1:initial,allow_escape,on_resize))return *choice;
+static int arrow_menu(Tasks &jobs,const std::vector<std::string> &items,int initial,bool allow_escape,const std::function<void()> &on_resize,int header_rows){
+    if(auto choice=arrow_choice(jobs,items,initial<0?1:initial,allow_escape,on_resize,header_rows))return *choice;
     for(size_t i=0;i<items.size();i++)menu_printf("  [%zu] %s\n",(i+1)%items.size(),items[i].c_str());
     return number(jobs,static_cast<int>(items.size()-1),initial);
 }

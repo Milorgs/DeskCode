@@ -228,7 +228,7 @@ class PackagingManifestTests(unittest.TestCase):
 
     def test_committed_manifests_are_valid(self) -> None:
         zero_hashes = {k: "0" * 64 for k in SAMPLE_HASHES}
-        self._validate_all_manifests(PACKAGING_DIR, "1.18.0", zero_hashes)
+        self._validate_all_manifests(PACKAGING_DIR, "1.18.1", zero_hashes)
 
     def test_update_checksums_cli_and_determinism(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deskcode-pkg-test-") as tmp:
