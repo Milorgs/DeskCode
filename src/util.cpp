@@ -432,11 +432,11 @@ void terminal_activity(const std::string &text){
     fflush(stdout);
     if(text.empty())activity_visible=false;
 }
-char *editable_input(const char *prompt,const char *fallback,bool secret,const std::function<void()> &idle,ChatDraft *draft){
+static char *read_input(const char *prompt,const char *fallback,bool secret,const std::function<void()> &idle,ChatDraft *draft,bool wrap_field){
     if(input_closed)return nullptr;
     if(!secret&&isatty(STDIN_FILENO)&&isatty(STDOUT_FILENO)){
         if(terminal_eof()){input_closed=true;putchar('\n');return nullptr;}
-        EditorSession session(prompt,draft!=nullptr);
+        EditorSession session(prompt,!wrap_field||terminal_columns()<2);
         if(draft){
             draft->paused=false;
             draft->complete_file=false;
@@ -576,7 +576,12 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
     if(!n&&fallback){free(line);return strdup(fallback);}
     return line;
 }
-char *input(const char *prompt,const char *fallback,bool secret){return editable_input(prompt,fallback,secret,{});}
+char *editable_input(const char *prompt,const char *fallback,bool secret,const std::function<void()> &idle,ChatDraft *draft){
+    return read_input(prompt,fallback,secret,idle,draft,false);
+}
+char *input(const char *prompt,const char *fallback,bool secret){
+    return read_input(prompt,fallback,secret,{},nullptr,true);
+}
 
 void check_exit(const App &app){
     if(app.task_events<0&&!input_closed&&terminal_eof()){input_closed=true;interrupted=SIGINT;}
