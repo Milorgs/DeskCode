@@ -257,6 +257,7 @@ constexpr Translation catalog[]={
     {"API 地址","API URL"},
     {"模型名称","Model ID"},
     {"\n  [1] 测试连接并保存（少量 API 用量）\n  [2] 直接保存，稍后测试\n  [0] 取消","\n  [1] Test connection and save (uses a small API quota)\n  [2] Save without testing\n  [0] Cancel"},
+    {"连接测试失败。你可以保留配置并稍后测试。","Connection test failed. You can save the configuration and test it later."},
     {"配置尚未联网验证。","This configuration has not been tested online."},
     {"已保存并选用该模型。","Saved and selected this model."},
     {"模型配置名称（输入 0 返回）","Model configuration name (0 to go back)"},

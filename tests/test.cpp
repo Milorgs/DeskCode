@@ -2897,9 +2897,10 @@ static void test_headless(){
 }
 static void test_provider_presets(){
     App a=fresh();
-    const char *responses[]={"{\"data\":[{\"id\":\"alpha-model\"},{\"id\":\"beta-model\"}]}"};
+    const auto reply=model_reply(nullptr,"The endpoint responds, but without a tool call.");
+    const char *responses[]={"{\"data\":[{\"id\":\"alpha-model\"},{\"id\":\"beta-model\"}]}",reply.c_str()};
     J *probe=config("probe","openai");json_object_put(a.config);a.config=probe;
-    pid_t server=fake_server(&a,responses,1);
+    pid_t server=fake_server(&a,responses,2);
     const std::string base=sget(a.config,"base_url");
     int master=-1;pid_t child=forkpty(&master,nullptr,nullptr,nullptr);CHECK(child>=0);
     if(!child){setenv("TERM","xterm-256color",1);setenv("NO_COLOR","1",1);execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
@@ -2922,8 +2923,13 @@ static void test_provider_presets(){
     output.clear();type_terminal(master,output,"2\n");
     CHECK(terminal_until(master,output,"Save without testing"));
     CHECK(terminal_until(master,output,"Select a number:"));
-    output.clear();type_terminal(master,output,"2\n");
+    output.clear();type_terminal(master,output,"1\n");
+    CHECK(terminal_until(master,output,"Connection test failed."));
+    CHECK(terminal_until(master,output,"Save without testing"));
+    CHECK(terminal_until(master,output,"Select a number:"));
+    output.clear();type_terminal(master,output,"\n");
     CHECK(terminal_until(master,output,"Saved and selected this model."));
+    CHECK(terminal_until(master,output,"1. beta-model"));
     CHECK(terminal_until(master,output,"Select a number:"));
     type_terminal(master,output,"0\n");
     CHECK(reap_pty(master,child,&output)==0);

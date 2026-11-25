@@ -309,19 +309,28 @@ static int configure(App *a,Tasks &jobs,const char *name,const ProviderPreset *p
     if(config_valid(a,candidate)){
         return -1;
     }
-    clear_page();
-    {
+    auto draw_confirmation=[&]{
+        clear_page();
         const int cols=terminal_columns();
         const int width=cols>12?std::min(cols-4,96):96;
         printf("\n  %s\n",ui_paint(Tone::Plain,tr("确认保存模型配置"),true).c_str());
         page_rule();
         printf("  %s %s (%s)\n",ui_paint(Tone::Dim,tr("模型")).c_str(),ui_clip(sget(candidate,"model"),std::max(12,width-10)).c_str(),sget(candidate,"protocol"));
         printf("  %s %s\n",ui_paint(Tone::Dim,tr("地址")).c_str(),ui_clip(sget(candidate,"base_url"),std::max(12,width-10)).c_str());
+    };
+    std::string test_error;
+    for(;;){
+        draw_confirmation();
+        if(!test_error.empty()){
+            menu_text(tr("连接测试失败。你可以保留配置并稍后测试。"));
+            menu_text(test_error.c_str());
+        }
+        int action=menu_choices(jobs,tr("\n  [1] 测试连接并保存（少量 API 用量）\n  [2] 直接保存，稍后测试\n  [0] 取消"),nullptr,2);
+        if(action<=0)return 0;
+        if(action==2||!api_check(a,candidate))break;
+        if(interrupted||input_closed)return 0;
+        test_error=a->error;
     }
-    int action=menu_choices(jobs,tr("\n  [1] 测试连接并保存（少量 API 用量）\n  [2] 直接保存，稍后测试\n  [0] 取消"),nullptr,1);
-    if(action<=0)return 0;
-    if(action==1&&api_check(a,candidate))return -1;
-    if(action==2)menu_text(tr("配置尚未联网验证。"));
     int rc=save_config(a,candidate);
     if(!rc)set_notice(tr("已保存并选用该模型。"));
     return rc;
