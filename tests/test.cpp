@@ -1649,12 +1649,31 @@ static void test_compact_approval(void){
     }
 }
 static void type_terminal(int fd,std::string &output,const std::string &text){
-    size_t used=0;double until=monotime()+12;
+    const int flags=fcntl(fd,F_GETFL);
+    CHECK(flags>=0&&fcntl(fd,F_SETFL,flags|O_NONBLOCK)==0);
+    size_t used=0;
+    const double until=monotime()+12;
     while(used<text.size()&&monotime()<until){
-        struct pollfd ready{fd,POLLIN|POLLOUT,0};CHECK(poll(&ready,1,100)>=0);
-        if(ready.revents&POLLIN){char bytes[8192];ssize_t n=read(fd,bytes,sizeof bytes);CHECK(n>0);output.append(bytes,static_cast<size_t>(n));}
-        if(ready.revents&POLLOUT){size_t count=std::min(static_cast<size_t>(128),text.size()-used);ssize_t n=write(fd,text.data()+used,count);CHECK(n>0);used+=static_cast<size_t>(n);}
+        pollfd ready{fd,POLLIN|POLLOUT,0};
+        int result=poll(&ready,1,100);
+        if(result<0&&errno==EINTR)continue;
+        CHECK(result>=0);
+        if(ready.revents&POLLIN){
+            char bytes[8192];
+            ssize_t n=read(fd,bytes,sizeof bytes);
+            if(n<0&&(errno==EAGAIN||errno==EINTR))continue;
+            CHECK(n>0);
+            output.append(bytes,static_cast<size_t>(n));
+        }
+        if(ready.revents&POLLOUT){
+            size_t count=std::min(size_t{128},text.size()-used);
+            ssize_t n=write(fd,text.data()+used,count);
+            if(n<0&&(errno==EAGAIN||errno==EINTR))continue;
+            CHECK(n>0);
+            used+=static_cast<size_t>(n);
+        }
     }
+    CHECK(fcntl(fd,F_SETFL,flags)==0);
     CHECK(used==text.size());
 }
 static void test_chat_history_scroll(){

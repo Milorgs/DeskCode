@@ -224,7 +224,7 @@ jobs:
       - name: Build and run tests
         run: |
           export PKG_CONFIG_PATH="$(brew --prefix readline)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix json-c)/lib/pkgconfig"
-          make -j4 test
+          DESK_VERBOSE_TEST=1 make -j4 test
           make test-mcp-http
           ./build/desk --version
       - name: Package Universal macOS (arm64 + x86_64) executable
