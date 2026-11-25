@@ -455,6 +455,10 @@ static char *read_input(const char *prompt,const char *fallback,bool secret,cons
             }
         }
         struct winsize previous{};ioctl(STDOUT_FILENO,TIOCGWINSZ,&previous);
+        bool hint_visible=false;
+        auto clear_hint=[&]{
+            if(hint_visible){fputs("\033[K",stdout);fflush(stdout);hint_visible=false;}
+        };
         double slash_started=0;
         while(!session.state.done&&!interrupted){
             if(idle)idle();
@@ -475,11 +479,21 @@ static char *read_input(const char *prompt,const char *fallback,bool secret,cons
                 fputs("\r\033[2K",stdout);
                 return nullptr;
             }
+            if(draft&&!rl_end&&!hint_visible){
+                const int width=terminal_columns()-ui_width(prompt)-1;
+                if(width>0){
+                    const auto hint=ui_paint(Tone::Dim,ui_clip(tr("输入 / 进入设置"),width));
+                    printf("\0337%s\0338",hint.c_str());
+                    fflush(stdout);
+                    hint_visible=true;
+                }
+            }
             struct pollfd ready{STDIN_FILENO,POLLIN,0};int rc=poll(&ready,1,50);
             if(interrupted)break;
             if(rc<0&&errno!=EINTR)break;
             struct winsize current{};
             if(!ioctl(STDOUT_FILENO,TIOCGWINSZ,&current)&&(current.ws_col!=previous.ws_col||current.ws_row!=previous.ws_row)){
+                clear_hint();
                 previous=current;
                 fputs("\r\033[2K",stdout);
                 if(idle)idle();
@@ -488,7 +502,10 @@ static char *read_input(const char *prompt,const char *fallback,bool secret,cons
                 rl_set_screen_size(current.ws_row,current.ws_col);
                 rl_forced_update_display();
             }
-            if(rc>0&&(ready.revents&(POLLIN|POLLHUP)))rl_callback_read_char();
+            if(rc>0&&(ready.revents&(POLLIN|POLLHUP))){
+                clear_hint();
+                rl_callback_read_char();
+            }
             if(draft&&!session.state.done&&!session.state.action.empty()){
                 draft->text.assign(rl_line_buffer,static_cast<size_t>(rl_end));
                 draft->cursor=rl_point;
@@ -504,6 +521,7 @@ static char *read_input(const char *prompt,const char *fallback,bool secret,cons
                 rl_replace_line("",0);rl_crlf();puts(tr("输入超过 64 KB，请缩短后重试。"));rl_on_new_line();rl_redisplay();
             }
         }
+        clear_hint();
         if(interrupted){
             if(draft){draft->text.clear();draft->cursor=0;}
             rl_replace_line("",0);rl_crlf();free(session.state.line);return nullptr;

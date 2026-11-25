@@ -1,4 +1,5 @@
 #include "win.hpp"
+#include "ui.hpp"
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -205,7 +206,8 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
         auto after=utf8(std::wstring_view(text).substr(point,last-point));
         fputs(before.c_str(),stdout);
         fputs("\0337",stdout);
-        fputs(after.c_str(),stdout);
+        if(draft&&text.empty())fputs(ui_paint(Tone::Dim,ui_clip(tr("输入 / 进入设置"),available)).c_str(),stdout);
+        else fputs(after.c_str(),stdout);
         fputs("\0338\033[?7h",stdout);
         fflush(stdout);
     };
@@ -362,6 +364,7 @@ char *editable_input(const char *prompt,const char *fallback,bool secret,const s
                     continue;
                 }
             }
+            if(draft&&text.empty())fputs("\033[K",stdout);
             putchar('\n');
             auto line=utf8(text);
             if(draft){

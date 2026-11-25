@@ -2034,6 +2034,13 @@ static void test_chat_actions_layout(){
     CHECK(terminal_until(master,output,"❯ "));
     CHECK(terminal_until(master,output,"Type / for settings"));
     output.clear();
+    type_terminal(master,output,"abc");
+    CHECK(terminal_until(master,output,"abc"));
+    CHECK(output.find("\033[K")!=std::string::npos);
+    output.clear();
+    type_terminal(master,output,"\x7f\x7f\x7f");
+    CHECK(terminal_until(master,output,"Type / for settings"));
+    output.clear();
     type_terminal(master,output,"/");
     CHECK(terminal_until(master,output,"0. Back to chat"));
     CHECK(output.find("Chat actions")<output.find("❯ 1. Select model"));
