@@ -2302,7 +2302,7 @@ static void test_conversation_picker(void){
     CHECK(terminal_until(master,output,"[1] Start chat"));
     CHECK(output.find("Imported models")!=std::string::npos);
     CHECK(output.find("2. alternate-model · 0 Token")!=std::string::npos);
-    CHECK(output.find("1. model-test · 0 Token · Current")!=std::string::npos);
+    CHECK(output.find("1. model-test · 0 Token")!=std::string::npos&&output.find(" · Current")==std::string::npos);
     type_terminal(master,output,"1\n1\n"+first+"\n");CHECK(terminal_until(master,output,"REPLY_ONE"));wait_for_chat_prompt(master,output,"REPLY_ONE");
     CHECK(write(master,"\x04",1)==1);output.clear();
     CHECK(terminal_until(master,output,"1. 整理比赛资料"));CHECK(terminal_until(master,output,"Select a number:"));
@@ -2331,11 +2331,11 @@ static void test_conversation_picker(void){
     server_done(server);CHECK(access(state_path,F_OK)!=0);
     for(int i=0;i<4;i++){
         JsonPtr request(capture(&a,i));J *body=get(request.get(),"body"),*messages=get(body,"messages");
-        CHECK(!get(body,"system"));CHECK(alen(messages)==1);
-        CHECK(!strcmp(sget(body,"model"),i>0?"alternate-model":"model-test"));
+        CHECK(!get(body,"system"));CHECK(alen(messages)==(i==2?3u:1u));
+        CHECK(!strcmp(sget(body,"model"),i%2?"alternate-model":"model-test"));
         const std::string expected[]={first,second,follow,third};
         CHECK(expected[i]==sget(at(messages,alen(messages)-1),"content"));
-        if(i==2)CHECK(follow==sget(at(messages,0),"content"));
+        if(i==2)CHECK(first==sget(at(messages,0),"content"));
     }
     child=forkpty(&master,nullptr,nullptr,nullptr);CHECK(child>=0);
     if(!child){execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
@@ -2544,10 +2544,13 @@ static void test_model_switch_requests(){
     child=forkpty(&master,nullptr,nullptr,&window);CHECK(child>=0);
     if(!child){setenv("TERM","xterm-256color",1);setenv("NO_COLOR","1",1);execl("./build/desk","desk","--lang","en","--workspace",a.root,static_cast<char *>(nullptr));_exit(127);}
     output.clear();CHECK(terminal_until(master,output,"selected-model · "));
-    CHECK(output.find("selected-model · ")!=std::string::npos&&output.find(" Token · Current")!=std::string::npos);
+    CHECK(output.find("selected-model · ")!=std::string::npos&&output.find(" Token · Current")==std::string::npos);
     type_terminal(master,output,"1\n1\nrestart work\n");CHECK(terminal_until(master,output,"RESTART_ON_SELECTED"));wait_for_chat_prompt(master,output,"RESTART_ON_SELECTED");
     leave_chat_and_exit(master);CHECK(reap_pty(master,child)==0);
     server_done(old_server);server_done(new_server);
+    App defaults{};CHECK(!store_load(&defaults));
+    CHECK(!strcmp(sget(defaults.config,"profile"),"original"));
+    app_cleanup(&defaults);
     JsonPtr old_request(capture(&a,0));CHECK(!strcmp(sget(old_request.get(),"path"),"/v1/chat/completions"));CHECK(strstr(sget(old_request.get(),"authorization"),"original-test-key"));
     const char *expected[]={"pending work","pending follow","follow work","restart work"};
     for(int i=0;i<4;i++){

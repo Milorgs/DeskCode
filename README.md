@@ -36,7 +36,7 @@
 
 ## 快速安装
 
-当前最新版本：**1.18.3**（五平台预编译包与 VS Code `.vsix`：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
+当前最新版本：**1.18.4**（五平台预编译包与 VS Code `.vsix`：[GitHub Releases](https://github.com/Milorgs/DeskCode/releases)）
 
 ### Linux (`x86_64` & `arm64`)
 
@@ -223,7 +223,7 @@ desk plugin validate ./my-plugin           # 校验插件目录结构与清单
 ```
 
 ### 6. IDE 接入与 `desk serve` 多端共享守护模式
-- **VS Code 扩展（[`editors/vscode/`](editors/vscode/README.md)）**：从 [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) 下载 `deskcode-vscode-1.18.3.vsix` 后执行 `code --install-extension deskcode-vscode-1.18.3.vsix`，即可在侧边栏使用流式对话、四档模式切换、双栏原生 Diff 审阅、权限审批以及右键「选中代码提问 / 修复当前文件报错」。
+- **VS Code 扩展（[`editors/vscode/`](editors/vscode/README.md)）**：从 [GitHub Releases](https://github.com/Milorgs/DeskCode/releases) 下载 `deskcode-vscode-1.18.4.vsix` 后执行 `code --install-extension deskcode-vscode-1.18.4.vsix`，即可在侧边栏使用流式对话、四档模式切换、双栏原生 Diff 审阅、权限审批以及右键「选中代码提问 / 修复当前文件报错」。
 - **多端共享会话守护进程（`desk serve` + `desk attach`）**：运行 `desk serve --port 7890 --notify` 打开内置 Web 控制台（`http://127.0.0.1:7890`），可在多个终端（`desk attach -p "..."`）、浏览器或移动端隧道上共享同一个实时会话并跨端点击批准。
 - **Zed / JetBrains ACP 接入**：运行 `desk acp` 启动标准 ACP v1 服务端。例如在 Zed `settings.json` 中添加：
 

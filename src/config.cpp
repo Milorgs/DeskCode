@@ -334,7 +334,7 @@ int save_config(App *a,J *c,bool clear_session){
     if(config_valid(a,c))return -1;
     const bool changed=!same_model(a->config,c);
     J *next=copy(a->store);
-    put(next,"active_profile",str(sget(c,"profile")));
+    if(a->conversation_id.empty())put(next,"active_profile",str(sget(c,"profile")));
     put(get(next,"profiles"),sget(c,"profile"),copy(c));
     if(write_store(a,next)){json_object_put(next);return -1;}
     J *selected=copy(c);

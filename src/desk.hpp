@@ -32,7 +32,7 @@
 #include <functional>
 #include <optional>
 #include <map>
-#define VERSION "1.18.3"
+#define VERSION "1.18.4"
 #define CONTEXT_LIMIT 128000
 // Large enough for real source files (roughly 6000 lines); the model context
 // trims older content separately, so the limit only guards memory per file.

@@ -387,15 +387,26 @@ static int select_model(App *a,Tasks &jobs){
     int selected=arrow_menu(jobs,options);
     if(selected<=0)return 0;
     if(selected<=count){
-        int result=activate(a,order[static_cast<size_t>(selected-1)].c_str());
+        const auto &name=order[static_cast<size_t>(selected-1)];
+        if(!a->conversation_id.empty()){
+            J *entry=get(profiles,name.c_str());
+            if(!same_model(a->config,entry)){
+                J *chosen=copy(entry);
+                json_object_put(a->config);
+                a->config=chosen;
+                a->config_revision++;
+                desktop_clear(a);
+                reset_session(a);
+            }
+            char message[512];
+            snprintf(message,sizeof message,tr("本对话已选择模型：%s"),sget(entry,"model"));
+            set_notice(message);
+            return 0;
+        }
+        int result=activate(a,name.c_str());
         if(!result){
             char message[512];snprintf(message,sizeof message,tr("已选择模型：%s（下次启动默认使用）。"),sget(a->config,"model"));
-            std::string notice=message;
-            JsonPtr states(jobs.snapshot());
-            for(size_t i=0;i<alen(states.get());i++)if(bget(at(states.get(),i),"active")){
-                notice+="\n"+std::string(tr("后续及排队需求使用新模型；正在执行的任务继续使用原模型。"));break;
-            }
-            set_notice(notice);
+            set_notice(message);
         }
         return result;
     }
@@ -654,28 +665,23 @@ static std::string conversation_title(std::string_view source,bool automatic){
 }
 static const char *title_of(const Conversation &item){return item.title.empty()?tr("新对话"):item.title.c_str();}
 
-static void sync_conversation_models(App &app,std::vector<Conversation> &items){
-    for(auto &item:items){
-        const bool changed=!same_model(item.config.get(),app.config);
-        JsonPtr updated(copy(app.config));
-        use_reasoning(updated.get(),get(item.config.get(),"reasoning_effort"));
-        item.config=std::move(updated);
-        if(!item.id.empty())persist_conversation(app,item);
-        if(changed){
-            if(item.messages)item.messages.reset(arr());
-            item.reset_context=true;
-            item.sync_messages=false;
-        }
-        for(auto &request:item.queue){
-            J *config=copy(item.config.get());
-            use_reasoning(config,get(get(request.settings.get(),"config"),"reasoning_effort"));
-            put(request.settings.get(),"config",config);
-        }
-        if(!item.queue.empty()&&item.reset_context){
-            // Only the first queued request starts a fresh model context.
-            for(size_t i=0;i<item.queue.size();i++)put(item.queue[i].settings.get(),"reset",json_object_new_boolean(i==0));
-            item.reset_context=false;
-        }
+static void sync_conversation_model(App &app,Conversation &item){
+    const bool changed=!same_model(item.config.get(),app.config);
+    use_reasoning(app.config,get(item.config.get(),"reasoning_effort"));
+    if(changed){
+        if(item.messages)item.messages.reset(arr());
+        item.reset_context=true;
+        item.sync_messages=false;
+    }
+    for(auto &request:item.queue){
+        J *config=copy(app.config);
+        use_reasoning(config,get(get(request.settings.get(),"config"),"reasoning_effort"));
+        put(request.settings.get(),"config",config);
+    }
+    if(!item.queue.empty()&&item.reset_context){
+        // Only the first queued request starts a fresh model context.
+        for(size_t i=0;i<item.queue.size();i++)put(item.queue[i].settings.get(),"reset",json_object_new_boolean(i==0));
+        item.reset_context=false;
     }
 }
 
@@ -1897,8 +1903,7 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
             if(screen&&trimmed!="/new"){screen->end_overlay();screen->controls_open=false;}
             if(conversation){
                 if(revision!=a->session_revision)conversation->reset_context=true;
-                if(config_revision!=a->config_revision)
-                    use_reasoning(a->config,get(conversation->config.get(),"reasoning_effort"));
+                if(config_revision!=a->config_revision)sync_conversation_model(*a,*conversation);
                 conversation->config.reset(copy(a->config));
                 conversation->yes=a->yes;
                 conversation->auto_edit=a->auto_edit;
@@ -1948,10 +1953,6 @@ static bool chat(App *a,Tasks &jobs,Conversation *conversation=nullptr,Conversat
         remember(custom_label.empty()?task:custom_label);
         if(run_task(a,task.c_str())&&!input_closed)fprintf(stderr,"%s\n",a->error);
     }
-}
-static void show_token_usage(J *usage,J *config){
-    if(usage)printf(tr("  累计词元（接口报告）：%s\n"),token_label(model_tokens(usage,config)).c_str());
-    else menu_text(tr("  无法读取累计词元用量。"));
 }
 // "~/Documents/x" reads better than a full home path in headers.
 static std::string display_path(const char *path){
@@ -2058,7 +2059,8 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         a->yes=item.yes;
         a->auto_edit=item.auto_edit;
         a->plan_mode=item.plan;
-        json_object_put(a->config);a->config=copy(item.config.get());
+        JsonPtr default_config(a->config);
+        a->config=copy(item.config.get());
         a->state="等待任务";
         screen.reopen(item);
         new_chat=chat(a,jobs,&item,&screen);
@@ -2073,7 +2075,8 @@ static void conversation_menu(App *a,Tasks &jobs,std::vector<Conversation> &item
         a->yes=previous_yes;
         a->auto_edit=previous_auto_edit;
         a->plan_mode=previous_plan;
-        use_reasoning(a->config,profile_reasoning(*a));
+        json_object_put(a->config);
+        a->config=default_config.release();
         std::rotate(items.begin(),selected,selected+1);
         if(interrupted==SIGTERM)return;
         // Terminal EOF closes the current chat. The selector gets a fresh input.
@@ -2105,12 +2108,7 @@ static int menu(App *a,int start_mode=0){
         conversation.yes=saved_approval?approval=="full":a->yes;
         conversation.auto_edit=saved_approval?approval=="edit":a->auto_edit;
     }
-    size_t synced_config=a->config_revision;
     jobs.on_idle=[&]{
-        if(synced_config!=a->config_revision){
-            sync_conversation_models(*a,conversations);
-            synced_config=a->config_revision;
-        }
         advance_conversations(jobs,conversations);
     };
     if(start_mode)conversation_menu(a,jobs,conversations,start_mode);
@@ -2119,7 +2117,6 @@ static int menu(App *a,int start_mode=0){
         JsonPtr usage(load_tokens(*a));
         J *profiles=get(a->store,"profiles");
         const char *active_model=sget(a->config,"model");
-        const char *active_profile=sget(a->config,"profile");
         const bool first_run=!json_object_object_length(profiles)&&!*active_model;
         std::string current_notice=notice;
         notice.clear();
@@ -2129,43 +2126,15 @@ static int menu(App *a,int start_mode=0){
             show_notice();
             if(!current_notice.empty())puts(current_notice.c_str());
             menu_text(tr("  已导入的模型"));
-            bool active_listed=false;
             if(!json_object_object_length(profiles))menu_text(tr("    暂无已导入的模型"));
-            else{
-                size_t index=1;
-                json_object_object_foreach(profiles,name,profile){
-                    const char *model=sget(profile,"model");
-                    bool current=*active_model&&!strcmp(name,active_profile)&&!strcmp(model,active_model);
-                    if(env_value("DESK_CONTRAST_NUMBERS")){
-                        const Tone tone=current?Tone::Accent:Tone::Plain;
-                        std::string row="    "+ui_number(std::to_string(index++)+".",tone)
-                            +ui_paint(tone," "+std::string(model),!current);
-                        if(usage){
-                            row+=ui_paint(tone," · ");
-                            row+=ui_number(token_label(model_tokens(usage.get(),profile)),tone);
-                            row+=ui_paint(tone,tr(" 词元"),!current);
-                        }
-                        if(current)row+=ui_paint(tone,tr(" · 当前"));
-                        puts(row.c_str());
-                        if(current)active_listed=true;
-                        continue;
-                    }
-                    char row[640];
-                    int used=snprintf(row,sizeof row,"    %zu. %s",index++,model);
-                    if(usage&&used>0&&used<(int)sizeof row)used+=snprintf(row+used,sizeof row-(size_t)used,tr(" · %s 词元"),token_label(model_tokens(usage.get(),profile)).c_str());
-                    if(current&&used>0&&used<(int)sizeof row)snprintf(row+used,sizeof row-(size_t)used,"%s",tr(" · 当前"));
-                    // The active profile reads as accent; the rest stay quiet.
-                    puts(current?ui_paint(Tone::Accent,row).c_str():ui_paint(Tone::Dim,row).c_str());
-                    if(current)active_listed=true;
-                }
+            size_t index=1;
+            json_object_object_foreach(profiles,name,profile){
+                (void)name;
+                std::string row="    "+ui_number(std::to_string(index++)+".")+" "+sget(profile,"model");
+                if(usage)row+=" · "+token_label(model_tokens(usage.get(),profile))+tr(" 词元");
+                puts(row.c_str());
             }
-            if(!active_listed){
-                if(*active_model){
-                    printf(tr("  当前模型：%s\n"),active_model);
-                    show_token_usage(usage.get(),a->config);
-                }else menu_text(tr("  当前模型：未配置"));
-            }
-            if(!usage&&(active_listed||!*active_model))menu_text(tr("  无法读取累计词元用量。"));
+            if(!usage)menu_text(tr("  无法读取累计词元用量。"));
             if(first_run){
                 putchar('\n');
                 const int columns=terminal_columns();
